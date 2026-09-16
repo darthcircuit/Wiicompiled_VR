@@ -8,6 +8,89 @@
 namespace aurora::gfx::stereo_replay {
 namespace {
 
+TEST(StereoReplayTest, SplitFurnitureIsRecognizedInFullDisplayCoordinates) {
+  const SubviewRect display{16.f, 8.f, 1280.f, 912.f};
+  for (uint32_t players : {2u, 3u, 4u}) {
+    EXPECT_TRUE(is_split_screen_furniture({16.f, 462.f, 1280.f, 4.f}, display, players));
+    EXPECT_FALSE(is_split_screen_furniture(display, display, players));                   // Race fade.
+    EXPECT_FALSE(is_split_screen_furniture({80.f, 60.f, 100.f, 40.f}, display, players)); // HUD backing.
+    EXPECT_FALSE(is_split_screen_furniture(player_one_region(display, players), display, players));
+  }
+  EXPECT_TRUE(is_split_screen_furniture({16.f, 464.f, 1280.f, 456.f}, display, 2));
+  for (uint32_t players : {3u, 4u}) {
+    EXPECT_TRUE(is_split_screen_furniture({656.f, 8.f, 0.f, 912.f}, display, players));
+    EXPECT_TRUE(is_split_screen_furniture({658.f, 10.f, 636.f, 452.f}, display, players));
+    EXPECT_TRUE(is_split_screen_furniture({16.f, 464.f, 640.f, 456.f}, display, players));
+    EXPECT_TRUE(is_split_screen_furniture({656.f, 464.f, 640.f, 456.f}, display, players));
+  }
+  EXPECT_FALSE(is_split_screen_furniture({656.f, 8.f, 640.f, 456.f}, display, 1));
+  EXPECT_FALSE(is_split_screen_furniture({656.f, 8.f, 0.f, 912.f}, display, 2));
+}
+
+TEST(StereoReplayTest, PartitionLineLayoutPanesAreFurniture) {
+  // MKW's partition_line.brlyt draws yoko_line (800x1) and tate_line (1x800)
+  // picture panes centred on the display; both extend past a 4:3 root and are
+  // clipped by the display copy, so only the centre line and thickness matter.
+  const SubviewRect display{0.f, 0.f, 893.f, 456.f};
+  const SubviewRect yoko{46.5f, 227.5f, 800.f, 1.f};
+  const SubviewRect tate{446.f, -172.f, 1.f, 800.f};
+  EXPECT_TRUE(is_split_screen_furniture(yoko, display, 2));
+  EXPECT_FALSE(is_split_screen_furniture(tate, display, 2));
+  for (uint32_t players : {3u, 4u}) {
+    EXPECT_TRUE(is_split_screen_furniture(yoko, display, players));
+    EXPECT_TRUE(is_split_screen_furniture(tate, display, players));
+  }
+  // A textured pane of the same shape elsewhere is HUD art, not furniture.
+  EXPECT_FALSE(is_split_screen_furniture({46.5f, 100.f, 800.f, 1.f}, display, 2));
+  EXPECT_FALSE(is_split_screen_furniture({46.5f, 227.5f, 300.f, 1.f}, display, 2));
+}
+
+TEST(StereoReplayTest, MultiplayerSelectsOnlyPlayerOneWorld) {
+  const SubviewRect display{12.f, 8.f, 640.f, 456.f};
+  for (uint32_t count : {2u, 3u, 4u}) {
+    const auto player = player_one_region(display, count);
+    EXPECT_FLOAT_EQ(player.left, display.left);
+    EXPECT_FLOAT_EQ(player.top, display.top);
+    EXPECT_FLOAT_EQ(player.width, count == 2 ? 640.f : 320.f);
+    EXPECT_FLOAT_EQ(player.height, 228.f);
+    EXPECT_TRUE(replay_player_one_draw(player, player, true, false));
+    auto opponent = player;
+    opponent.top += player.height;
+    EXPECT_FALSE(replay_player_one_draw(opponent, player, true, false));
+    EXPECT_FALSE(replay_player_one_draw(opponent, player, false, false));
+    if (count >= 3) {
+      opponent = player;
+      opponent.left += player.width;
+      EXPECT_FALSE(replay_player_one_draw(opponent, player, true, false));
+      EXPECT_FALSE(replay_player_one_draw(opponent, player, false, false));
+      opponent.top += player.height; // P4 / unused fourth quadrant in 3P.
+      EXPECT_FALSE(replay_player_one_draw(opponent, player, true, false));
+    }
+    EXPECT_FALSE(replay_player_one_draw(display, player, true, false));
+    EXPECT_TRUE(replay_player_one_draw(display, player, false, false));
+    EXPECT_FALSE(replay_player_one_draw(player, player, false, true));
+    EXPECT_FALSE(replay_player_one_draw(display, player, false, true));
+    const auto remap = make_hud_ndc_remap(player.left, player.top, player.width, player.height, player.left, player.top,
+                                          player.width, player.height);
+    EXPECT_FLOAT_EQ(remap.scaleX, 1.f);
+    EXPECT_FLOAT_EQ(remap.scaleY, 1.f);
+    EXPECT_FLOAT_EQ(remap.offsetX, 0.f);
+    EXPECT_FLOAT_EQ(remap.offsetY, 0.f);
+  }
+  const auto single = player_one_region(display, 1);
+  EXPECT_FLOAT_EQ(single.width, display.width);
+  EXPECT_FLOAT_EQ(single.height, display.height);
+}
+
+TEST(StereoReplayTest, MultiplayerRejectsEmptyAndNonOverlappingScissors) {
+  const SubviewRect player{0.f, 0.f, 320.f, 228.f};
+  EXPECT_FALSE(subviews_overlap(player, {320.f, 0.f, 320.f, 228.f}));
+  EXPECT_FALSE(subviews_overlap(player, {0.f, 228.f, 640.f, 228.f}));
+  EXPECT_FALSE(subviews_overlap(player, {10.f, 10.f, 0.f, 10.f}));
+  EXPECT_TRUE(subviews_overlap(player, {10.f, 10.f, 20.f, 20.f}));
+  EXPECT_TRUE(subview_contains(player, {0.f, -0.5f, 320.f, 228.f}));
+}
+
 TEST(StereoReplayTest, EyeFrustumPreservesGameDepthMapping) {
   const Mat4x4<float> game{
       {10.0f, 11.0f, 12.0f, 13.0f},

@@ -2269,6 +2269,71 @@ TEST_F(GXFifoTest, MergedDrawOffsetsCachedTopologyWithoutJoiningPrimitives) {
   EXPECT_EQ(aurora::gfx::testing::last_pushed_indices(), (std::vector<u16>{3, 4, 5}));
 }
 
+TEST_F(GXFifoTest, OrthographicQuadRecordsScreenRectForVrFurniture) {
+  // MKW draws its split-screen partition with the partition_line layout: a
+  // one-pixel picture pane sampling a pattern texture in a full-display
+  // orthographic viewport. VR replay drops it by its recorded screen
+  // rectangle. This covers the FIFO decode of that rectangle. The harness
+  // stubs populate_pipeline_config, so whether texture use disqualifies a
+  // rectangle is exercised by stereo_multiplayer_smoke instead.
+  aurora::gfx::testing::use_real_vertex_format_helpers(true);
+  aurora::gfx::testing::use_draw_command_tracking(true);
+
+  aurora::Mat4x4<float> proj{};
+  proj.m0[0] = 2.0f / 640.0f;
+  proj.m0[3] = -1.0f;
+  proj.m1[1] = 2.0f / 480.0f;
+  proj.m1[3] = -1.0f;
+  proj.m2[2] = -1.0f;
+  proj.m3[3] = 1.0f;
+  GXSetProjection(&proj, GX_ORTHOGRAPHIC);
+  GXSetViewport(0.0f, 0.0f, 640.0f, 480.0f, 0.0f, 1.0f);
+  GXSetScissor(0, 0, 640, 480);
+  aurora::Mat3x4<float> identity{};
+  identity.m0[0] = identity.m1[1] = identity.m2[2] = 1.0f;
+  GXLoadPosMtxImm(&identity, GX_PNMTX0);
+  GXSetCurrentMtx(GX_PNMTX0);
+
+  GXClearVtxDesc();
+  GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+  GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+  GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+  GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+  GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+  GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+  GXSetNumChans(1);
+  GXSetNumTexGens(1);
+  GXSetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY);
+  GXSetNumTevStages(1);
+  GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+  GXSetTevOp(GX_TEVSTAGE0, GX_MODULATE);
+  alignas(32) static const u8 pattern[8 * 8 * 2]{};
+  GXTexObj obj{};
+  GXInitTexObj(&obj, pattern, 8, 8, GX_TF_RGB565, GX_CLAMP, GX_CLAMP, GX_FALSE);
+  GXLoadTexObj(&obj, GX_TEXMAP0);
+
+  // yoko_line: full width, one pixel tall, centred vertically.
+  const float corners[4][2]{{0.0f, 239.5f}, {640.0f, 239.5f}, {640.0f, 240.5f}, {0.0f, 240.5f}};
+  GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+  for (const auto& corner : corners) {
+    GXPosition3f32(corner[0], corner[1], 0.0f);
+    GXColor4u8(0, 0, 0, 255);
+    GXTexCoord2f32(corner[0] / 640.0f, corner[1] > 240.0f ? 1.0f : 0.0f);
+  }
+  GXEnd();
+  decode_fifo(flush_and_capture());
+
+  const auto* draw = aurora::gfx::get_last_draw_command<aurora::gx::DrawData>();
+  ASSERT_NE(draw, nullptr);
+  ASSERT_TRUE(draw->screenRect.has_value());
+  EXPECT_NEAR(draw->screenRect->left, 0.0f, 0.01f);
+  EXPECT_NEAR(draw->screenRect->top, 239.5f, 0.01f);
+  EXPECT_NEAR(draw->screenRect->width, 640.0f, 0.01f);
+  EXPECT_NEAR(draw->screenRect->height, 1.0f, 0.01f);
+  EXPECT_TRUE(
+      aurora::gfx::stereo_replay::is_split_screen_furniture(*draw->screenRect, {0.0f, 0.0f, 640.0f, 480.0f}, 2));
+}
+
 TEST_F(GXFifoTest, TexBufferSize_UsesExactLinearPcFormatSizes) {
   EXPECT_EQ(GXGetTexBufferSize(8, 4, GX_TF_R8_PC, GX_FALSE, 0), 32u);
   EXPECT_EQ(GXGetTexBufferSize(8, 4, GX_TF_RGBA8_PC, GX_FALSE, 0), 128u);

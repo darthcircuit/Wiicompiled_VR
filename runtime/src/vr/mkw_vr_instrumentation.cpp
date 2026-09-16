@@ -168,7 +168,9 @@ extern "C" void MkwVRObserveTranslatedFunctionEntry(uint32_t address,
     case kRaceCameraUpdate: {
         const uint32_t camera_address = context != nullptr ? context->gpr[3] : 0;
         ObserveCamera(frame, camera_address);
-        PublishObservedCamera(frame, camera_address);
+        if (camera_address == FirstCamera(frame)) {
+            PublishObservedCamera(frame, camera_address);
+        }
         break;
     }
     case kScnMgrRaceDraw: {

@@ -147,8 +147,9 @@ extern "C" void GX__CopyTex_8016fd74(uint32_t da, uint32_t c) {
     // EFB exactly once, matching Dolphin's ConvertEFBRectangle path.
     GXSetTexCopySrc(rawSrcLeft, rawSrcTop, rawSrcWidth, rawSrcHeight);
     // EFB copies stay GPU-only except probe-sized ones (e.g. the 4x4 lens-flare depth probe),
-    // which Aurora reads back asynchronously via efb_ram::schedule and land in guest RAM a frame
-    // later. RISK: copies above the probe threshold, or on the offscreen list, are not
+    // which Aurora reads back asynchronously and publishes during the next copy to that buffer.
+    // GPU callbacks retain pixels in host memory so a scene restart cannot receive a late write
+    // into a freed/reused allocation. RISK: copies above the probe threshold, or on the offscreen list, are not
     // auto-downloaded, so guest reads see stale RAM; call aurora_flush_efb_copies_to_ram if a
     // copy needs reading back.
     GXCopyTex(GuestToHostPtr(da), (GXBool)c);

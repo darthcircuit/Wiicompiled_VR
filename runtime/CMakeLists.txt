@@ -356,6 +356,14 @@ target_include_directories(mkw_vr_player_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR
 target_compile_features(mkw_vr_player_tests PRIVATE cxx_std_17)
 add_test(NAME mkw_vr_player_tests COMMAND mkw_vr_player_tests)
 
+add_executable(mkw_vr_policy_tests tests/vr_policy_tests.cpp src/vr/mkw_vr_policy.cpp)
+target_include_directories(mkw_vr_policy_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
+target_compile_features(mkw_vr_policy_tests PRIVATE cxx_std_17)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(mkw_vr_policy_tests PRIVATE -ffast-math)
+endif()
+add_test(NAME mkw_vr_policy_tests COMMAND mkw_vr_policy_tests)
+
 if(MKW_ENABLE_OPENXR AND MKW_PLATFORM_WINDOWS)
     add_executable(mkw_openxr_replay_tests
         tests/openxr_d3d12_replay_tests.cpp src/vr/openxr_d3d12.cpp)

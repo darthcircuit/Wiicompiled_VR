@@ -66,6 +66,30 @@ image is chosen, so the setting can always be changed back.
 Eye mirror modes retain the last eye image when a desktop frame has no new XR packet, so they
 do not alternate with the normal camera. `"none"` also stays black between XR packets.
 
+## Local multiplayer
+
+During 2-, 3-, and 4-player races, the headset replays Player 1's world in immersive stereo
+with head tracking. Keep **F10 > VR > Desktop view** set to **Normal** (`mirror_view = "normal"`)
+for the original desktop split-screen layout. No extra multiplayer switch is required.
+Menus continue to use the virtual screen.
+
+Only headset replay filters the other players' viewports and expands Player 1 to each eye.
+The desktop split-screen partition (the game's `partition_line` layout, one-pixel textured
+picture panes on the split boundaries) and full masks of the other panes are omitted from
+the eyes; the desktop image keeps them.
+Player-local HUD viewports follow Player 1; shared orthographic overlays keep their full-screen
+layout on the virtual screen. Framebuffer effects that sample the desktop split-screen image
+are omitted from multiplayer eyes, since those textures contain the other cameras too.
+The local-screen count is sealed with each frame, including retained VR interpolation frames,
+and a layout change invalidates older XR packets.
+
+Multiplayer uses Player 1's game camera. The optional first-person relocation and model hiding
+remain single-player-only: guest model visibility changes would also affect the desktop players.
+
+The opt-in `stereo_multiplayer_smoke` D3D12 test reads back both eye images and the desktop EFB
+for 1/2/3/4/1-screen transitions with VR interpolation on and off. Actual headset racing still
+needs visual validation for course effects, HUD layout, pause/resume, and scene transitions.
+
 **F10 > VR > VR frame interpolation (experimental)** offers **Off, Auto, 72, 90, 120** and
 applies immediately. `frame_interpolation_fps` stores `0` for Off (the default), `1` for Auto,
 or the selected rate. The earlier `frame_interpolation = true` checkbox migrates to Auto.
@@ -239,6 +263,13 @@ a workaround. It accepts a future explicit Dawn native context, including extern
 so it can be enabled once Aurora exposes those handles safely.
 
 ### Interpolation validation
+
+Probe-sized EFB readbacks retain completed pixels in host memory and publish them only inside
+the next compatible `GXCopyTex` call. GPU completion callbacks must not write to guest RAM:
+a race restart can reuse a freed probe buffer for `RaceCamera`, and a late 4x4 Z24X8 tile then
+turns its rotation fields into NaNs and triggers `triangular.h` / `PPCHalt`.
+The optional Windows GPU test `efb_ram_lifetime_smoke` exercises that allocation reuse and
+format/size changes. It fails with the former callback write and passes with deferred publication.
 
 The GX tests cover retained transform endpoints with desktop interpolation off and continuous
 sampling at 72/90/120 Hz. `mkw_frame_interpolation_pacing_tests` covers fixed-rate scheduling,

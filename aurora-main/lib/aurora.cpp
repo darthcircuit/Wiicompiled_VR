@@ -100,11 +100,13 @@ struct StereoSceneAnchor {
       0.f, 0.f, 1.f, 0.f,
   };
   bool active = false;
+  uint32_t localPlayerCount = 1;
 };
 // Producer thread only, between aurora_set_stereo_scene_anchor() and the seal
 // that consumes it. Cleared at every seal so a producer that stops publishing
 // falls back to the recorded camera instead of freezing on a stale anchor.
 StereoSceneAnchor g_pendingSceneAnchor;
+uint32_t g_pendingStereoLocalPlayerCount = 1;
 
 using PresentClock = std::chrono::steady_clock;
 
@@ -1762,6 +1764,7 @@ void seal_frame_locked(gfx::SealedFrame& sealedFrame, SealedFrameContext& ctx, u
   // current_frame() advances inside gfx::end_frame; unsigned wrap maps the
   // pre-first-frame UINT32_MAX value to logical frame zero.
   ctx.logicalFrame = gfx::current_frame() + 1;
+  gfx::set_stereo_local_player_count(sceneAnchor.localPlayerCount);
   if (const auto stereoInput = request_stereo_frame(ctx.logicalFrame, contentTag)) {
     ctx.stereoInput = stereoInput;
     ctx.stereoFrameToken = stereoInput->frameToken;
@@ -2246,7 +2249,9 @@ void end_frame(uint64_t contentTag) noexcept {
 #endif
   // Claim the anchor published for this frame. Clearing it here is what makes a
   // producer that stops publishing fall back to the recorded camera.
-  const StereoSceneAnchor sceneAnchor = g_pendingSceneAnchor;
+  StereoSceneAnchor sceneAnchor = g_pendingSceneAnchor;
+  sceneAnchor.localPlayerCount = g_pendingStereoLocalPlayerCount;
+  g_pendingStereoLocalPlayerCount = 1;
   g_pendingSceneAnchor = {};
   if (!frame_worker_requested()) {
     end_frame_impl(true, true, contentTag, sceneAnchor);
@@ -2377,6 +2382,9 @@ void aurora_end_frame() { aurora::end_frame(AURORA_STEREO_CONTENT_TAG_UNKNOWN); 
 void aurora_end_frame_tagged(uint64_t contentTag) { aurora::end_frame(contentTag); }
 void aurora_set_stereo_scene_anchor(const float anchorFromScene[12]) {
   aurora::set_stereo_scene_anchor(anchorFromScene);
+}
+void aurora_set_stereo_local_player_count(uint32_t count) {
+  aurora::g_pendingStereoLocalPlayerCount = count >= 1 && count <= 4 ? count : 1;
 }
 void aurora_set_frame_worker_wait_callback(AuroraFrameWorkerWaitCallback callback) {
   aurora::g_frameWorkerWaitCallback.store(callback, std::memory_order_release);

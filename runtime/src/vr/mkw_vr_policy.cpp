@@ -86,12 +86,13 @@ VRPresentationMode SelectPresentation(const PolicyState& state) noexcept {
         return VRPresentationMode::Desktop;
     }
 
-    // A virtual screen is the fail-safe for menus, split-screen, and any
+    // A virtual screen is the fail-safe for menus and any
     // incomplete instrumentation. It preserves the unmodified render path.
     if ((state.available_bindings & kMkwVRRequiredImmersiveBindings) !=
         kMkwVRRequiredImmersiveBindings ||
         !state.config.immersive_races || state.scene.mode != VRSceneMode::Race ||
-        state.scene.local_player_count != 1 || !IsFiniteCamera(state.camera) ||
+        (state.scene.local_player_count < 1 || state.scene.local_player_count > 4) ||
+        !IsFiniteCamera(state.camera) ||
         !ObservationsAreCoherent(state.scene, state.camera)) {
         return VRPresentationMode::VirtualScreen;
     }
@@ -111,7 +112,8 @@ VRPresentationMode SelectStablePresentation(const PolicyState& state) noexcept {
     if ((state.available_bindings & kMkwVRRequiredImmersiveBindings) !=
             kMkwVRRequiredImmersiveBindings ||
         !state.config.immersive_races || state.scene.mode != VRSceneMode::Race ||
-        state.scene.local_player_count != 1 || !IsFiniteCamera(state.camera)) {
+        (state.scene.local_player_count < 1 || state.scene.local_player_count > 4) ||
+        !IsFiniteCamera(state.camera)) {
         return VRPresentationMode::VirtualScreen;
     }
 
@@ -211,6 +213,11 @@ void MkwVRPolicySetAvailableBindings(uint32_t bindings) noexcept {
 
 void MkwVRPolicyPublishScene(const MkwVRSceneObservation& scene) noexcept {
     std::lock_guard<std::mutex> lock(g_policy_mutex);
+    // A packet for a different split layout must not consume retained content,
+    // even when both layouts use immersive presentation.
+    if (scene.local_player_count != g_policy.scene.local_player_count) {
+        AdvanceSafetyGeneration(g_policy);
+    }
     ApplyPolicyMutation([&] {
         if (scene.mode != VRSceneMode::Race || g_policy.scene.mode != VRSceneMode::Race) {
             // Never carry a camera sample across a menu/replay-to-race transition.

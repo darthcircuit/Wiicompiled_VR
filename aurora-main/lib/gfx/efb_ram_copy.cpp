@@ -60,7 +60,6 @@ struct AsyncSlot {
   uint64_t bufferSize = 0;
   uint32_t bytesPerRow = 0;
   // Latched at encode time and read by the map callback.
-  void* dest = nullptr;
   GXTexFmt format = GX_TF_RGBA8;
   uint32_t width = 0;
   uint32_t height = 0;
@@ -68,6 +67,14 @@ struct AsyncSlot {
   uint32_t hostHeight = 0;
   HostPixelOrder order = HostPixelOrder::RGBA;
   AsyncState state = AsyncState::Idle;
+  // A guest address is not an allocation lifetime: a scene restart can reuse a
+  // probe buffer for a camera before this slot's GPU work completes. Callbacks
+  // therefore retain results here; only a new schedule() may publish to RAM.
+  std::array<uint8_t, kAsyncReadbackMaxBytes> completedData{};
+  GXTexFmt completedFormat = GX_TF_RGBA8;
+  uint32_t completedWidth = 0;
+  uint32_t completedHeight = 0;
+  size_t completedSize = 0;
 };
 
 std::vector<PendingCopy> g_pending;
@@ -138,17 +145,18 @@ void complete_async_slot(void* dest, wgpu::MapAsyncStatus status, wgpu::StringVi
   if (status == wgpu::MapAsyncStatus::Success) {
     const auto* pixels = static_cast<const uint8_t*>(slot.buffer.GetConstMappedRange(0, slot.bufferSize));
     if (pixels != nullptr) {
-      // Writes guest RAM from the event-queue thread while the guest may be reading it. The only
-      // consumer min/maxes depth for a fade factor, so a torn tile just mixes two frames' depths.
       const size_t outputSize = encoded_size(slot.format, slot.width, slot.height);
-      if (!encode(slot.dest, outputSize, slot.format, slot.width, slot.height, pixels, slot.hostWidth, slot.hostHeight,
-                  slot.bytesPerRow, slot.order)) {
+      if (!encode(slot.completedData.data(), slot.completedData.size(), slot.format, slot.width, slot.height, pixels,
+                  slot.hostWidth, slot.hostHeight, slot.bytesPerRow, slot.order)) {
+        slot.completedSize = 0;
         Log.error("Failed to encode async EFB RAM copy format=0x{:x} size={}x{}", static_cast<unsigned>(slot.format),
                   slot.width, slot.height);
+      } else {
+        slot.completedFormat = slot.format;
+        slot.completedWidth = slot.width;
+        slot.completedHeight = slot.height;
+        slot.completedSize = outputSize;
       }
-      // Guest RAM written from outside the embedder, so nothing bumps its write generation and a
-      // texture cached over this range would keep its digest.
-      notify_guest_write(slot.dest, outputSize);
     }
     slot.buffer.Unmap();
   } else if (status != wgpu::MapAsyncStatus::CallbackCancelled && status != wgpu::MapAsyncStatus::Aborted) {
@@ -201,11 +209,21 @@ void schedule(void* dest, uint32_t width, uint32_t height, GXTexFmt format, Text
         async = false;
       } else {
         g_asyncSlots.try_emplace(dest);
-        // No readback has landed here yet. 0xff decodes to far Z, which the probe reads as unobstructed
-        // so a new flare fades in; zero-filled RAM would decode as fully occluded.
-        std::memset(dest, 0xff, encodedSize);
-        notify_guest_write(dest, encodedSize);
       }
+    }
+    if (async) {
+      const auto& slot = g_asyncSlots.at(dest);
+      // schedule runs on the producer inside GXCopyTex, while this destination
+      // is owned by the copy. Never let a later GPU callback write to it.
+      if (slot.completedSize == encodedSize && slot.completedFormat == format && slot.completedWidth == width &&
+          slot.completedHeight == height) {
+        std::memcpy(dest, slot.completedData.data(), encodedSize);
+      } else {
+        // No compatible result yet. Far Z makes a new flare fade in instead
+        // of treating uninitialized RAM as a fully occluded probe.
+        std::memset(dest, 0xff, encodedSize);
+      }
+      notify_guest_write(dest, encodedSize);
     }
   }
 
@@ -395,7 +413,6 @@ void encode_async_downloads(const wgpu::CommandEncoder& encoder) noexcept {
     };
     encoder.CopyTextureToBuffer(&source, &destination, &texture->size);
     slot.bytesPerRow = bytesPerRow;
-    slot.dest = pending.dest;
     slot.format = pending.format;
     slot.width = pending.width;
     slot.height = pending.height;

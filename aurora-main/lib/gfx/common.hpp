@@ -316,6 +316,8 @@ struct StereoReplayFrame {
 };
 
 void end_frame(const wgpu::CommandEncoder& cmd);
+// Set under the renderer mutex immediately before preparing/sealing the frame.
+void set_stereo_local_player_count(uint32_t count) noexcept;
 // Prepares eye-specific uniform copies before unmapping the staging buffer.
 // Returns false without modifying the mono path when the uniform buffer has
 // insufficient room for the additional copies.

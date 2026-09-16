@@ -7,6 +7,14 @@ if (AURORA_GPU_SMOKE_TESTS AND AURORA_ENABLE_GX AND WIN32)
   target_include_directories(stereo_frame_worker_smoke PRIVATE ../lib)
   target_link_libraries(stereo_frame_worker_smoke PRIVATE aurora::core aurora::gx aurora::main aurora::vi
                         dawn::dawncpp_headers)
+  add_executable(stereo_multiplayer_smoke stereo_multiplayer_smoke.cpp)
+  target_include_directories(stereo_multiplayer_smoke PRIVATE ../lib)
+  target_link_libraries(stereo_multiplayer_smoke PRIVATE aurora::core aurora::gx aurora::main aurora::vi
+                        dawn::dawncpp_headers)
+  add_executable(efb_ram_lifetime_smoke efb_ram_lifetime_smoke.cpp)
+  target_include_directories(efb_ram_lifetime_smoke PRIVATE ../lib)
+  target_link_libraries(efb_ram_lifetime_smoke PRIVATE aurora::core aurora::gx aurora::main aurora::vi
+                        dawn::dawncpp_headers)
 endif ()
 
 if (NOT TARGET gtest)

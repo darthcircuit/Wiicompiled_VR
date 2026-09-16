@@ -236,6 +236,10 @@ void aurora_end_frame_tagged(uint64_t contentTag);
  * provider, which cannot know which frame will consume its packet.
  */
 void aurora_set_stereo_scene_anchor(const float anchorFromScene[12]);
+// Select Player 1's subview for immersive replay of 2-4 local screens.
+// Producer-thread, per-frame metadata, consumed by the next end_frame call.
+// One (the default) keeps full-frame replay. Desktop rendering is unaffected.
+void aurora_set_stereo_local_player_count(uint32_t count);
 typedef void (*AuroraFrameWorkerWaitCallback)();
 // Called from the producer thread at bounded intervals while Aurora waits for
 // the asynchronous frame worker. The callback must not enter Aurora.

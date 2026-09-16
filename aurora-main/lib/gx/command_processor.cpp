@@ -1861,7 +1861,7 @@ static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
 
 static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange,
                                  uint16_t usedPnMtxMask, HashType matrixTopologySignature, HashType geometrySignature,
-                                 bool interpolationIdentityActive);
+                                 bool interpolationIdentityActive, const uint8_t* vertices, uint32_t vtxStride);
 
 // The per-draw geometry signature, matrix-usage mask and draw-identity hashes exist purely to feed frame interpolation
 // (build_uniform consumes them only after its `frame_interpolation_fps() == 0` early-out).
@@ -1889,6 +1889,104 @@ static uint32_t matrix_index_prefix_size(GXVtxFmt fmt) noexcept {
     }
   }
   return size;
+}
+
+// Screen-space bounds of a simple orthographic rectangle or line, textured or
+// not: MKW's split-screen partition is a layout picture pane (a one-pixel quad
+// sampling a pattern texture), so texture use cannot disqualify a candidate.
+// The geometry rules in is_split_screen_furniture keep HUD art visible.
+static std::optional<gfx::stereo_replay::SubviewRect> screen_rect(GXPrimitive prim, GXVtxFmt fmt,
+                                                                  const uint8_t* vertices, uint16_t count,
+                                                                  uint32_t stride) noexcept {
+  if (!aurora::stereo_frame_provider_active() || g_gxState.projType != GX_ORTHOGRAPHIC ||
+      !((count == 4 && (prim == GX_QUADS || prim == GX_TRIANGLESTRIP || prim == GX_TRIANGLEFAN)) ||
+        (count == 2 && prim == GX_LINES)))
+    return {};
+  const auto& projection = g_gxState.proj;
+  if (!gfx::stereo_replay::is_orthographic_projection(projection))
+    return {};
+  const auto& attr = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
+  const uint32_t components = attr.cnt == GX_POS_XY ? 2 : 3;
+  const uint32_t componentBytes = comp_type_size(GX_VA_POS, attr.type);
+  if (componentBytes == 0)
+    return {};
+  const uint32_t offset = matrix_index_prefix_size(fmt);
+  std::array<std::array<float, 2>, 4> points{};
+  float left = INFINITY, top = INFINITY, right = -INFINITY, bottom = -INFINITY;
+  for (uint32_t i = 0; i < count; ++i) {
+    const auto* vertex = vertices + i * stride;
+    const auto* position = vertex + offset;
+    bool bigEndian = true;
+    const auto type = g_gxState.vtxDesc[GX_VA_POS];
+    if (type == GX_INDEX8 || type == GX_INDEX16) {
+      const uint32_t index = type == GX_INDEX8 ? *position : read_u16(position, true);
+      const auto& array = g_gxState.arrays[GX_VA_POS];
+      const size_t start = size_t(index) * array.stride;
+      if (array.data == nullptr || start + components * componentBytes > array.size)
+        return {};
+      position = static_cast<const uint8_t*>(array.data) + start;
+      bigEndian = !array.le;
+    } else if (type != GX_DIRECT || offset + components * componentBytes > stride) {
+      return {};
+    }
+    std::array<float, 3> point{};
+    for (uint32_t c = 0; c < components; ++c) {
+      const auto* value = position + c * componentBytes;
+      switch (attr.type) {
+      case GX_U8:
+        point[c] = *value;
+        break;
+      case GX_S8:
+        point[c] = static_cast<int8_t>(*value);
+        break;
+      case GX_U16:
+        point[c] = read_u16(value, bigEndian);
+        break;
+      case GX_S16:
+        point[c] = static_cast<int16_t>(read_u16(value, bigEndian));
+        break;
+      case GX_F32:
+        point[c] = read_f32(value, bigEndian);
+        break;
+      default:
+        return {};
+      }
+      if (attr.type != GX_F32)
+        point[c] = std::ldexp(point[c], -int(attr.frac));
+    }
+    const uint32_t matrixIndex =
+        g_gxState.vtxDesc[GX_VA_PNMTXIDX] == GX_DIRECT ? vertex[0] / 3u : g_gxState.currentPnMtx;
+    if (matrixIndex >= g_gxState.pnMtx.size())
+      return {};
+    const auto& matrix = g_gxState.pnMtx[matrixIndex].pos;
+    const auto transform = [](const Vec4<float>& row, const std::array<float, 3>& p) {
+      return row[0] * p[0] + row[1] * p[1] + row[2] * p[2] + row[3];
+    };
+    const std::array<float, 3> view{transform(matrix.m0, point), transform(matrix.m1, point),
+                                    transform(matrix.m2, point)};
+    const auto& vp = g_gxState.renderViewport;
+    const float x = vp.left + (transform(projection.m0, view) + 1.f) * vp.width * 0.5f;
+    const float y = vp.top + (1.f - transform(projection.m1, view)) * vp.height * 0.5f;
+    if (!std::isfinite(x) || !std::isfinite(y))
+      return {};
+    points[i] = {x, y};
+    left = std::min(left, x);
+    right = std::max(right, x);
+    top = std::min(top, y);
+    bottom = std::max(bottom, y);
+  }
+  // A diagonal/rotated HUD polygon's bounding box is not a screen mask.
+  uint32_t corners = 0;
+  for (uint32_t i = 0; i < count; ++i) {
+    const auto& p = points[i];
+    if ((std::abs(p[0] - left) > 0.01f && std::abs(p[0] - right) > 0.01f) ||
+        (std::abs(p[1] - top) > 0.01f && std::abs(p[1] - bottom) > 0.01f))
+      return {};
+    corners |= 1u << ((std::abs(p[0] - right) < 0.01f ? 1 : 0) + (std::abs(p[1] - bottom) < 0.01f ? 2 : 0));
+  }
+  if ((count == 4 && corners != 15) || (count == 2 && right - left > 0.01f && bottom - top > 0.01f))
+    return {};
+  return gfx::stereo_replay::SubviewRect{left, top, right - left, bottom - top};
 }
 
 static HashType draw_geometry_signature(GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
@@ -2155,7 +2253,7 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
   const PnMtxUsage matrixUsage = interpolationIdentityActive ? pn_mtx_usage(vertices, vtxCount, vtxSize) : PnMtxUsage{};
   handle_draw_unmerged(prim, fmt, vtxCount, vertRange, matrixUsage.mask, matrixUsage.topologySignature,
                        interpolationIdentityActive ? draw_geometry_signature(fmt, vertices, vtxCount, vtxSize) : 0,
-                       interpolationIdentityActive);
+                       interpolationIdentityActive, vertices, vtxSize);
   return true;
 }
 
@@ -2189,7 +2287,7 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   pos += totalVtxBytes;
 
   // Try to merge with previous draw call
-  if (!g_gxState.stateDirty)
+  if (!g_gxState.stateDirty && !(aurora::stereo_frame_provider_active() && g_gxState.projType == GX_ORTHOGRAPHIC))
     LIKELY {
       auto* lastDraw = gfx::get_last_draw_command<DrawData>();
       // Only if the previous draw call was a single instance draw (no lines/points handling)
@@ -2223,13 +2321,13 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   const PnMtxUsage matrixUsage = interpolationIdentityActive ? pn_mtx_usage(vertices, vtxCount, vtxSize) : PnMtxUsage{};
   handle_draw_unmerged(prim, fmt, vtxCount, vertRange, matrixUsage.mask, matrixUsage.topologySignature,
                        interpolationIdentityActive ? draw_geometry_signature(fmt, vertices, vtxCount, vtxSize) : 0,
-                       interpolationIdentityActive);
+                       interpolationIdentityActive, vertices, vtxSize);
   return true;
 }
 
 static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange,
                                  uint16_t usedPnMtxMask, HashType matrixTopologySignature, HashType geometrySignature,
-                                 bool interpolationIdentityActive) {
+                                 bool interpolationIdentityActive, const uint8_t* vertices, uint32_t vtxStride) {
   ZoneScoped;
   // GX_CULL_ALL rasterizes nothing on hardware - no color, no depth.
   if (g_gxState.cullMode == GX_CULL_ALL && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS)
@@ -2320,6 +2418,7 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
       .instanceCount = instanceCount,
       .bindGroups = bindGroups,
       .dstAlpha = pipelineState.dstAlpha,
+      .screenRect = screen_rect(prim, fmt, vertices, vtxCount, vtxStride),
   });
   g_gxState.stateDirty = false;
 }

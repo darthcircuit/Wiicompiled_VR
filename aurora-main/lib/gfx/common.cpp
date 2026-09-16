@@ -305,6 +305,7 @@ static void recycle_render_passes(std::vector<RenderPass>& passes) noexcept {
 struct LateStereoUniform {
   gx::UniformReplayLayout layout;
   Viewport viewport;
+  ClipRect displayRegion;
   Range current;
   Range previous;
   std::array<Range, AURORA_STEREO_EYE_COUNT> eyes;
@@ -322,9 +323,16 @@ struct LateStereoData {
 // Advanced for every upload, including synchronous mid-frame EFB readbacks.
 static std::atomic_uint64_t g_replayBufferGeneration{0};
 static LateStereoData g_pendingLateStereo;
+static uint32_t g_stereoLocalPlayerCount = 1;
+
+void set_stereo_local_player_count(uint32_t count) noexcept {
+  g_stereoLocalPlayerCount = count >= 1 && count <= 4 ? count : 1;
+}
+
 struct SealedFrameData {
   std::vector<RenderPass> passes;
   LateStereoData stereo;
+  uint32_t localPlayerCount = 1;
 };
 
 SealedFrame::SealedFrame() : m_data(std::make_unique<SealedFrameData>()) {}
@@ -1396,6 +1404,10 @@ static bool prepare_stereo_replay_uniforms(const StereoReplayFrame& stereoFrame,
                                            LateStereoData* history = nullptr) noexcept {
   const StereoDisplaySource displaySource = stereo_display_source(g_renderPasses);
   const ClipRect displayRegion = displaySource.region;
+  const bool multiplayer = g_stereoLocalPlayerCount > 1;
+  const auto playerRegion = stereo_replay::player_one_region(
+      {float(displayRegion.x), float(displayRegion.y), float(displayRegion.width), float(displayRegion.height)},
+      g_stereoLocalPlayerCount);
   // This is the producer-side preparation path; eye replay can query the pure
   // helper concurrently without touching this diagnostic state.
   log_stereo_display_source_region(displayRegion, displaySource.foundDisplayCopy);
@@ -1403,18 +1415,25 @@ static bool prepare_stereo_replay_uniforms(const StereoReplayFrame& stereoFrame,
   // A draw is replayed per eye when it carries the game camera (perspective) or
   // when it is 2D content the virtual screen is claiming.
   const auto replayed = [&](const gx::UniformReplayLayout& layout) noexcept {
-    return layout.perspective || (hudScreen.valid() && !layout.nativeEfbEffect);
+    return (!multiplayer || !layout.nativeEfbEffect) &&
+           (layout.perspective || (hudScreen.valid() && !layout.nativeEfbEffect));
   };
   size_t requiredBytes = 0;
   size_t efbPassCount = 0;
   size_t perspectiveDrawCount = 0;
   size_t replayPerspectiveDrawCount = 0;
   size_t replayHudScreenDrawCount = 0;
+  stereo_replay::SubviewRect allocationViewport{float(displayRegion.x), float(displayRegion.y),
+                                                float(displayRegion.width), float(displayRegion.height)};
   for (const auto& pass : g_renderPasses) {
     if (pass.efbTarget) {
       ++efbPassCount;
     }
     for (const auto& command : pass.commands) {
+      if (pass.efbTarget && command.type == CommandType::SetViewport) {
+        const auto& vp = command.data.setViewport;
+        allocationViewport = {vp.left, vp.top, vp.width, vp.height};
+      }
       if (command.type != CommandType::Draw || command.data.draw.type != ShaderType::GX ||
           !replayed(command.data.draw.gx.uniformReplayLayout)) {
         continue;
@@ -1425,6 +1444,10 @@ static bool prepare_stereo_replay_uniforms(const StereoReplayFrame& stereoFrame,
         ++perspectiveDrawCount;
       }
       if (!pass.efbTarget) {
+        continue;
+      }
+      if (multiplayer && !stereo_replay::replay_player_one_draw(allocationViewport, playerRegion, layout.perspective,
+                                                                layout.nativeEfbEffect)) {
         continue;
       }
       if (layout.perspective) {
@@ -1499,6 +1522,18 @@ static bool prepare_stereo_replay_uniforms(const StereoReplayFrame& stereoFrame,
       }
       auto& draw = command.data.draw.gx;
       const auto& layout = draw.uniformReplayLayout;
+      const stereo_replay::SubviewRect viewportRect{drawViewport.left, drawViewport.top, drawViewport.width,
+                                                    drawViewport.height};
+      if (multiplayer && !stereo_replay::replay_player_one_draw(viewportRect, playerRegion, layout.perspective,
+                                                                layout.nativeEfbEffect)) {
+        continue;
+      }
+      // Pane-local HUD coordinates expand with P1. Shared race/pause overlays
+      // retain their full-screen layout on the virtual screen.
+      const bool playerLocal = multiplayer && stereo_replay::subview_contains(playerRegion, viewportRect);
+      const ClipRect uniformRegion = playerLocal ? ClipRect{int32_t(playerRegion.left), int32_t(playerRegion.top),
+                                                            int32_t(playerRegion.width), int32_t(playerRegion.height)}
+                                                 : displayRegion;
       std::memcpy(sourceUniform.data(), g_uniforms.data() + draw.uniformRange.offset, draw.uniformRange.size);
       Mat4x4<float> gameProjection;
       std::memcpy(&gameProjection, sourceUniform.data() + layout.projectionOffset, sizeof(gameProjection));
@@ -1522,6 +1557,7 @@ static bool prepare_stereo_replay_uniforms(const StereoReplayFrame& stereoFrame,
         saved = &history->uniforms.emplace_back();
         saved->layout = layout;
         saved->viewport = drawViewport;
+        saved->displayRegion = uniformRegion;
         const auto save = [&](const uint8_t* source, uint32_t size) -> Range {
           if (size == 0)
             return {};
@@ -1544,7 +1580,7 @@ static bool prepare_stereo_replay_uniforms(const StereoReplayFrame& stereoFrame,
         }
         const auto& eye = stereoFrame.eyes[eyeIndex];
         std::memcpy(eyeUniform.data(), sourceUniform.data(), range.size);
-        write_stereo_uniform({eyeUniform.data(), range.size}, layout, eye, gameProjection, drawViewport, displayRegion,
+        write_stereo_uniform({eyeUniform.data(), range.size}, layout, eye, gameProjection, drawViewport, uniformRegion,
                              hudScreen);
         std::memcpy(uniform.data(), eyeUniform.data(), range.size);
       }
@@ -1681,6 +1717,7 @@ struct RenderInvocation {
   uint32_t stereoEye = UINT32_MAX;
   const ReplayTarget* target = nullptr;
   ClipRect replaySourceRegion{};
+  uint32_t localPlayerCount = 1;
   // Inclusive index of the last pass to replay; -1 replays every pass.
   int32_t replayLastPass = -1;
   bool finalize = true;
@@ -1857,6 +1894,8 @@ void seal_frame(SealedFrame& out) noexcept {
   // producer joins the worker's DONE phase before it seals another frame.
   g_retiredBindGroups.clear();
   out.data().stereo = std::move(g_pendingLateStereo);
+  out.data().localPlayerCount = g_stereoLocalPlayerCount;
+  g_stereoLocalPlayerCount = 1;
   auto& passes = out.data().passes;
   // The previous cycle already recycled these, so this normally just hands the empty vector, its
   // capacity included, back to the producer.
@@ -1928,7 +1967,7 @@ bool prepare_late_stereo_replay(SealedFrame& frame, wgpu::CommandEncoder& cmd, c
     }
     for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
       write_stereo_uniform({bytes + saved.eyes[eye].offset - data.uploadOffset, saved.current.size}, layout,
-                           stereoFrame.eyes[eye], projection, saved.viewport, data.displayRegion, data.hudScreen);
+                           stereoFrame.eyes[eye], projection, saved.viewport, saved.displayRegion, data.hudScreen);
     }
   }
   // Never interpolate in mapped upload memory: write-combined pages make CPU
@@ -1961,6 +2000,7 @@ void render_stereo_eye(SealedFrame& frame, wgpu::CommandEncoder& cmd, const Ster
                   .stereoEye = eye,
                   .target = &stereoFrame.eyes[eye].target,
                   .replaySourceRegion = displaySource.region,
+                  .localPlayerCount = frame.data().localPlayerCount,
                   .replayLastPass = lastPass,
                   .finalize = finalize,
                   .replayOnlyEfb = true,
@@ -2010,6 +2050,12 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
   const auto& sourceSize = renderPasses[idx].targetSize;
   const bool overrideTarget = invocation.target != nullptr && renderPasses[idx].efbTarget;
   const auto targetSize = overrideTarget ? invocation.target->size : sourceSize;
+  const bool multiplayer = overrideTarget && invocation.localPlayerCount > 1;
+  const auto& display = invocation.replaySourceRegion;
+  const auto playerRegion = stereo_replay::player_one_region(
+      {float(display.x), float(display.y), float(display.width), float(display.height)}, invocation.localPlayerCount);
+  stereo_replay::SubviewRect sourceViewport{0.f, 0.f, float(sourceSize.width), float(sourceSize.height)};
+  auto sourceScissor = sourceViewport;
   const int32_t sourceWidth = static_cast<int32_t>(sourceSize.width);
   const int32_t sourceHeight = static_cast<int32_t>(sourceSize.height);
   int32_t sourceRegionLeft = 0;
@@ -2086,6 +2132,7 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
     switch (cmd.type) {
     case CommandType::SetViewport: {
       const auto& vp = cmd.data.setViewport;
+      sourceViewport = {vp.left, vp.top, vp.width, vp.height};
       // WebGPU requires 0 <= minDepth <= maxDepth <= 1. vp.znear/vp.zfar are in GX's own distance
       // terms (0 = near); under UseReversedZ the host depth-buffer storage direction is flipped
       // (near = 1, far = 0), so this range has to be remapped through 1-x the same way the
@@ -2121,6 +2168,7 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
     } break;
     case CommandType::SetScissor: {
       const auto& sc = cmd.data.setScissor;
+      sourceScissor = {float(sc.x), float(sc.y), float(sc.width), float(sc.height)};
       const auto sourceLeft = std::clamp(sc.x, sourceRegionLeft, sourceRegionRight);
       const auto sourceTop = std::clamp(sc.y, sourceRegionTop, sourceRegionBottom);
       const auto sourceRight = std::clamp(sc.x + sc.width, sourceLeft, sourceRegionRight);
@@ -2146,6 +2194,18 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
       const auto& draw = cmd.data.draw;
       switch (draw.type) {
       case ShaderType::GX: {
+        if (multiplayer && draw.gx.screenRect &&
+            stereo_replay::is_split_screen_furniture(
+                *draw.gx.screenRect, {float(display.x), float(display.y), float(display.width), float(display.height)},
+                invocation.localPlayerCount)) {
+          break;
+        }
+        if (multiplayer && (!stereo_replay::replay_player_one_draw(sourceViewport, playerRegion,
+                                                                   draw.gx.uniformReplayLayout.perspective,
+                                                                   draw.gx.uniformReplayLayout.nativeEfbEffect) ||
+                            !stereo_replay::subviews_overlap(sourceScissor, playerRegion))) {
+          break;
+        }
         const gfx::Range* uniformOverride = nullptr;
         // Only a 2D draw the virtual screen actually claimed carries a stereo
         // uniform range without being perspective.
@@ -2164,21 +2224,31 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
         // frame (Mario Kart clips the item roulette that way). Honouring that
         // rectangle would cut the reprojected element away, so it gets the whole
         // eye and every other draw gets the game's own rectangle back.
-        if (!scissorStateKnown || virtualScreenDraw != hudScreenScissor) {
-          hudScreenScissor = virtualScreenDraw;
+        const bool fullEyeDraw = virtualScreenDraw || (multiplayer && draw.gx.uniformReplayLayout.perspective);
+        if (!scissorStateKnown || fullEyeDraw != hudScreenScissor) {
+          hudScreenScissor = fullEyeDraw;
           scissorStateKnown = true;
-          apply_scissor(virtualScreenDraw ? fullTargetScissor : recordedScissor);
+          apply_scissor(fullEyeDraw ? fullTargetScissor : recordedScissor);
         }
-        if (!viewportStateKnown || virtualScreenDraw != hudScreenViewport) {
-          hudScreenViewport = virtualScreenDraw;
+        if (!viewportStateKnown || fullEyeDraw != hudScreenViewport) {
+          hudScreenViewport = fullEyeDraw;
           viewportStateKnown = true;
-          apply_viewport(virtualScreenDraw);
+          apply_viewport(fullEyeDraw);
         }
         gx::render(draw.gx, pass, encodeState, renderPasses[idx].requireReadyPipelines, uniformOverride,
                    virtualScreenDraw ? draw.gx.exactScreenDepthPipeline : 0);
       } break;
       case ShaderType::Clear: {
         auto clearDraw = draw.clear;
+        if (multiplayer) {
+          const auto& sc = clearDraw.scissor;
+          if (clearDraw.copyClear ||
+              (clearDraw.useScissor &&
+               !stereo_replay::subviews_overlap({float(sc.x), float(sc.y), float(sc.width), float(sc.height)},
+                                                playerRegion))) {
+            break;
+          }
+        }
         if (invocation.skipCopyClears && overrideTarget && clearDraw.copyClear && renderPasses[idx].postCopyClear) {
           // The scissored twin of the attachment-load-op case above: the copy's
           // EFB reset, rescaled into eye space, covers the whole eye.

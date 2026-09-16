@@ -15,7 +15,10 @@ bool complete_downloads() noexcept;
 void cancel() noexcept;
 
 // Frame-latent readbacks for probe-sized CPU-consumed copies: they ride the frame's own encode and
-// land in guest RAM a frame later. Per frame, from the worker: seal, encode, then after_submit.
+// retain completed pixels in host memory. The producer publishes a compatible
+// result only when schedule() is called again for that destination, while the
+// game still owns it as a copy buffer. Per frame, from the worker: seal, encode,
+// then after_submit. GPU callbacks must never write to guest RAM.
 void seal_async_downloads() noexcept;
 void encode_async_downloads(const wgpu::CommandEncoder& encoder) noexcept;
 void after_submit() noexcept;

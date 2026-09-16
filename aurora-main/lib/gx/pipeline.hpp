@@ -2,6 +2,8 @@
 
 #include "../gfx/common.hpp"
 #include "shader_info.hpp"
+#include "../gfx/stereo_replay.hpp"
+#include <optional>
 
 namespace aurora::gx {
 struct DrawData {
@@ -21,6 +23,10 @@ struct DrawData {
   uint32_t instanceCount;
   GXBindGroups bindGroups;
   uint32_t dstAlpha;
+  // Valid only for simple orthographic rectangles/lines (textured or not).
+  // Recorded before merging so VR can omit desktop split masks without
+  // modifying GX.
+  std::optional<gfx::stereo_replay::SubviewRect> screenRect;
 };
 
 constexpr uint32_t GXPipelineConfigVersion = 20;

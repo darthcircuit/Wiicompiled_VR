@@ -615,8 +615,11 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     // asynchronous worker may ask for an XR packet after the guest has already
     // begun the next frame, so immersive replay is accepted only when both
     // tags match.
-    const uint64_t vrContentTag = mkw::vr::MkwVRPolicyGetSnapshot().content_tag;
-    aurora_end_frame_tagged(vrContentTag);
+    const auto vrPolicy = mkw::vr::MkwVRPolicyGetSnapshot();
+    aurora_set_stereo_local_player_count(
+        vrPolicy.presentation == mkw::vr::VRPresentationMode::ImmersiveRace
+            ? vrPolicy.scene.local_player_count : 1);
+    aurora_end_frame_tagged(vrPolicy.content_tag);
     if (paceThisFrame) {
         PaceToRetraceBoundary(paceDeadline);
         std::lock_guard<std::mutex> lock(g_viMutex);

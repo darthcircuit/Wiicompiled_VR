@@ -1,8 +1,76 @@
 #pragma once
 
 #include <aurora/math.hpp>
+#include <cmath>
 
 namespace aurora::gfx::stereo_replay {
+
+struct SubviewRect {
+  float left = 0.f;
+  float top = 0.f;
+  float width = 0.f;
+  float height = 0.f;
+};
+
+// MKW uses a top/bottom split for two screens and quadrants for three/four.
+// Coordinates belong to the displayed EFB region, including its crop origin.
+inline SubviewRect player_one_region(SubviewRect display, uint32_t players) noexcept {
+  if (players >= 2 && players <= 4) {
+    display.height *= 0.5f;
+    if (players >= 3) {
+      display.width *= 0.5f;
+    }
+  }
+  return display;
+}
+
+inline bool subviews_overlap(SubviewRect a, SubviewRect b) noexcept {
+  return a.width > 0.f && a.height > 0.f && b.width > 0.f && b.height > 0.f && a.left < b.left + b.width &&
+         a.left + a.width > b.left && a.top < b.top + b.height && a.top + a.height > b.top;
+}
+
+inline bool subview_contains(SubviewRect outer, SubviewRect inner) noexcept {
+  // GX viewport jitter and rounding can extend a pane by a fraction of a pixel.
+  constexpr float tolerance = 1.f;
+  return inner.width > 0.f && inner.height > 0.f && inner.left >= outer.left - tolerance &&
+         inner.top >= outer.top - tolerance && inner.left + inner.width <= outer.left + outer.width + tolerance &&
+         inner.top + inner.height <= outer.top + outer.height + tolerance;
+}
+
+// Shared orthographic overlays may span the display. World geometry must belong
+// wholly to P1; otherwise another camera could be expanded into the same eye.
+// EFB effects sample the desktop's multi-camera image, so they cannot be reused.
+inline bool replay_player_one_draw(SubviewRect viewport, SubviewRect playerRegion, bool perspective,
+                                   bool nativeEfbEffect) noexcept {
+  return !nativeEfbEffect &&
+         (perspective ? subview_contains(playerRegion, viewport) : subviews_overlap(playerRegion, viewport));
+}
+
+// Split-screen furniture is often geometry in a full-display orthographic
+// viewport, not a separate viewport. MKW draws its partition as the
+// partition_line layout: yoko_line (800x1) and tate_line (1x800) picture panes
+// centred on the display and sampling a pattern texture. Recognize only
+// rectangles/lines at the split boundaries and complete masks of other
+// players' panes, whether textured or not. Full-frame fades and small HUD
+// backgrounds must remain visible.
+inline bool is_split_screen_furniture(SubviewRect bounds, SubviewRect display, uint32_t players) noexcept {
+  if (players < 2 || players > 4 || display.width <= 0.f || display.height <= 0.f)
+    return false;
+  const float x = (bounds.left - display.left) / display.width;
+  const float y = (bounds.top - display.top) / display.height;
+  const float w = bounds.width / display.width;
+  const float h = bounds.height / display.height;
+  constexpr float tolerance = 0.008f; // Up to a few native EFB pixels of inset/jitter.
+  const auto near = [](float a, float b) { return std::abs(a - b) <= tolerance; };
+  if (h <= tolerance && w >= 0.45f && near(y + h * 0.5f, 0.5f))
+    return true;
+  if (players >= 3 && w <= tolerance && h >= 0.45f && near(x + w * 0.5f, 0.5f))
+    return true;
+  if (players == 2)
+    return near(x, 0.f) && near(y, 0.5f) && near(w, 1.f) && near(h, 0.5f);
+  return near(w, 0.5f) && near(h, 0.5f) &&
+         ((near(x, 0.5f) && (near(y, 0.f) || near(y, 0.5f))) || (near(x, 0.f) && near(y, 0.5f)));
+}
 
 // An OpenXR eye supplies the shape of its asymmetric frustum, but the sealed
 // GX draw already contains the depth mapping adjusted for that draw's GX
