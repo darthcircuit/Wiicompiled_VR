@@ -1,15 +1,18 @@
 #include "hle_stubs.h"
 #include "memory.h"
 #include "hle/controller_status_contract.h"
+#include "vr/openxr_wii_remote.h"
 #include "wii_remote_input.h"
 
 #include <cstdint>
 
 void NandQueueIosCallback(uint32_t callbackPtr, int32_t result, uint32_t callbackArg);
+extern "C" bool PAD_HLE_RumbleEnabled();
 
 namespace {
 
 constexpr uint32_t kDefaultWorkMemSize = 0x20000;
+constexpr uint32_t kWpadMotorRumble = 1; // WPAD_MOTOR_RUMBLE; WPAD_MOTOR_STOP is 0
 constexpr uint8_t kDefaultDpdSensitivity = 3;
 constexpr int32_t kStatusOk = 0;
 
@@ -141,10 +144,13 @@ extern "C" int32_t WPADProbe_HLE(uint32_t chan, uint32_t typePtr)
 }
 PPC_NATIVE_OVERRIDE(801C0990, WPADProbe_HLE, int32_t, (uint32_t chan, uint32_t typePtr), (chan, typePtr));
 
+// WPADControlMotor: a Bluetooth remote's motor is not driven, but VR controllers
+// standing in for a remote rumble both hands while the game holds it on.
 extern "C" void WPADControlMotor_HLE(uint32_t chan, uint32_t command)
 {
-    (void)chan;
-    (void)command;
+    if (chan < WpadContract::kChannelCount && WiiRemoteInput::IsVrControllerChannel(chan)) {
+        mkw::vr::OpenXRSetWiiRemoteRumble(command == kWpadMotorRumble && PAD_HLE_RumbleEnabled());
+    }
 }
 PPC_NATIVE_OVERRIDE(801C0EC4, WPADControlMotor_HLE, void, (uint32_t chan, uint32_t command), (chan, command));
 

@@ -10,6 +10,7 @@
 #include "vr/mkw_vr_first_person.h"
 #include "vr/mkw_vr_policy.h"
 #include "vr/openxr_integration.h"
+#include "vr/openxr_wii_remote.h"
 #include "wii_remote_input.h"
 
 #include <imgui.h>
@@ -139,6 +140,21 @@ int g_vrMirrorView = [] {
     const std::string mode = RuntimeConfigFile::VrMirrorView();
     for (size_t i = 0; i < kVrMirrorViewNames.size(); ++i) {
         if (mode == kVrMirrorViewNames[i]) {
+            return static_cast<int>(i);
+        }
+    }
+    return 0;
+}();
+// Config spellings and menu labels for the VR controllers, index-matched to
+// mkw::vr::OpenXRControllerMode.
+constexpr std::array<const char*, 2> kVrControllerModeNames{"wii_remote", "gamepad"};
+constexpr std::array<const char*, 2> kVrControllerModeLabels{"Wii Remote + Nunchuk", "Gamepad"};
+static_assert(static_cast<int>(mkw::vr::OpenXRControllerMode::WiiRemote) == 0);
+static_assert(static_cast<int>(mkw::vr::OpenXRControllerMode::Gamepad) == 1);
+int g_vrControllerMode = [] {
+    const std::string mode = RuntimeConfigFile::VrControllerMode();
+    for (size_t i = 0; i < kVrControllerModeNames.size(); ++i) {
+        if (mode == kVrControllerModeNames[i]) {
             return static_cast<int>(i);
         }
     }
@@ -542,6 +558,7 @@ void DrawRumbleSettings() {
                 PAD_MOTOR_STOP_HARD, PAD_MOTOR_STOP_HARD, PAD_MOTOR_STOP_HARD, PAD_MOTOR_STOP_HARD,
             };
             PADControlAllMotors(stopAll.data());
+            mkw::vr::OpenXRSetWiiRemoteRumble(false);
         }
     }
     if (ImGui::IsItemHovered()) {
@@ -935,6 +952,33 @@ void DrawVrSettings() {
             "desktop view, the eye choices mirror what you are actually seeing in the headset, "
             "and None leaves the window black. Menus reach the headset as a screen showing this "
             "same desktop image, so the eye choices only differ from Normal during a race.");
+    }
+    if (ImGui::Combo("VR controllers", &g_vrControllerMode, kVrControllerModeLabels.data(),
+                     static_cast<int>(kVrControllerModeLabels.size()))) {
+        mkw::vr::OpenXRSetControllerMode(static_cast<mkw::vr::OpenXRControllerMode>(g_vrControllerMode));
+        RuntimeConfigFile::SetVrControllerMode(kVrControllerModeNames[static_cast<size_t>(g_vrControllerMode)]);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Wii Remote + Nunchuk: the right controller is a Wii Remote, with motion and a pointer "
+            "that lands where you aim on the virtual screen; the left one is the Nunchuk.\n"
+            "  Right: A = A, trigger = B, stick up/down = 1/2, stick left/right = -/+\n"
+            "  Left: stick = Nunchuk stick, trigger = Z, grip = C, menu = HOME\n"
+            "Gamepad: both controllers are one ordinary controller, read as a GameCube pad.\n"
+            "Applies immediately; the game sees the controller change as a reconnection.");
+    }
+    if (mkw::vr::OpenXRIsRunning() &&
+        mkw::vr::OpenXRGetControllerMode() == mkw::vr::OpenXRControllerMode::WiiRemote) {
+        mkw::vr::OpenXRWiiRemoteSample remote;
+        if (mkw::vr::OpenXRReadWiiRemote(remote)) {
+            if (remote.pointer_valid) {
+                ImGui::TextDisabled("Pointer %+.2f %+.2f | Remote %+.2f %+.2f %+.2f g", remote.pointer[0],
+                                    remote.pointer[1], remote.acc[0], remote.acc[1], remote.acc[2]);
+            } else {
+                ImGui::TextDisabled("Pointer off screen | Remote %+.2f %+.2f %+.2f g", remote.acc[0],
+                                    remote.acc[1], remote.acc[2]);
+            }
+        }
     }
 
     if (ImGui::Combo("VR frame interpolation (experimental)", &g_vrFrameInterpolationMode,
@@ -1398,6 +1442,7 @@ void InitializeRuntimeSettings() noexcept {
     aurora_set_stereo_stop_at_display_copy(g_vrStopAtDisplayCopy);
     aurora_set_stereo_skip_copy_clears(g_vrSkipCopyClears);
     aurora_set_stereo_mirror_view(static_cast<AuroraStereoMirrorView>(g_vrMirrorView));
+    mkw::vr::OpenXRSetControllerMode(static_cast<mkw::vr::OpenXRControllerMode>(g_vrControllerMode));
     ApplyVrHudVirtualScreen();
     aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
     mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();

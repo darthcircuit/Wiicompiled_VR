@@ -2,6 +2,7 @@
 
 #include "runtime_config.h"
 #include "runtime_log.h"
+#include "vr/openxr_wii_remote.h"
 
 #include <dolphin/pad.h>
 #include <SDL3/SDL_gamepad.h>
@@ -530,12 +531,28 @@ Kind KindForName(const char* name) {
     return Kind::Remote;
 }
 
+// True for the OpenXR virtual gamepad while it stands in for a Wii Remote.
+static bool IsVrControllerGamepad(SDL_Gamepad* gamepad) {
+    return gamepad != nullptr && mkw::vr::OpenXRWiiRemoteOwnsGamepad(SDL_GetGamepadID(gamepad));
+}
+
+// Kind of an SDL gamepad: the VR controllers are a remote with a Nunchuk, every
+// other device is classified by the name SDL gives it.
+static Kind KindForGamepad(SDL_Gamepad* gamepad) {
+    if (gamepad == nullptr) return Kind::NotWii;
+    if (IsVrControllerGamepad(gamepad)) return Kind::RemoteWithNunchuk;
+    return KindForName(SDL_GetGamepadName(gamepad));
+}
+
 // Kind of the SDL gamepad assigned to a game port, NotWii when empty.
 Kind KindForPort(uint32_t port) {
     if (port >= PAD_MAX_CONTROLLERS) return Kind::NotWii;
-    SDL_Gamepad* gamepad = SDL_GetGamepadFromPlayerIndex(static_cast<int>(port));
-    if (gamepad == nullptr) return Kind::NotWii;
-    return KindForName(SDL_GetGamepadName(gamepad));
+    return KindForGamepad(SDL_GetGamepadFromPlayerIndex(static_cast<int>(port)));
+}
+
+// True when the port's remote is the VR controllers.
+bool IsVrControllerChannel(uint32_t chan) {
+    return chan < PAD_MAX_CONTROLLERS && IsVrControllerGamepad(SDL_GetGamepadFromPlayerIndex(static_cast<int>(chan)));
 }
 
 // Human-readable name of a Kind for the settings overlay.
@@ -561,7 +578,7 @@ Kind EffectiveKind(uint32_t chan) {
     if (chan >= PAD_MAX_CONTROLLERS) return Kind::NotWii;
     PortMemory& memory = g_ports[chan];
     SDL_Gamepad* gamepad = SDL_GetGamepadFromPlayerIndex(static_cast<int>(chan));
-    const Kind live = gamepad != nullptr ? KindForName(SDL_GetGamepadName(gamepad)) : Kind::NotWii;
+    const Kind live = KindForGamepad(gamepad);
     const uint64_t now = SDL_GetTicks();
     if (live != Kind::NotWii) {
         memory.lastKind = live;
@@ -613,13 +630,47 @@ int16_t ClassicStickRaw(Sint16 axis, bool invert) {
     return static_cast<int16_t>(std::clamp(std::lround(value * 512.0f), -512L, 511L));
 }
 
+// The VR controllers' latest sample as a remote with a Nunchuk. Before the XR
+// thread has published one the remote is simply at rest.
+static void ReadVrControllerSample(uint32_t chan, KpadSample& sample) {
+    mkw::vr::OpenXRWiiRemoteSample vr;
+    if (!mkw::vr::OpenXRReadWiiRemote(vr)) {
+        FillGraceSample(chan, Kind::RemoteWithNunchuk, sample);
+        return;
+    }
+    sample = {};
+    sample.hold = vr.hold;
+    sample.hasNunchuk = true;
+    for (int i = 0; i < 3; ++i) {
+        sample.acc[i] = vr.acc[i];
+        sample.nunchukAcc[i] = vr.nunchuk_acc[i];
+    }
+    sample.stick[0] = vr.stick[0];
+    sample.stick[1] = vr.stick[1];
+    sample.dpdValid = vr.pointer_valid;
+    if (vr.pointer_valid) {
+        sample.pos[0] = vr.pointer[0];
+        sample.pos[1] = vr.pointer[1];
+        sample.horizon[0] = vr.horizon[0];
+        sample.horizon[1] = vr.horizon[1];
+        sample.dist = vr.distance_meters;
+    }
+    // Carried over should the port briefly lose its gamepad.
+    g_lastAcc[chan].valid = true;
+    for (int i = 0; i < 3; ++i) g_lastAcc[chan].acc[i] = sample.acc[i];
+}
+
 // Samples buttons, accelerometers and the extension of the remote on a port.
 bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
     if (chan >= PAD_MAX_CONTROLLERS) {
         return false;
     }
     SDL_Gamepad* gamepad = SDL_GetGamepadFromPlayerIndex(static_cast<int>(chan));
-    const Kind kind = gamepad != nullptr ? KindForName(SDL_GetGamepadName(gamepad)) : Kind::NotWii;
+    if (IsVrControllerGamepad(gamepad)) {
+        ReadVrControllerSample(chan, sample);
+        return true;
+    }
+    const Kind kind = KindForGamepad(gamepad);
     if (!IsKpadKind(kind)) {
         const Kind remembered = EffectiveKind(chan);
         if (!IsKpadKind(remembered)) {
@@ -749,6 +800,11 @@ bool ReadAccelDebug(uint32_t chan, float sdlG[3], float kpadAcc[3]) {
 void StartAccelCalibration(uint32_t chan) {
     if (!IsRemoteChannel(chan)) {
         FinishAccelCalibration("No Wii Remote on this port.");
+        return;
+    }
+    if (IsVrControllerChannel(chan)) {
+        // Their motion comes from headset tracking, which has no zero-point bias.
+        FinishAccelCalibration("The VR controllers need no calibration.");
         return;
     }
     g_calibration = {};

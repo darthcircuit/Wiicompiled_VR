@@ -17,6 +17,11 @@ struct PADStatus;
 // extension in or out mid-game switches control scheme like on the console. Only
 // the Wii U Pro Controller, which has no Wii-era equivalent, goes through
 // aurora's PAD layer as a GameCube pad.
+//
+// The OpenXR build's tracked controllers join the same path: while they are
+// presented as a Wii Remote (vr/openxr_wii_remote.h), the virtual gamepad they
+// feed is a Wii Remote with a Nunchuk here, and its samples, IR pointer
+// included, come from the headset instead of SDL.
 namespace WiiRemoteInput {
 
 enum class Kind : uint8_t {
@@ -52,6 +57,13 @@ struct KpadSample {
     int16_t clRStickRaw[2] = {};
     uint8_t clTriggerL = 0;      // 0..255; SDL only exposes the digital click
     uint8_t clTriggerR = 0;
+    // IR pointer, only from the VR controllers (a Bluetooth remote's camera
+    // data does not reach SDL). pos is -1..1 across the game picture with +y
+    // down, horizon the remote's x axis on screen, dist in metres.
+    bool dpdValid = false;
+    float pos[2] = {};
+    float horizon[2] = {1.0f, 0.0f};
+    float dist = 0.0f;
 };
 
 // What the game should see on `chan`: the controller SDL has there right now,
@@ -63,6 +75,8 @@ Kind EffectiveKind(uint32_t chan);
 // True when the game reads `chan` through KPAD: a Wii Remote alone, with a
 // Nunchuk or with a Classic Controller (live or within the swap grace period).
 bool IsRemoteChannel(uint32_t chan);
+// True when the remote on `chan` is the VR controllers (see above).
+bool IsVrControllerChannel(uint32_t chan);
 // Reads the current state of the remote on `chan`; false when IsRemoteChannel
 // is false. During the swap grace period the sample is neutral.
 bool ReadKpadSample(uint32_t chan, KpadSample& sample);

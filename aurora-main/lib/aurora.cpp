@@ -1495,6 +1495,30 @@ void draw_mirror_eye(const wgpu::RenderPassEncoder& pass, uint32_t eyeIndex, con
   pass.Draw(3);
 }
 
+// Read by aurora_get_stereo_screen_aspects from the XR input thread.
+std::atomic<float> g_stereoPictureAspect{0.f};
+std::atomic<float> g_stereoSnapshotAspect{0.f};
+
+// Records the geometry a headset frame's 2D content was laid out with: the picture aspect exactly as
+// encode_presentation_snapshot fits it into the snapshot (and, for immersive replay, as
+// stereo_hud_screen sizes the HUD screen), and the snapshot's own aspect.
+void publish_stereo_screen_aspects(const webgpu::PresentSource& presentSource, const wgpu::Extent3D& snapshotSize,
+                                   bool immersiveReplay) noexcept {
+  float picture = 0.f;
+  if (!window::get_present_aspect_ratio(picture) || !(picture > 0.f)) {
+    if (immersiveReplay) {
+      picture = 16.f / 9.f;
+    } else if (presentSource.size.width != 0 && presentSource.size.height != 0) {
+      picture = static_cast<float>(presentSource.size.width) / static_cast<float>(presentSource.size.height);
+    }
+  }
+  const float snapshot = snapshotSize.width != 0 && snapshotSize.height != 0
+                             ? static_cast<float>(snapshotSize.width) / static_cast<float>(snapshotSize.height)
+                             : 0.f;
+  g_stereoPictureAspect.store(picture, std::memory_order_relaxed);
+  g_stereoSnapshotAspect.store(snapshot, std::memory_order_relaxed);
+}
+
 // `presentSource` is latched in the seal prologue: by the time this encodes, the producer's next
 // gfx::begin_frame() may already have cleared the display-copy override.
 void encode_presentation_snapshot(const wgpu::CommandEncoder& encoder, const webgpu::PresentSource& presentSource,
@@ -1962,6 +1986,9 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
   const bool virtualScreenNeedsMono = stereoOutput && !immersiveReplay;
   encode_presentation_snapshot(encoder, ctx.presentSource, *finalImage, true,
                                virtualScreenNeedsMono ? MirrorPlan::Mono : mirrorPlan);
+  if (stereoOutput) {
+    publish_stereo_screen_aspects(ctx.presentSource, finalImage->texture.size, immersiveReplay);
+  }
 
   if (virtualScreenNeedsMono) {
     // Use the completed mono snapshot so virtual-screen XR includes ImGui at
@@ -2595,6 +2622,16 @@ void aurora_set_stereo_hud_screen(bool enabled, float width, float distance) {
   aurora::gfx::set_stereo_hud_screen(enabled, width, distance);
 }
 bool aurora_get_stereo_hud_screen_enabled() { return aurora::gfx::get_stereo_hud_screen_enabled(); }
+bool aurora_get_stereo_screen_aspects(float* pictureAspect, float* snapshotAspect) {
+  const float picture = aurora::g_stereoPictureAspect.load(std::memory_order_relaxed);
+  const float snapshot = aurora::g_stereoSnapshotAspect.load(std::memory_order_relaxed);
+  if (pictureAspect == nullptr || snapshotAspect == nullptr || !(picture > 0.f) || !(snapshot > 0.f)) {
+    return false;
+  }
+  *pictureAspect = picture;
+  *snapshotAspect = snapshot;
+  return true;
+}
 void aurora_set_stereo_mirror_view(AuroraStereoMirrorView view) { aurora::gfx::set_stereo_mirror_view(view); }
 AuroraStereoMirrorView aurora_get_stereo_mirror_view() { return aurora::gfx::get_stereo_mirror_view(); }
 void aurora_set_background_input(bool value) {

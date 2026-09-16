@@ -89,12 +89,15 @@ the bridge needs.
 
 Quest Touch controllers are not HID gamepads, so `openxr_input.cpp` syncs an
 OpenXR action set on the pacing thread and feeds a virtual SDL joystick
-(`SDL_AttachVirtualJoystick`, type gamepad). Aurora opens it like any pad and
-assigns it to player 1; every existing binding, dead zone and overlay setting
-applies. Mapping: A/B → South/East, X/Y → West/North, index triggers → trigger
-axes, grips → shoulders, thumbsticks → sticks (clicks → stick buttons), left
-menu → Start. Bindings are suggested for `oculus/touch_controller` and
-`khr/simple_controller`.
+(`SDL_AttachVirtualJoystick`, type gamepad) that Aurora assigns to player 1.
+By default (`[vr] controller_mode = "wii_remote"`) that port is then served
+through KPAD as a Wii Remote with a Nunchuk, with motion and an IR pointer
+aimed at the virtual screen; see "Controllers" in `OPENXR.md` for the mapping
+and the geometry. With `controller_mode = "gamepad"` it stays an ordinary pad:
+A/B → South/East, X/Y → West/North, index triggers → trigger axes, grips →
+shoulders, thumbsticks → sticks (clicks → stick buttons), left menu → Start,
+and every existing binding, dead zone and overlay setting applies. Bindings are
+suggested for `oculus/touch_controller` and `khr/simple_controller`.
 
 ### Android platform glue
 
@@ -253,7 +256,7 @@ the app:
 | --- | --- |
 | `debug.wiicompiled.vtxpad 0` | Turns the stride padding off, to re-check a driver update |
 | `debug.wiicompiled.validation 1` | Keeps WebGPU validation and robustness on in release builds |
-| `debug.wiicompiled.inject <n>:<button>` | Presses `a`, `b`, `x`, `y`, `start`, `up`, `down`, `left` or `right` for 12 XR frames each time `<n>` changes |
+| `debug.wiicompiled.inject <n>:<button>` | Presses `a`, `b`, `x`, `y`, `start`, `up`, `down`, `left` or `right` for 12 XR frames each time `<n>` changes. As a Wii Remote, `x`/`y`/`start` are 1/2/+, the directions push the Nunchuk stick, and `home`, `c` and `z` also exist |
 | `debug.wiicompiled.fpslog 1` | Logs the game's rendered frame rate every 5 s. The compositor's `VrApi` log line gives headset FPS, `GPU%`, `CPU%` and app GPU time (`App=`) |
 
 The injector makes headset tests possible with nobody wearing the headset.

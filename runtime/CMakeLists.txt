@@ -397,6 +397,13 @@ target_include_directories(mkw_vr_first_person_tests PRIVATE "${CMAKE_CURRENT_LI
 target_compile_features(mkw_vr_first_person_tests PRIVATE cxx_std_17)
 add_test(NAME mkw_vr_first_person_tests COMMAND mkw_vr_first_person_tests)
 
+# The VR controllers' Wii Remote presentation (accelerometer frame, pointer
+# raycast, debounce, button profile) is header-only for the same reason.
+add_executable(mkw_vr_wii_remote_tests "${CMAKE_CURRENT_LIST_DIR}/tests/vr_wii_remote_tests.cpp")
+target_include_directories(mkw_vr_wii_remote_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
+target_compile_features(mkw_vr_wii_remote_tests PRIVATE cxx_std_17)
+add_test(NAME mkw_vr_wii_remote_tests COMMAND mkw_vr_wii_remote_tests)
+
 # Resolve the real local-kart pointer walk against synthetic offline/online rosters.
 add_executable(mkw_vr_player_tests "${CMAKE_CURRENT_LIST_DIR}/tests/vr_player_tests.cpp")
 target_include_directories(mkw_vr_player_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")

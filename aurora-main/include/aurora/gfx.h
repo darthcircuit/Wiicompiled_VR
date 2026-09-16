@@ -111,6 +111,15 @@ bool aurora_get_stereo_skip_copy_clears();
 void aurora_set_stereo_hud_screen(bool enabled, float width, float distance);
 bool aurora_get_stereo_hud_screen_enabled();
 
+// Aspect ratios behind the most recent headset frame's 2D content, for mapping a
+// point on a virtual screen back onto the game picture (the VR Wii Remote
+// pointer). `pictureAspect` is the game picture's width over height, which the
+// immersive HUD screen's height follows; `snapshotAspect` is the desktop
+// presentation image's, which the virtual-screen eye texture letterboxes and
+// the picture is letterboxed inside. False until a headset frame was encoded.
+// Safe to call from any thread.
+bool aurora_get_stereo_screen_aspects(float* pictureAspect, float* snapshotAspect);
+
 // What the desktop window shows while a headset is being fed. NORMAL leaves the
 // ordinary mono presentation untouched, the eye views mirror what the headset is
 // actually displaying, and NONE presents a black window. Live, and only

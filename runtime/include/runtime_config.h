@@ -58,6 +58,7 @@ struct RuntimeUserConfig {
     std::optional<bool> vrStopAtDisplayCopy;
     std::optional<bool> vrSkipCopyClears;
     std::optional<std::string> vrMirrorView;
+    std::optional<std::string> vrControllerMode;
     std::optional<uint32_t> vrFrameInterpolationFps;
     std::optional<bool> vrFirstPerson;
     std::optional<float> vrFirstPersonUnitsPerMeter;
@@ -182,6 +183,14 @@ inline constexpr const char* kVrMirrorViewDefault = "normal";
 
 inline bool IsSupportedVrMirrorView(std::string_view value) {
     return value == "normal" || value == "both" || value == "left" || value == "right" || value == "none";
+}
+// What the tracked VR controllers are to the game: "wii_remote" is a Wii
+// Remote with a Nunchuk (motion and pointer included), "gamepad" one ordinary
+// controller read as a GameCube pad. Matches mkw::vr::OpenXRControllerMode.
+inline constexpr const char* kVrControllerModeDefault = "wii_remote";
+
+inline bool IsSupportedVrControllerMode(std::string_view value) {
+    return value == "wii_remote" || value == "gamepad";
 }
 // SDL scancode name, spelled the way SDL_GetScancodeName produces it. An
 // empty string leaves the recenter hotkey unbound, menu button only.
@@ -393,6 +402,12 @@ inline void EnsureConfigFile() {
               "# \"right\" mirror the headset's eyes, and \"none\" blacks the window\n"
               "# out. Changeable live from the F10 menu.\n"
               "mirror_view = \"normal\"\n"
+              "# What the headset's controllers are to the game: \"wii_remote\"\n"
+              "# is a Wii Remote (right hand, with motion and a pointer aimed at\n"
+              "# the virtual screen) plus a Nunchuk (left hand); \"gamepad\" is one\n"
+              "# ordinary controller read as a GameCube pad. Changeable live from\n"
+              "# the F10 menu.\n"
+              "controller_mode = \"wii_remote\"\n"
               "# VR interpolation: 0 = Off, 1 = Auto, or 72/90/120 FPS. Live.\n"
               "frame_interpolation_fps = 0\n"
               "render_scale = 1.0\n"
@@ -654,6 +669,10 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     if (auto value = FindConfigValue<std::string>(document, "vr", "mirror_view");
         value && IsSupportedVrMirrorView(*value)) {
         config.vrMirrorView = *value;
+    }
+    if (auto value = FindConfigValue<std::string>(document, "vr", "controller_mode");
+        value && IsSupportedVrControllerMode(*value)) {
+        config.vrControllerMode = *value;
     }
     config.vrFrameInterpolationFps = FindConfigValue<uint32_t>(document, "vr", "frame_interpolation_fps");
     if (!config.vrFrameInterpolationFps) {
@@ -960,6 +979,14 @@ inline bool SetVrMirrorView(std::string value) {
     }
     Mutable().vrMirrorView = value;
     return WriteSetting("vr", "mirror_view", FormatString(value));
+}
+
+inline bool SetVrControllerMode(std::string value) {
+    if (!IsSupportedVrControllerMode(value)) {
+        return false;
+    }
+    Mutable().vrControllerMode = value;
+    return WriteSetting("vr", "controller_mode", FormatString(value));
 }
 
 inline bool SetVrFrameInterpolationFps(uint32_t value) {
@@ -1300,6 +1327,11 @@ inline bool VrFirstPersonHideDriver(bool fallback = kVrFirstPersonHideDriverDefa
 inline std::string VrMirrorView(std::string fallback = kVrMirrorViewDefault) {
     const auto& value = Get().vrMirrorView;
     return value && IsSupportedVrMirrorView(*value) ? *value : std::move(fallback);
+}
+
+inline std::string VrControllerMode(std::string fallback = kVrControllerModeDefault) {
+    const auto& value = Get().vrControllerMode;
+    return value && IsSupportedVrControllerMode(*value) ? *value : std::move(fallback);
 }
 
 inline uint32_t VrFrameInterpolationFps() {

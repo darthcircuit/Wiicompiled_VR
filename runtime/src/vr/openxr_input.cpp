@@ -2,6 +2,13 @@
 
 #if defined(MKW_ENABLE_OPENXR)
 
+#if defined(_WIN32)
+#if !defined(NOMINMAX)
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include "vr/openxr_input.h"
 
 #include <SDL3/SDL_gamepad.h>
@@ -13,11 +20,14 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 #if defined(__ANDROID__)
 #include <sys/system_properties.h>
+#include <time.h>
 #endif
 
 namespace mkw::vr {
@@ -28,8 +38,10 @@ namespace {
 // a menu can be reached without someone wearing the headset:
 //   adb shell setprop debug.wiicompiled.inject <sequence>:<button>
 // A new sequence number holds the button for kInjectHoldFrames XR frames.
-// Buttons: a, b, x, y, start, up, down, left, right. The property is unset in
-// normal use, so this costs one property read every few frames.
+// Buttons: a, b, x, y, start, up, down, left, right, and for the Wii Remote
+// presentation also home, c and z (x/y/start press 1/2/+ there, and the
+// directions push the Nunchuk stick). The property is unset in normal use, so
+// this costs one property read every few frames.
 constexpr uint32_t kInjectHoldFrames = 12;
 constexpr uint32_t kInjectPollFrames = 4;
 
@@ -77,12 +89,22 @@ bool Injected(const char* button) {
     const InjectedPress& press = Injection();
     return press.frames_left > 0 && press.button == button;
 }
+
+using ConvertNowToXrTime = XrResult(XRAPI_PTR*)(XrInstance, const struct timespec*, XrTime*);
 #else
 void PollInjection() {}
 bool Injected(const char*) { return false; }
+
+#if defined(_WIN32)
+using ConvertNowToXrTime = XrResult(XRAPI_PTR*)(XrInstance, const LARGE_INTEGER*, XrTime*);
+#endif
 #endif
 
 constexpr uint32_t kHandCount = 2;
+
+// Re-sent every frame while the game holds the motor on, so a rumble whose stop
+// never arrives (or a stalled pacing thread) dies out on its own.
+constexpr XrDuration kRumblePulseNs = 50'000'000;
 
 struct Binding {
     XrAction* action;
@@ -98,6 +120,30 @@ Sint16 ToAxis(float value) noexcept {
 Sint16 ToTrigger(float value) noexcept {
     const float clamped = std::clamp(value, 0.0f, 1.0f);
     return static_cast<Sint16>(std::lround(clamped * 32767.0f));
+}
+
+wii_remote::Pose ToWiiRemotePose(const XrPosef& pose) noexcept {
+    return {{pose.position.x, pose.position.y, pose.position.z},
+            {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w}};
+}
+
+// The adb injection's buttons as the Wii Remote presentation's WPAD bits.
+uint32_t InjectedWiiRemoteButtons() {
+    uint32_t hold = 0;
+    const auto press = [&hold](const char* name, uint32_t bit) {
+        if (Injected(name)) {
+            hold |= bit;
+        }
+    };
+    press("a", wii_remote::kButtonA);
+    press("b", wii_remote::kButtonB);
+    press("x", wii_remote::kButtonOne);
+    press("y", wii_remote::kButtonTwo);
+    press("start", wii_remote::kButtonPlus);
+    press("home", wii_remote::kButtonHome);
+    press("c", wii_remote::kButtonC);
+    press("z", wii_remote::kButtonZ);
+    return hold;
 }
 
 } // namespace
@@ -139,11 +185,15 @@ bool OpenXRInput::Create(OpenXRRuntime& runtime) {
         return false;
     }
     m_created = true;
+    CreatePoseSpaces();
+    LoadInputClock();
     if (!AttachVirtualGamepad()) {
         Log(OpenXRLogLevel::Warning,
             "SDL refused the virtual gamepad; OpenXR controllers will not reach the game");
     }
-    Log(OpenXRLogLevel::Info, "OpenXR controller actions attached");
+    Log(OpenXRLogLevel::Info, OpenXRGetControllerMode() == OpenXRControllerMode::WiiRemote
+                                  ? "OpenXR controller actions attached (Wii Remote + Nunchuk)"
+                                  : "OpenXR controller actions attached (gamepad)");
     return true;
 }
 
@@ -162,7 +212,7 @@ bool OpenXRInput::CreateActions() {
         const char* localized;
         XrActionType type;
     };
-    const std::array<Spec, 8> specs{{
+    const std::array<Spec, 10> specs{{
         {&m_thumbstick, "thumbstick", "Thumbstick", XR_ACTION_TYPE_VECTOR2F_INPUT},
         {&m_thumbstick_click, "thumbstick_click", "Thumbstick Click", XR_ACTION_TYPE_BOOLEAN_INPUT},
         {&m_trigger, "trigger", "Trigger", XR_ACTION_TYPE_FLOAT_INPUT},
@@ -170,6 +220,8 @@ bool OpenXRInput::CreateActions() {
         {&m_button_primary, "button_primary", "A / X", XR_ACTION_TYPE_BOOLEAN_INPUT},
         {&m_button_secondary, "button_secondary", "B / Y", XR_ACTION_TYPE_BOOLEAN_INPUT},
         {&m_menu, "menu", "Menu", XR_ACTION_TYPE_BOOLEAN_INPUT},
+        {&m_aim_pose, "aim_pose", "Pointer", XR_ACTION_TYPE_POSE_INPUT},
+        {&m_grip_pose, "grip_pose", "Motion", XR_ACTION_TYPE_POSE_INPUT},
         {&m_haptic, "haptic", "Haptic", XR_ACTION_TYPE_VIBRATION_OUTPUT},
     }};
     for (const Spec& spec : specs) {
@@ -235,22 +287,117 @@ bool OpenXRInput::SuggestBindings() {
         {&m_button_secondary, "/user/hand/left/input/y/click"},
         {&m_button_secondary, "/user/hand/right/input/b/click"},
         {&m_menu, "/user/hand/left/input/menu/click"},
+        {&m_aim_pose, "/user/hand/left/input/aim/pose"},
+        {&m_aim_pose, "/user/hand/right/input/aim/pose"},
+        {&m_grip_pose, "/user/hand/left/input/grip/pose"},
+        {&m_grip_pose, "/user/hand/right/input/grip/pose"},
         {&m_haptic, "/user/hand/left/output/haptic"},
         {&m_haptic, "/user/hand/right/output/haptic"},
     };
     if (!suggest("/interaction_profiles/oculus/touch_controller", touch, true)) {
         return false;
     }
-    // Minimal fallback so an unfamiliar runtime still offers a select and a menu.
+    // Minimal fallback so an unfamiliar runtime still offers a select, a menu
+    // and something to point with.
     const std::vector<Binding> simple{
         {&m_button_primary, "/user/hand/right/input/select/click"},
         {&m_button_secondary, "/user/hand/left/input/select/click"},
         {&m_menu, "/user/hand/left/input/menu/click"},
+        {&m_aim_pose, "/user/hand/left/input/aim/pose"},
+        {&m_aim_pose, "/user/hand/right/input/aim/pose"},
+        {&m_grip_pose, "/user/hand/left/input/grip/pose"},
+        {&m_grip_pose, "/user/hand/right/input/grip/pose"},
         {&m_haptic, "/user/hand/left/output/haptic"},
         {&m_haptic, "/user/hand/right/output/haptic"},
     };
     suggest("/interaction_profiles/khr/simple_controller", simple, false);
     return true;
+}
+
+void OpenXRInput::CreatePoseSpaces() {
+    bool logged = false;
+    for (uint32_t hand = 0; hand < kHandCount; ++hand) {
+        for (auto [action, spaces] : {std::pair{m_aim_pose, m_aim_spaces}, std::pair{m_grip_pose, m_grip_spaces}}) {
+            XrActionSpaceCreateInfo info{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+            info.action = action;
+            info.subactionPath = m_hand_paths[hand];
+            info.poseInActionSpace.orientation.w = 1.0f;
+            const XrResult result = xrCreateActionSpace(m_runtime->Session(), &info, &spaces[hand]);
+            m_runtime->ObserveResult(result);
+            if (XR_FAILED(result)) {
+                spaces[hand] = XR_NULL_HANDLE;
+                if (!logged) {
+                    logged = true;
+                    std::ostringstream message;
+                    message << "xrCreateActionSpace failed (" << result
+                            << "); the Wii Remote will have no motion or pointer";
+                    Log(OpenXRLogLevel::Warning, message.str());
+                }
+            }
+        }
+    }
+}
+
+void OpenXRInput::DestroyPoseSpaces() {
+    for (uint32_t hand = 0; hand < kHandCount; ++hand) {
+        for (XrSpace* space : {&m_aim_spaces[hand], &m_grip_spaces[hand]}) {
+            if (*space != XR_NULL_HANDLE) {
+                xrDestroySpace(*space);
+                *space = XR_NULL_HANDLE;
+            }
+        }
+    }
+}
+
+// Poses for input are located at the measured current time, not the frame's
+// predicted display time: that lies tens of milliseconds ahead, and the runtime
+// extrapolates a fast wrist turn that far past where the hand really is, which
+// sprays the pointer and invents acceleration (DolphinXR's fast-motion fix).
+void OpenXRInput::LoadInputClock() {
+    const auto& extensions = m_runtime->EnabledExtensions();
+    const auto enabled = [&](const char* name) {
+        return std::find(extensions.begin(), extensions.end(), name) != extensions.end();
+    };
+    PFN_xrVoidFunction function = nullptr;
+#if defined(_WIN32)
+    if (enabled("XR_KHR_win32_convert_performance_counter_time")) {
+        m_runtime->GetInstanceProcAddress("xrConvertWin32PerformanceCounterToTimeKHR", &function);
+    }
+#elif defined(__ANDROID__)
+    if (enabled("XR_KHR_convert_timespec_time")) {
+        m_runtime->GetInstanceProcAddress("xrConvertTimespecTimeToTimeKHR", &function);
+    }
+#else
+    (void)enabled;
+#endif
+    m_convert_now_to_xr_time = function;
+    if (m_convert_now_to_xr_time == nullptr) {
+        Log(OpenXRLogLevel::Info,
+            "OpenXR offers no clock conversion; controller motion is sampled at display time");
+    }
+}
+
+XrTime OpenXRInput::InputSampleTime(XrTime predicted_display_time) const {
+    if (m_convert_now_to_xr_time == nullptr) {
+        return predicted_display_time;
+    }
+    XrTime now = 0;
+#if defined(_WIN32)
+    LARGE_INTEGER counter{};
+    if (QueryPerformanceCounter(&counter) == 0 ||
+        XR_FAILED(reinterpret_cast<ConvertNowToXrTime>(m_convert_now_to_xr_time)(m_runtime->Instance(),
+                                                                                  &counter, &now))) {
+        return predicted_display_time;
+    }
+#elif defined(__ANDROID__)
+    timespec spec{};
+    if (clock_gettime(CLOCK_MONOTONIC, &spec) != 0 ||
+        XR_FAILED(reinterpret_cast<ConvertNowToXrTime>(m_convert_now_to_xr_time)(m_runtime->Instance(),
+                                                                                  &spec, &now))) {
+        return predicted_display_time;
+    }
+#endif
+    return now > 0 ? (std::min)(predicted_display_time, now) : predicted_display_time;
 }
 
 bool OpenXRInput::AttachVirtualGamepad() {
@@ -299,7 +446,13 @@ void OpenXRInput::DetachVirtualGamepad() {
 }
 
 void OpenXRInput::Destroy() {
+    // The game must stop reading a remote whose controllers are going away.
+    OpenXRWithdrawWiiRemote();
+    if (m_created) {
+        StopRumble();
+    }
     DetachVirtualGamepad();
+    DestroyPoseSpaces();
     if (m_action_set != XR_NULL_HANDLE) {
         // Destroying the set destroys every action created from it.
         xrDestroyActionSet(m_action_set);
@@ -307,13 +460,47 @@ void OpenXRInput::Destroy() {
     }
     m_thumbstick = m_thumbstick_click = m_trigger = m_squeeze = XR_NULL_HANDLE;
     m_button_primary = m_button_secondary = m_menu = m_haptic = XR_NULL_HANDLE;
+    m_aim_pose = m_grip_pose = XR_NULL_HANDLE;
     m_hand_paths[0] = m_hand_paths[1] = XR_NULL_PATH;
+    m_convert_now_to_xr_time = nullptr;
+    for (auto& motion : m_motion) {
+        motion.Rest();
+    }
+    m_pointer.Reset();
+    m_horizon = {1.0f, 0.0f};
     m_created = false;
     m_runtime = nullptr;
 }
 
-void OpenXRInput::Sync(XrTime) {
-    if (!m_created || m_runtime == nullptr || !m_runtime->IsSessionFocused()) {
+void OpenXRInput::Idle() {
+    if (!m_created) {
+        return;
+    }
+    for (auto& motion : m_motion) {
+        motion.Rest();
+    }
+    m_pointer.Reset();
+    m_horizon = {1.0f, 0.0f};
+    OpenXRPublishWiiRemote(m_joystick_id, OpenXRWiiRemoteSample{});
+    StopRumble();
+    // Nothing stays held on the gamepad either while input is away.
+    if (m_joystick != nullptr) {
+        auto* joystick = static_cast<SDL_Joystick*>(m_joystick);
+        for (int axis = 0; axis < SDL_GAMEPAD_AXIS_COUNT; ++axis) {
+            SDL_SetJoystickVirtualAxis(joystick, axis, 0);
+        }
+        for (int button = 0; button < SDL_GAMEPAD_BUTTON_COUNT; ++button) {
+            SDL_SetJoystickVirtualButton(joystick, button, false);
+        }
+    }
+}
+
+void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen& screen) {
+    if (!m_created || m_runtime == nullptr) {
+        return;
+    }
+    if (!m_runtime->IsSessionFocused()) {
+        Idle();
         return;
     }
     XrActiveActionSet active{m_action_set, XR_NULL_PATH};
@@ -329,12 +516,9 @@ void OpenXRInput::Sync(XrTime) {
             message << "xrSyncActions failed (" << result << ')';
             Log(OpenXRLogLevel::Warning, message.str());
         }
+        Idle();
         return;
     }
-    if (m_joystick == nullptr) {
-        return;
-    }
-    auto* joystick = static_cast<SDL_Joystick*>(m_joystick);
 
     const auto boolean = [&](XrAction action, uint32_t hand) {
         XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
@@ -367,39 +551,147 @@ void OpenXRInput::Sync(XrTime) {
         return state.currentState;
     };
 
-    PollInjection();
-    XrVector2f left = vector(m_thumbstick, 0);
-    const XrVector2f right = vector(m_thumbstick, 1);
-    if (Injected("up")) {
-        left.y = 1.0f;
-    } else if (Injected("down")) {
-        left.y = -1.0f;
-    } else if (Injected("left")) {
-        left.x = -1.0f;
-    } else if (Injected("right")) {
-        left.x = 1.0f;
+    std::array<wii_remote::HandInputs, kHands> hands{};
+    for (uint32_t hand = 0; hand < kHands; ++hand) {
+        wii_remote::HandInputs& inputs = hands[hand];
+        inputs.primary = boolean(m_button_primary, hand);
+        inputs.secondary = boolean(m_button_secondary, hand);
+        inputs.menu = boolean(m_menu, hand);
+        inputs.thumbstick_click = boolean(m_thumbstick_click, hand);
+        inputs.trigger = scalar(m_trigger, hand);
+        inputs.squeeze = scalar(m_squeeze, hand);
+        const XrVector2f stick = vector(m_thumbstick, hand);
+        inputs.stick_x = stick.x;
+        inputs.stick_y = stick.y;
     }
-    // OpenXR thumbsticks report +Y up; SDL gamepads report +Y down.
-    SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTX, ToAxis(left.x));
-    SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTY, ToAxis(-left.y));
-    SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTX, ToAxis(right.x));
-    SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTY, ToAxis(-right.y));
-    SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, ToTrigger(scalar(m_trigger, 0)));
-    SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, ToTrigger(scalar(m_trigger, 1)));
 
-    SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_SOUTH,
-                                 boolean(m_button_primary, 1) || Injected("a"));
-    SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_EAST,
-                                 boolean(m_button_secondary, 1) || Injected("b"));
-    SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_WEST,
-                                 boolean(m_button_primary, 0) || Injected("x"));
-    SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_NORTH,
-                                 boolean(m_button_secondary, 0) || Injected("y"));
-    SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_START, boolean(m_menu, 0) || Injected("start"));
-    SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_LEFT_STICK, boolean(m_thumbstick_click, 0));
-    SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_RIGHT_STICK, boolean(m_thumbstick_click, 1));
-    SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, scalar(m_squeeze, 0) > 0.5f);
-    SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, scalar(m_squeeze, 1) > 0.5f);
+    PollInjection();
+    wii_remote::HandInputs& left = hands[0];
+    const wii_remote::HandInputs& right = hands[1];
+    if (Injected("up")) {
+        left.stick_y = 1.0f;
+    } else if (Injected("down")) {
+        left.stick_y = -1.0f;
+    } else if (Injected("left")) {
+        left.stick_x = -1.0f;
+    } else if (Injected("right")) {
+        left.stick_x = 1.0f;
+    }
+
+    if (m_joystick != nullptr) {
+        auto* joystick = static_cast<SDL_Joystick*>(m_joystick);
+        // OpenXR thumbsticks report +Y up; SDL gamepads report +Y down.
+        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTX, ToAxis(left.stick_x));
+        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTY, ToAxis(-left.stick_y));
+        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTX, ToAxis(right.stick_x));
+        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTY, ToAxis(-right.stick_y));
+        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, ToTrigger(left.trigger));
+        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, ToTrigger(right.trigger));
+
+        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_SOUTH, right.primary || Injected("a"));
+        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_EAST, right.secondary || Injected("b"));
+        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_WEST, left.primary || Injected("x"));
+        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_NORTH, left.secondary || Injected("y"));
+        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_START, left.menu || Injected("start"));
+        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_LEFT_STICK, left.thumbstick_click);
+        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_RIGHT_STICK, right.thumbstick_click);
+        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, left.squeeze > 0.5f);
+        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, right.squeeze > 0.5f);
+    }
+
+    PublishWiiRemote(predicted_display_time, screen, hands, InjectedWiiRemoteButtons());
+    UpdateRumble();
+}
+
+void OpenXRInput::PublishWiiRemote(XrTime predicted_display_time, const OpenXRPointerScreen& screen,
+                                   const std::array<wii_remote::HandInputs, kHands>& hands,
+                                   uint32_t injected_buttons) {
+    constexpr XrSpaceLocationFlags kPoseValid =
+        XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    const XrTime input_time = InputSampleTime(predicted_display_time);
+
+    OpenXRWiiRemoteSample sample{};
+    sample.hold = wii_remote::RemoteButtons(hands[0], hands[1]) | injected_buttons;
+    sample.stick = wii_remote::NunchukStick(hands[0]);
+
+    // Left is the Nunchuk, right is the remote.
+    std::array<wii_remote::Pose, kHands> aims{};
+    std::array<bool, kHands> aim_valid{};
+    for (uint32_t hand = 0; hand < kHands; ++hand) {
+        if (m_aim_spaces[hand] != XR_NULL_HANDLE) {
+            XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+            if (XR_SUCCEEDED(xrLocateSpace(m_aim_spaces[hand], m_runtime->AppSpace(), input_time, &location)) &&
+                (location.locationFlags & kPoseValid) == kPoseValid) {
+                aims[hand] = ToWiiRemotePose(location.pose);
+                aim_valid[hand] = true;
+            }
+        }
+        wii_remote::Vec3 grip_position{};
+        wii_remote::Vec3 grip_velocity{};
+        bool position_valid = false;
+        bool velocity_valid = false;
+        if (m_grip_spaces[hand] != XR_NULL_HANDLE) {
+            XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
+            XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+            location.next = &velocity;
+            if (XR_SUCCEEDED(xrLocateSpace(m_grip_spaces[hand], m_runtime->AppSpace(), input_time, &location))) {
+                position_valid = (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
+                velocity_valid = (velocity.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) != 0;
+                grip_position = {location.pose.position.x, location.pose.position.y, location.pose.position.z};
+                grip_velocity = {velocity.linearVelocity.x, velocity.linearVelocity.y, velocity.linearVelocity.z};
+            }
+        }
+        const wii_remote::Vec3 acc =
+            m_motion[hand].Update(aim_valid[hand] ? &aims[hand].orientation : nullptr,
+                                  position_valid ? &grip_position : nullptr,
+                                  velocity_valid ? &grip_velocity : nullptr, input_time);
+        (hand == 0 ? sample.nunchuk_acc : sample.acc) = acc;
+    }
+
+    wii_remote::Screen target{};
+    wii_remote::ScreenHit hit{};
+    if (screen.valid && aim_valid[1]) {
+        target.pose = ToWiiRemotePose(screen.pose);
+        target.half_width = screen.half_width_meters;
+        target.half_height = screen.half_height_meters;
+        hit = wii_remote::RaycastScreen(aims[1], target);
+    }
+    if (screen.valid && aim_valid[1]) {
+        m_horizon = wii_remote::Horizon(aims[1], target);
+    }
+    const wii_remote::ScreenHit pointer = m_pointer.Update(hit, input_time);
+    if (pointer.valid) {
+        sample.pointer_valid = true;
+        sample.pointer = wii_remote::KpadPosition(pointer);
+        // Held with the position through a tracking blip.
+        sample.horizon = m_horizon;
+        sample.distance_meters = pointer.distance_meters;
+        if (!m_logged_pointer) {
+            m_logged_pointer = true;
+            Log(OpenXRLogLevel::Info, "OpenXR Wii Remote pointer reached the virtual screen");
+        }
+    }
+    OpenXRPublishWiiRemote(m_joystick_id, sample);
+}
+
+void OpenXRInput::UpdateRumble() {
+    if (!OpenXRWiiRemoteRumbleRequested() || !OpenXRWiiRemoteOwnsGamepad(m_joystick_id)) {
+        StopRumble();
+        return;
+    }
+    for (uint32_t hand = 0; hand < kHandCount; ++hand) {
+        ApplyHaptic(hand, 1.0f, kRumblePulseNs);
+        m_haptics_active[hand] = true;
+    }
+}
+
+void OpenXRInput::StopRumble() {
+    for (uint32_t hand = 0; hand < kHandCount; ++hand) {
+        if (m_haptics_active[hand]) {
+            ApplyHaptic(hand, 0.0f, 0);
+            m_haptics_active[hand] = false;
+        }
+    }
 }
 
 void OpenXRInput::ApplyHaptic(uint32_t hand, float amplitude, XrDuration duration) {

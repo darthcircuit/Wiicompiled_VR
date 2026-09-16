@@ -5,25 +5,45 @@
 #if defined(MKW_ENABLE_OPENXR)
 
 #include "vr/openxr_runtime.h"
+#include "vr/openxr_wii_remote.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 
 namespace mkw::vr {
 
-// OpenXR action-based controller input, surfaced to the rest of the runtime as
-// one ordinary SDL gamepad.
+// The rectangle the game's picture occupies on whichever virtual screen is
+// showing it, in the application reference space: the target the Wii Remote
+// pointer is aimed at. The pose faces +Z with +X right and +Y up across the
+// picture. Invalid when no screen can be pointed at (for instance a race with
+// its 2D layer left stretched across the eyes).
+struct OpenXRPointerScreen {
+    bool valid = false;
+    XrPosef pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+    float half_width_meters = 0.0f;
+    float half_height_meters = 0.0f;
+};
+
+// OpenXR action-based controller input.
 //
 // Quest Touch controllers are not visible to SDL's joystick layer (the OS does
 // not expose them as HID gamepads), so a standalone headset build would have no
-// input at all. Rather than adding a second input path through the PAD/WPAD
-// HLE, this module syncs an OpenXR action set on the pacing thread and feeds a
-// virtual SDL joystick (SDL_AttachVirtualJoystick) that Aurora's existing
-// controller code opens, maps and assigns to player 1 exactly like a physical
-// pad. Every binding the settings overlay already offers keeps working.
+// input at all. This module syncs an OpenXR action set on the pacing thread and
+// feeds a virtual SDL joystick (SDL_AttachVirtualJoystick) that Aurora's
+// existing controller code opens and assigns to a port exactly like a physical
+// pad. What the game then sees on that port depends on OpenXRControllerMode:
 //
-// Mapping (Oculus Touch profile; the same actions are also bound for
-// khr/simple_controller so an unknown runtime still gets A/menu):
+// Wii Remote (default): the port is served through KPAD as a Wii Remote with a
+// Nunchuk, like DolphinXR's OpenXR Wii Remote. Every XR frame the aim and grip
+// poses are located at the measured current time, turned into both
+// accelerometers and the IR pointer (the right aim ray against the virtual
+// screen the renderer is showing), and published through openxr_wii_remote.h.
+// Buttons follow DolphinXR's "OpenXR Wii Remote" profile (see RemoteButtons).
+// The game's rumble drives both controllers' haptics.
+//
+// Gamepad: the virtual joystick is read through PAD as a GameCube controller,
+// and every binding the settings overlay offers applies:
 //   right A / B            -> gamepad South / East (GameCube A / B)
 //   left  X / Y            -> gamepad West / North (GameCube X / Y)
 //   index triggers         -> left / right trigger axes
@@ -31,12 +51,14 @@ namespace mkw::vr {
 //   left / right thumbstick-> left / right stick axes, clicks -> stick buttons
 //   left menu              -> Start
 //
-// Lifetime: OpenXRInputCreate after the session exists (attaches the action
-// set, which OpenXR permits once per session), OpenXRInputSync once per
-// xrWaitFrame when the session is focused, OpenXRInputDestroy before the
-// session is destroyed. All three run on the XR pacing thread; SDL's virtual
-// joystick setters are internally locked, so the game thread may read the pad
-// concurrently.
+// Both are bound for the Oculus Touch profile; khr/simple_controller gets
+// select/menu and the poses so an unknown runtime still offers something.
+//
+// Lifetime: Create after the session exists (attaches the action set, which
+// OpenXR permits once per session), Sync once per xrWaitFrame, Idle while the
+// session is not running, Destroy before the session is destroyed. All of them
+// run on the XR pacing thread; SDL's virtual joystick setters and the Wii
+// Remote bridge are internally locked, so the game thread may read concurrently.
 class OpenXRInput final {
 public:
     explicit OpenXRInput(OpenXRLogCallback logger = {});
@@ -51,9 +73,14 @@ public:
     bool Create(OpenXRRuntime& runtime);
     void Destroy();
 
-    // xrSyncActions + state reads, then publishes to the virtual gamepad.
-    // predicted_display_time is the frame's XrTime for pose-based lookups.
-    void Sync(XrTime predicted_display_time);
+    // xrSyncActions + state reads, then publishes to the virtual gamepad and
+    // the Wii Remote bridge. predicted_display_time is the frame's XrTime;
+    // screen is where the pointer can land this frame.
+    void Sync(XrTime predicted_display_time, const OpenXRPointerScreen& screen);
+
+    // Publishes a remote with nothing held, at rest and not pointing, and stops
+    // the haptics, for frames without focused input.
+    void Idle();
 
     // Rumble for the given hand (0 = left, 1 = right); amplitude 0..1.
     void ApplyHaptic(uint32_t hand, float amplitude, XrDuration duration);
@@ -63,10 +90,20 @@ public:
     const std::string& LastError() const noexcept { return m_last_error; }
 
 private:
+    static constexpr uint32_t kHands = 2;
+
     bool CreateActions();
     bool SuggestBindings();
+    void CreatePoseSpaces();
+    void DestroyPoseSpaces();
+    void LoadInputClock();
+    XrTime InputSampleTime(XrTime predicted_display_time) const;
     bool AttachVirtualGamepad();
     void DetachVirtualGamepad();
+    void PublishWiiRemote(XrTime predicted_display_time, const OpenXRPointerScreen& screen,
+                          const std::array<wii_remote::HandInputs, kHands>& hands, uint32_t injected_buttons);
+    void UpdateRumble();
+    void StopRumble();
     bool Check(XrResult result, const char* operation);
     void Log(OpenXRLogLevel level, const std::string& message) const noexcept;
 
@@ -80,12 +117,24 @@ private:
     XrAction m_button_primary = XR_NULL_HANDLE;   // A / X
     XrAction m_button_secondary = XR_NULL_HANDLE; // B / Y
     XrAction m_menu = XR_NULL_HANDLE;
+    XrAction m_aim_pose = XR_NULL_HANDLE;
+    XrAction m_grip_pose = XR_NULL_HANDLE;
     XrAction m_haptic = XR_NULL_HANDLE;
-    XrPath m_hand_paths[2]{};
+    XrPath m_hand_paths[kHands]{};
+    XrSpace m_aim_spaces[kHands]{};
+    XrSpace m_grip_spaces[kHands]{};
+    // xrConvertWin32PerformanceCounterToTimeKHR / xrConvertTimespecTimeToTimeKHR,
+    // when the runtime offers them; the input time falls back to display time.
+    PFN_xrVoidFunction m_convert_now_to_xr_time = nullptr;
+    wii_remote::MotionTracker m_motion[kHands];
+    wii_remote::PointerFilter m_pointer;
+    std::array<float, 2> m_horizon{1.0f, 0.0f};
+    bool m_haptics_active[kHands]{};
     uint32_t m_joystick_id = 0; // SDL_JoystickID; 0 when detached
     void* m_joystick = nullptr; // SDL_Joystick*
     bool m_created = false;
     bool m_logged_sync_failure = false;
+    bool m_logged_pointer = false;
     std::string m_last_error;
 };
 

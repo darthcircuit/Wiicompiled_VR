@@ -595,6 +595,9 @@ private:
                 break;
             }
             if (!session_active) {
+                if (input_ != nullptr) {
+                    input_->Idle();
+                }
                 SetInterpolationActive(false);
                 interpolation_pacing_.Reset();
                 rendered_fps_.store(0, std::memory_order_relaxed);
@@ -652,13 +655,15 @@ private:
             }
 
             UpdateFrameTiming(frame.xr_frame);
-            if (input_ != nullptr) {
-                input_->Sync(frame.xr_frame.predicted_display_time);
-            }
             // Both of these read this frame's located head pose and must run
             // before FinishFrame submits a layer built from it.
             ServiceRecenterRequest();
             UpdateVirtualScreenPose(frame);
+            if (input_ != nullptr) {
+                // After the screen is placed, so the pointer aims at this
+                // frame's screen rather than the previous one's.
+                input_->Sync(frame.xr_frame.predicted_display_time, PointerScreen(frame, policy, immersive));
+            }
 
             if (!frame.expects_gpu_submission) {
                 if (!backend_->FinishFrame(frame, false)) {
@@ -838,6 +843,89 @@ private:
         }
         frame.presentation.quad_anchored = virtual_screen_pose_valid_;
         frame.presentation.quad_pose = virtual_screen_pose_;
+    }
+
+    // The rectangle the game picture covers on the screen this frame shows, in
+    // the application space, for the Wii Remote pointer to aim at.
+    //
+    // Menus: the quad layer UpdateVirtualScreenPose placed (or its head-locked
+    // fallback), sized like the backends size it: hud_width_meters across with
+    // the eye texture's aspect, the desktop snapshot letterboxed into it and the
+    // picture into the snapshot.
+    //
+    // Races: the 2D layer's screen, which Aurora hangs hud_distance_meters
+    // ahead in the recorded centre-eye space. ViewFromBase maps a point p of
+    // that space (in metres) to base + lean * p in the application space, so the
+    // screen sits at base + lean * (0, 0, -distance), turned by the lean, its
+    // height following the picture aspect as stereo_hud_screen's does. With the
+    // 2D layer stretched across the eyes there is no screen to point at.
+    OpenXRPointerScreen PointerScreen(const OpenXRBackendFrame& frame, const MkwVRPolicySnapshot& policy,
+                                      bool immersive) const noexcept {
+        OpenXRPointerScreen screen{};
+        float picture_aspect = 0.0f;
+        float snapshot_aspect = 0.0f;
+        if (!aurora_get_stereo_screen_aspects(&picture_aspect, &snapshot_aspect)) {
+            return screen;
+        }
+        const OpenXRFrame& xr_frame = frame.xr_frame;
+        const bool views_usable = xr_frame.views_valid &&
+                                  (xr_frame.view_state_flags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0;
+        const bool position_usable =
+            views_usable && (xr_frame.view_state_flags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0;
+
+        if (immersive) {
+            const float distance = policy.config.hud_distance_meters;
+            const float width = policy.config.hud_width_meters;
+            if (!aurora_get_stereo_hud_screen_enabled() || !(distance > 0.0f) || !(width > 0.0f)) {
+                return screen;
+            }
+            std::array<float, 3> base{};
+            if (base_position_valid_ && last_immersive_) {
+                base = base_position_;
+            } else if (position_usable) {
+                // BuildPublishedFrame latches exactly this for the frame.
+                base = CenterPosition(xr_frame);
+            } else {
+                return screen;
+            }
+            const float half_angle =
+                0.5f * lean_back_degrees_.load(std::memory_order_relaxed) * kDegreesToRadians;
+            const Quaternion lean{std::sin(half_angle), 0.0f, 0.0f, std::cos(half_angle)};
+            const std::array<float, 3> ahead = Rotate(lean, {0.0f, 0.0f, -distance});
+            screen.pose.orientation = {lean.x, lean.y, lean.z, lean.w};
+            screen.pose.position = {base[0] + ahead[0], base[1] + ahead[1], base[2] + ahead[2]};
+            screen.half_width_meters = 0.5f * width;
+            screen.half_height_meters = screen.half_width_meters / picture_aspect;
+            screen.valid = true;
+            return screen;
+        }
+
+        if (frame.presentation.mode != OpenXRFrameMode::VirtualScreen || frame.render_width[0] == 0 ||
+            frame.render_height[0] == 0) {
+            return screen;
+        }
+        if (frame.presentation.quad_anchored) {
+            screen.pose = frame.presentation.quad_pose;
+        } else if (position_usable) {
+            // Head-locked in the view space: straight ahead of the head.
+            const auto& head = xr_frame.views[0].pose.orientation;
+            const Quaternion orientation = Normalize({head.x, head.y, head.z, head.w});
+            const std::array<float, 3> center = CenterPosition(xr_frame);
+            const std::array<float, 3> ahead = Rotate(
+                orientation, {0.0f, 0.0f, -std::max(0.25f, frame.presentation.quad_distance_meters)});
+            screen.pose.orientation = {orientation.x, orientation.y, orientation.z, orientation.w};
+            screen.pose.position = {center[0] + ahead[0], center[1] + ahead[1], center[2] + ahead[2]};
+        } else {
+            return screen;
+        }
+        const float eye_aspect =
+            static_cast<float>(frame.render_width[0]) / static_cast<float>(frame.render_height[0]);
+        const std::array<float, 2> extents = wii_remote::MenuPictureHalfExtents(
+            std::max(0.25f, frame.presentation.quad_width_meters), eye_aspect, snapshot_aspect, picture_aspect);
+        screen.half_width_meters = extents[0];
+        screen.half_height_meters = extents[1];
+        screen.valid = true;
+        return screen;
     }
 
     void ApplyPendingReferenceSpaceChange(const OpenXRFrame& frame) noexcept {

@@ -7,19 +7,30 @@
 #include <cmath>
 #include <cstdint>
 
-// KPAD HLE fed by a real Bluetooth Wii Remote. The game calls KPADRead once per
-// frame with room for 16 KPADStatus entries and only looks at entry 0; with a
-// Classic Controller it also calls KPADGetUnifiedWpadStatus for the raw
-// WPADCLStatus (buttons, sticks and triggers of the extension).
+// KPAD HLE fed by a real Bluetooth Wii Remote, or by VR controllers standing in
+// for one. The game calls KPADRead once per frame with room for 16 KPADStatus
+// entries and only looks at entry 0; with a Classic Controller it also calls
+// KPADGetUnifiedWpadStatus for the raw WPADCLStatus (buttons, sticks and
+// triggers of the extension). Of the pointer, Input::WiiController::UpdateImpl
+// reads pos, horizon and dist, and only while dpd_valid_fg is positive.
 namespace {
 
 constexpr uint32_t kKpadStatusSize = 0x84;
 
 // KPADStatus field offsets (RVL SDK).
 constexpr uint32_t kHold = 0x00, kTrig = 0x04, kRelease = 0x08, kAcc = 0x0C, kAccValue = 0x18,
-                   kAccSpeed = 0x1C, kPos = 0x20, kAccVertical = 0x54, kDevType = 0x5C, kWpadErr = 0x5D,
-                   kDpdValidFg = 0x5E, kDataFormat = 0x5F, kFsStick = 0x60, kFsAcc = 0x68, kFsAccValue = 0x74,
-                   kFsAccSpeed = 0x78;
+                   kAccSpeed = 0x1C, kPos = 0x20, kVec = 0x28, kSpeed = 0x30, kHorizon = 0x34, kHoriVec = 0x3C,
+                   kHoriSpeed = 0x44, kDist = 0x48, kDistVec = 0x4C, kDistSpeed = 0x50, kAccVertical = 0x54,
+                   kDevType = 0x5C, kWpadErr = 0x5D, kDpdValidFg = 0x5E, kDataFormat = 0x5F, kFsStick = 0x60,
+                   kFsAcc = 0x68, kFsAccValue = 0x74, kFsAccSpeed = 0x78;
+
+// KPAD's per-channel work area (PAL RMCP01): KPADInitEx sets the pointer
+// switch to 1 for every channel, and KPADEnableDpd / KPADDisableDpd, which the
+// game inlines into Input::WiiController::TogglePointer, flip it. The SDK
+// reports no pointer while it is off.
+constexpr uint32_t kKpadWorkBase = 0x803457E0, kKpadWorkSize = 0x538, kKpadDpdEnabled = 0x520;
+// dpd_valid_fg for a pointer computed from both sensor-bar dots.
+constexpr uint8_t kDpdValidTwoDots = 2;
 // KPADStatus.ex_status.cl (KPADEXStatus, Classic Controller view).
 constexpr uint32_t kClHold = 0x60, kClTrig = 0x64, kClRelease = 0x68, kClLStick = 0x6C, kClRStick = 0x74,
                    kClLTrigger = 0x7C, kClRTrigger = 0x80;
@@ -52,6 +63,10 @@ struct ChannelState {
     uint32_t prevClHold = 0;
     float prevAcc[3] = {0.0f, -1.0f, 0.0f};
     float prevFsAcc[3] = {0.0f, -1.0f, 0.0f};
+    bool prevDpdValid = false;
+    float prevPos[2] = {};
+    float prevHorizon[2] = {1.0f, 0.0f};
+    float prevDist = 0.0f;
 };
 
 std::array<ChannelState, 4> g_channels{};
@@ -72,6 +87,17 @@ void WriteVec3(uint32_t addr, const float* v) {
     Memory::WriteFloat32(addr, v[0]);
     Memory::WriteFloat32(addr + 4, v[1]);
     Memory::WriteFloat32(addr + 8, v[2]);
+}
+
+// Writes two big-endian floats to guest memory.
+void WriteVec2(uint32_t addr, const float* v) {
+    Memory::WriteFloat32(addr, v[0]);
+    Memory::WriteFloat32(addr + 4, v[1]);
+}
+
+// Whether the game has the pointer switched on for `chan` (see kKpadDpdEnabled).
+bool DpdEnabled(uint32_t chan) {
+    return Memory::Read8(kKpadWorkBase + chan * kKpadWorkSize + kKpadDpdEnabled) != 0;
 }
 
 // Zeroes `count` consecutive floats in guest memory.
@@ -107,10 +133,44 @@ int32_t WriteStatus(uint32_t chan, uint32_t addr, const WiiRemoteInput::KpadSamp
     Memory::WriteFloat32(addr + kAccSpeed, Distance(sample->acc, state.prevAcc));
     for (int i = 0; i < 3; ++i) state.prevAcc[i] = sample->acc[i];
 
-    // No IR pointer: pos .. acc_vertical zeroed and dpd_valid_fg clear, which
-    // the game treats as "pointing away from the screen".
-    WriteZeroFloats(addr + kPos, (kAccVertical + 8 - kPos) / 4);
-    Memory::Write8(addr + kDpdValidFg, 0);
+    // IR pointer. Without one, pos .. acc_vertical are zeroed and dpd_valid_fg
+    // is clear, which the game treats as "pointing away from the screen".
+    // vec, hori_vec and dist_vec are the frame-to-frame changes, the speeds
+    // their lengths, as the SDK derives them. acc_vertical stays zero.
+    if (sample->dpdValid && DpdEnabled(chan)) {
+        if (!state.prevDpdValid) {
+            state.prevPos[0] = sample->pos[0];
+            state.prevPos[1] = sample->pos[1];
+            state.prevHorizon[0] = sample->horizon[0];
+            state.prevHorizon[1] = sample->horizon[1];
+            state.prevDist = sample->dist;
+        }
+        const float vec[2] = {sample->pos[0] - state.prevPos[0], sample->pos[1] - state.prevPos[1]};
+        const float horiVec[2] = {sample->horizon[0] - state.prevHorizon[0],
+                                  sample->horizon[1] - state.prevHorizon[1]};
+        const float distVec = sample->dist - state.prevDist;
+        WriteVec2(addr + kPos, sample->pos);
+        WriteVec2(addr + kVec, vec);
+        Memory::WriteFloat32(addr + kSpeed, std::hypot(vec[0], vec[1]));
+        WriteVec2(addr + kHorizon, sample->horizon);
+        WriteVec2(addr + kHoriVec, horiVec);
+        Memory::WriteFloat32(addr + kHoriSpeed, std::hypot(horiVec[0], horiVec[1]));
+        Memory::WriteFloat32(addr + kDist, sample->dist);
+        Memory::WriteFloat32(addr + kDistVec, distVec);
+        Memory::WriteFloat32(addr + kDistSpeed, std::fabs(distVec));
+        WriteZeroFloats(addr + kAccVertical, 2);
+        Memory::Write8(addr + kDpdValidFg, kDpdValidTwoDots);
+        state.prevDpdValid = true;
+        state.prevPos[0] = sample->pos[0];
+        state.prevPos[1] = sample->pos[1];
+        state.prevHorizon[0] = sample->horizon[0];
+        state.prevHorizon[1] = sample->horizon[1];
+        state.prevDist = sample->dist;
+    } else {
+        WriteZeroFloats(addr + kPos, (kAccVertical + 8 - kPos) / 4);
+        Memory::Write8(addr + kDpdValidFg, 0);
+        state.prevDpdValid = false;
+    }
 
     const uint8_t devType = sample->hasClassic ? kDevClassic : sample->hasNunchuk ? kDevFreestyle : kDevCore;
     const uint8_t dataFormat =
@@ -170,7 +230,9 @@ void WriteUnifiedStatus(uint32_t addr, const WiiRemoteInput::KpadSample* sample)
     Memory::Write16(addr + kUAccX, RawAcc(-sample->acc[0]));
     Memory::Write16(addr + kUAccY, RawAcc(sample->acc[2]));
     Memory::Write16(addr + kUAccZ, RawAcc(-sample->acc[1]));
-    // No IR: every DPDObject invalid (x/y at the sensor's out-of-range value).
+    // No raw IR: every DPDObject invalid (x/y at the sensor's out-of-range
+    // value). The VR pointer is only synthesised at the KPADStatus level, which
+    // is where the game reads it; no camera dots are invented for it here.
     for (uint32_t i = 0; i < 4; ++i) {
         Memory::Write16(addr + kUObj + i * 8, 0x3FF);
         Memory::Write16(addr + kUObj + i * 8 + 2, 0x3FF);

@@ -29,6 +29,7 @@ Standalone launches remain opt-in. `Config.toml` is created with the following d
 enabled = false
 required = false
 mirror_view = "normal"
+controller_mode = "wii_remote"
 frame_interpolation_fps = 0
 render_scale = 1.0
 world_units_per_meter = 500.0
@@ -123,6 +124,72 @@ desktop. `skip_copy_clears` independently suppresses the EFB reset performed aft
 default on and can be changed live from the F10 settings bar for diagnostics.
 `first_person` and the `first_person_*` values are the first-person camera described below. All
 four are live and are also exposed in the F10 settings bar.
+
+## Controllers
+
+The headset's tracked controllers reach the game through an OpenXR action set synced on the pacing
+thread (`runtime/src/vr/openxr_input.cpp`), which feeds a virtual SDL gamepad that Aurora assigns
+to a port like any other. `controller_mode` decides what the game finds on that port, and is live
+from **F10 > VR > VR controllers**; the game sees a change as a controller reconnection.
+
+`"wii_remote"`, the default, presents them as a Wii Remote with a Nunchuk, the way DolphinXR's
+OpenXR Wii Remote does, including its default `OpenXR Wii Remote` profile for the Touch
+controllers. The port is served through KPAD like a Bluetooth remote (`wii_remote_input.cpp`), so
+`WPADProbe` reports a Nunchuk and the game runs its own Wii Remote + Nunchuk control scheme:
+
+| Controller | Wii |
+| --- | --- |
+| Right A | A |
+| Right trigger | B |
+| Right stick up / down | 1 / 2 |
+| Right stick left / right | − / + |
+| Left stick | Nunchuk stick |
+| Left trigger | Z |
+| Left grip | C |
+| Left menu | HOME |
+| Right controller motion and aim | Wii Remote accelerometer and pointer |
+| Left controller motion | Nunchuk accelerometer |
+
+Analog inputs count as pressed past half travel. Right B, left X/Y and the stick clicks are unbound,
+as in DolphinXR's profile. The game's Wii Remote rumble vibrates both controllers, subject to the
+ordinary controller-vibration switch.
+
+**Motion.** Each XR frame the aim and grip poses are located at the measured current time
+(`XR_KHR_win32_convert_performance_counter_time`, `XR_KHR_convert_timespec_time` on Android), not
+the predicted display time, whose extrapolation sprays fast wrist motion. The grip's linear
+velocity, averaged with one derived from its position, is differentiated over XrTime into
+acceleration; gravity is added and the result is expressed in the aim pose's frame. KPAD's
+accelerometer axes are the aim pose's `(x, -y, z)` in g: a level controller reads `(0, -1, 0)`,
+pointing at the floor `(0, 0, 1)`. Readings saturate at ±3.6 g like the remote's sensor, and a
+controller that loses tracking repeats its last reading. The game's own motion detection (tricks,
+wheelies) then works on these readings as it would on a remote's.
+
+**Pointer.** The pointer is absolute, as in DolphinXR: the right controller's aim ray is intersected
+with the screen the renderer is showing, and the point it meets is where the cursor goes, so there
+is nothing to recenter. On the menu screen that is the quad layer, `hud_width_meters` across with
+the eye texture's aspect, and the pointer spans the game picture inside it (Aurora letterboxes the
+desktop image into the quad and the picture into the desktop image, so a 4:3 picture keeps its
+pillarboxes). During a race it is the 2D layer's screen, `hud_distance_meters` ahead of the latched
+race origin and turned by the lean-back angle, with the picture's aspect. With
+`hud_virtual_screen = false` the race's 2D layer has no fixed place and the pointer is off. The
+game's own pointer switch (`KPADEnableDpd` / `KPADDisableDpd`) is honoured as well.
+
+The hit becomes KPAD's `pos` (−1..1 across the picture, +y down), `horizon` (the controller's roll
+on the screen) and `dist` (perpendicular distance in metres, so rotating the controller does not
+change it). Like a real remote's camera, the pointer keeps tracking up to 1.9 half-widths and 1.5
+half-heights past the picture's centre; a lost hit or an excursion beyond that holds or pins the
+cursor for 100 ms before it disappears, so tracking spikes during fast motion do not drop it.
+Raw IR camera dots in `KPADGetUnifiedWpadStatus` stay invalid; the game reads the pointer from
+`KPADStatus`.
+
+`"gamepad"` keeps the controllers one ordinary gamepad read through PAD as a GameCube controller:
+A/B → South/East, X/Y → West/North, index triggers → trigger axes, grips → shoulders, thumbsticks
+→ sticks (clicks → stick buttons), left menu → Start. Every binding in the F10 controller menu
+applies.
+
+Bindings are suggested for `oculus/touch_controller` (Quest 2, 3 and Pro) and
+`khr/simple_controller`. `mkw_vr_wii_remote_tests` checks the accelerometer frame, the pointer
+raycast and debounce, the picture placement and the button profile without a headset.
 
 ## The first-person camera
 
@@ -309,9 +376,10 @@ ends, including mid-frame flushes, so live setting changes cannot invalidate pen
 ## Current limitations
 
 - Only the project's supported PAL `RMCP01` translation has race instrumentation addresses.
-- Wii Remote pointer/motion emulation from tracked controllers is not implemented. OpenXR action
-  bindings exist only on the Android build, where they present the Touch controllers as one
-  ordinary gamepad; on Windows use the existing game-controller input path.
+- The tracked controllers are always Player 1's Wii Remote; there is no left-handed swap, and only
+  the Touch and simple controller profiles have suggested bindings. The Wii Remote presentation
+  still needs headset validation: cursor direction and roll, trick/wheelie motion, rumble strength
+  and the HOME Menu.
 - The Quest build (`android/`, `docs/quest-port.md`) runs on a Quest 3 through menus and races.
   Lifecycle events and performance (about 43 game FPS) are still open. Apple visionOS packaging
   is not implemented.
