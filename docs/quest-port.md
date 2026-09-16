@@ -116,6 +116,14 @@ menu → Start. Bindings are suggested for `oculus/touch_controller` and
   `QuestSurface` subclass brackets SDL's `surfaceChanged`/`surfaceDestroyed`
   with `aurora_android_begin/end_surface_mutation` (`aurora/android.h`), and
   Aurora's `SurfaceLock` owns its own recursive mutex. This is KartPad's design.
+- **No full-display mirror.** SDL sizes the app's Android surface to the whole
+  display (4128x2208 on a Quest 3), which nobody sees while OpenXR drives the
+  headset. `QuestSurface` pins the surface buffer to 1280x720. That size also
+  sets Aurora's presentation snapshot, which is the image the menu virtual
+  screen shows in each eye, where it spans about 900 pixels. While a stereo
+  provider is registered on Android, Aurora skips the surface present and the
+  desktop mirror copy (`headset_owns_display` in `lib/aurora.cpp`). The game's
+  own render size is unaffected: at `resolution_multiplier = 1` it is 640x528.
 - **JNI only on the real thread stack.** Guest threads run on libco stacks
   inside the SDL thread, and SDL's Android event pump can reach Java (joystick
   polling, HIDAPI). ART binds JNI transitions to the thread's real stack, so
@@ -246,6 +254,7 @@ the app:
 | `debug.wiicompiled.vtxpad 0` | Turns the stride padding off, to re-check a driver update |
 | `debug.wiicompiled.validation 1` | Keeps WebGPU validation and robustness on in release builds |
 | `debug.wiicompiled.inject <n>:<button>` | Presses `a`, `b`, `x`, `y`, `start`, `up`, `down`, `left` or `right` for 12 XR frames each time `<n>` changes |
+| `debug.wiicompiled.fpslog 1` | Logs the game's rendered frame rate every 5 s. The compositor's `VrApi` log line gives headset FPS, `GPU%`, `CPU%` and app GPU time (`App=`) |
 
 The injector makes headset tests possible with nobody wearing the headset.
 Keep the display awake, drive the menus, then take a compositor screenshot:
@@ -262,10 +271,21 @@ screen is up, reach Grand Prix character select. A value left over from an
 earlier run is ignored on the first read. Presses only land while the XR
 session is `FOCUSED`.
 
-Open measurement: the attract race advanced 603 game frames in about 14 s,
-roughly 43 FPS against the game's 60, with an optimized build (`-O3`,
-translated code `-O2`, `-mcpu=cortex-a77`). Profiling on the XR2 Gen 2 is the
-first performance task.
+Performance, measured 2026-09-16 on a 50cc Luigi Circuit start with the player
+idle, over 40 s, with an optimized build (`-O3`, translated code `-O2`,
+`-mcpu=cortex-a77`):
+
+| Build | Game FPS | Headset FPS | App GPU time | GPU% |
+| --- | --- | --- | --- | --- |
+| Full-display mirror (4128x2208) | about 48.5 | 48.7 | 15.6 ms | 83 |
+| 1280x720 surface, no present | about 48.6 | 49.3 | 14.9 ms | 81 |
+
+Removing the mirror saved about 0.7 ms of GPU time per frame but did not raise
+the game rate. Two leads remain. The game runs below 60 FPS with the GPU at
+about 80%, and CPU and GPU clock levels sit at 4/3. The headset FPS also
+follows the game rate instead of holding 72 Hz, so the pacing thread is not
+repeating the last layer as it does on desktop. Both need profiling on the
+XR2 Gen 2.
 
 Verified on device since: the menus on the virtual screen, controller input
 (the user has driven races), and an immersive Grand Prix start with all 12

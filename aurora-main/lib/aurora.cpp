@@ -22,6 +22,7 @@
 #include <SDL3/SDL_thread.h>
 #include <magic_enum.hpp>
 
+#include "android_debug.hpp"
 #include "system_info.hpp"
 #include "tracy/Tracy.hpp"
 
@@ -1165,8 +1166,22 @@ std::shared_ptr<PresentationImage> acquire_presentation_image(size_t slot, uint3
   return image;
 }
 
+// A standalone headset never shows the app's Android surface while OpenXR drives the display, so presenting to it
+// (and copying the mirror image the desktop would show) is pure GPU cost there. Presentation snapshots are still
+// encoded: in menus the virtual-screen eyes are built from them. Desktop keeps its window mirror.
+bool headset_owns_display() noexcept {
+#if defined(__ANDROID__)
+  return stereo_frame_provider_active();
+#else
+  return false;
+#endif
+}
+
 bool present_presentation_job(const PresentationJob& job) {
   ZoneScoped;
+  if (headset_owns_display()) {
+    return false;
+  }
   const auto submissionStarted = PresentClock::now();
   // Keep the threshold far above compositor and scheduling jitter. The timings below separate a
   // real surface stall from a bad deadline, and only the former needs a rebuild.
@@ -1857,8 +1872,12 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
   const bool immersiveReplay = stereoOutput && ctx.immersiveStereoPrepared;
   // One choice for the whole group: a slot showing the mono view next to slots
   // mirroring an eye would strobe between two different images.
-  const MirrorPlan mirrorPlan = g_stereoMirrorState.Resolve(
-      gfx::get_stereo_mirror_view(), stereo_frame_provider_active(), stereoOutput, immersiveReplay);
+  // Nothing presents the snapshot on a headset, so it only needs the clear (see headset_owns_display).
+  const bool headsetOnly = headset_owns_display();
+  const MirrorPlan mirrorPlan =
+      headsetOnly ? MirrorPlan::Black
+                  : g_stereoMirrorState.Resolve(gfx::get_stereo_mirror_view(), stereo_frame_provider_active(),
+                                                stereoOutput, immersiveReplay);
 
   // Each slot is submitted as soon as it is encoded, so the GPU starts slot 0 while slot 1 is still
   // recording. Queue order preserves the ordering the single batched buffer gave.
@@ -1958,7 +1977,7 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
     for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
       encode_virtual_screen_eye(encoder, completedMono, eye);
     }
-    if (mirrorPlan == MirrorPlan::Black) {
+    if (mirrorPlan == MirrorPlan::Black && !headsetOnly) {
       encode_presentation_snapshot(encoder, ctx.presentSource, *finalImage, true, MirrorPlan::Black);
     }
   }
@@ -2077,6 +2096,26 @@ void record_frame_telemetry() {
   TracyPlot("aurora: mainThreadCpuUsPerFrame", static_cast<int64_t>((threadCpu100ns - previousThreadCpu100ns) / 10));
   previousProcessCpu100ns = processCpu100ns;
   previousThreadCpu100ns = threadCpu100ns;
+#endif
+#if defined(__ANDROID__)
+  {
+    // `adb shell setprop debug.wiicompiled.fpslog 1` before launch logs the game's rendered frame rate every five
+    // seconds. The headset compositor's own log (logcat tag VrApi) repeats frames, so it cannot show this.
+    static const bool fpsLog = android_debug::property_int("debug.wiicompiled.fpslog", 0) == 1;
+    if (fpsLog) {
+      static auto windowStart = std::chrono::steady_clock::now();
+      static uint32_t windowFrames = 0;
+      ++windowFrames;
+      const auto now = std::chrono::steady_clock::now();
+      const std::chrono::duration<double> elapsed = now - windowStart;
+      if (elapsed.count() >= 5.0) {
+        Log.info("Game frame rate {:.1f} FPS ({} frames in {:.2f} s)", windowFrames / elapsed.count(), windowFrames,
+                 elapsed.count());
+        windowStart = now;
+        windowFrames = 0;
+      }
+    }
+  }
 #endif
   FrameMarkNamed("Aurora frame");
 }

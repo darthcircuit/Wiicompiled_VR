@@ -12,8 +12,20 @@ import org.libsdl.app.SDLSurface
  * activity mutex internal to libSDL3.so, so this subclass brackets SDL's
  * handling instead: begin takes Aurora's surface lock and pauses presentation,
  * end releases it and reports whether SDL left the surface ready.
+ *
+ * The surface buffer is also pinned to [BUFFER_WIDTH] x [BUFFER_HEIGHT]. An
+ * immersive app's Android surface is never shown in the headset, yet SDL sizes
+ * it to the whole display (4128x2208 on a Quest 3). Aurora sizes its
+ * presentation snapshot from it, and in menus that snapshot is the image the
+ * virtual screen shows in each eye. The screen spans about 900 eye pixels at
+ * the default HUD size, so 1280x720 keeps menus sharp at a small fraction of
+ * the cost.
  */
 class QuestSurface(context: Context) : SDLSurface(context) {
+
+    init {
+        holder.setFixedSize(BUFFER_WIDTH, BUFFER_HEIGHT)
+    }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         nativeBeginSurfaceMutation()
@@ -35,4 +47,9 @@ class QuestSurface(context: Context) : SDLSurface(context) {
 
     private external fun nativeBeginSurfaceMutation()
     private external fun nativeEndSurfaceMutation(ready: Boolean)
+
+    private companion object {
+        const val BUFFER_WIDTH = 1280
+        const val BUFFER_HEIGHT = 720
+    }
 }

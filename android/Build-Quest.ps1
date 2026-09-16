@@ -57,9 +57,11 @@ if (-not $CMakeDir -or -not (Test-Path (Join-Path $CMakeDir 'bin\cmake.exe'))) {
 }
 $sdkCMake = Get-ChildItem -Path (Join-Path $sdkRoot 'cmake') -Directory | Sort-Object Name -Descending | Select-Object -First 1
 if ($sdkCMake) { $env:PATH = (Join-Path $sdkCMake.FullName 'bin') + ';' + $env:PATH }
+# Parenthesised: PowerShell's comma binds tighter than +, which would join both
+# properties into a single line.
 $localProperties = @(
-    'sdk.dir=' + $sdkRoot.Replace('\', '\\'),
-    'cmake.dir=' + $CMakeDir.Replace('\', '\\')
+    ('sdk.dir=' + $sdkRoot.Replace('\', '\\')),
+    ('cmake.dir=' + $CMakeDir.Replace('\', '\\'))
 )
 Set-Content -Path (Join-Path $root 'local.properties') -Value $localProperties -Encoding ascii
 
