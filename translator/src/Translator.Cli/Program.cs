@@ -166,7 +166,7 @@ return command switch
 {
     "help" or "--help" or "-h" or "-?" => ShowGlobalHelp(),
     "info" or "--info" or "--version" => RunInfo(),
-    "generate-data-init" => RunGenerateDataInit(),
+    "generate-data-init" => RunGenerateDataInit(tail),
     "translate-recursive" => RunTranslateRecursive(tail),
     "translate-mod" => RunTranslateMod(tail),
     "emit-build-shards" => RunEmitBuildShards(tail),
@@ -1647,6 +1647,10 @@ void PreserveTranslateModFailureDiagnostics(string stagingDirectory, string publ
 
 int RunTranslateModCore(string[] argsTail, string? outputDirectoryOverride)
 {
+    if (ParseTargetOsOption(argsTail) is not { } modTargetOs)
+    {
+        return 1;
+    }
     // Wall-clock accounting mirroring RunTranslateRecursive's LogPhase output.
     var modPhaseStart = DateTime.Now;
     var modLastPhaseSeconds = 0d;
@@ -1964,7 +1968,8 @@ int RunTranslateModCore(string[] argsTail, string? outputDirectoryOverride)
             "cpp",
             "mod_data_patches_blobs"),
         profile?.Riivolution?.Xml,
-        riivolutionOptions);
+        riivolutionOptions,
+        targetOs: modTargetOs);
 
     if (emitCpp && cppFailureCount == 0)
     {
@@ -2943,9 +2948,13 @@ int RunEmitBaseManifest(string[] argsTail)
     return 0;
 }
 
-int RunGenerateDataInit()
+int RunGenerateDataInit(string[] argsTail)
 {
     var loadedProject = RequireProject();
+    if (ParseTargetOsOption(argsTail) is not { } dataInitTargetOs)
+    {
+        return 1;
+    }
     var output = loadedProject.Output.DataInitializer;
     var runtimeConfigOutput = loadedProject.Output.RuntimeConfig;
     var dolPath = loadedProject.Inputs.Dol.Path;
@@ -2978,7 +2987,9 @@ int RunGenerateDataInit()
         relImage,
         output,
         loadedProject.Identity.DisplayName,
-        relPath is null ? "rel_module" : Path.GetFileNameWithoutExtension(relPath));
+        relPath is null ? "rel_module" : Path.GetFileNameWithoutExtension(relPath),
+        targetOs: dataInitTargetOs);
+    Console.WriteLine($"[translator] Blob assembly flavour: {dataInitTargetOs}");
     
     // Emit the guest symbol table for crash-report symbolization. The function
     // map is already the project's authoritative name source; the runtime only
@@ -3712,7 +3723,7 @@ static (string? Positional, CommandOption[] Options)? CommandSpec(string command
 {
     "info" or "--info" or "--version" =>
         (null, Array.Empty<CommandOption>()),
-    "generate-data-init" => (null, Array.Empty<CommandOption>()),
+    "generate-data-init" => (null, new CommandOption[] { new("--target-os", "windows|macos|linux|android") }),
     "translate-recursive" => ("<start_addr>", new CommandOption[]
     {
         new("--outdir", "path"),
@@ -3736,7 +3747,8 @@ static (string? Positional, CommandOption[] Options)? CommandSpec(string command
         new("--threads", "N"),
         new("--retro-wfc-payload", "path-or-url"),
         new("--skip-retro-wfc"),
-        new("--emit-cpp")
+        new("--emit-cpp"),
+        new("--target-os", "windows|macos|linux|android")
     }),
     "check-base-mod-awareness" => (null, new CommandOption[]
     {
@@ -3949,6 +3961,27 @@ static int ParseInt(string text) =>
     text.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
         ? int.Parse(text[2..], NumberStyles.HexNumber, CultureInfo.InvariantCulture)
         : int.Parse(text, CultureInfo.InvariantCulture);
+
+/// <summary>
+/// The object-file flavour for hand-written blob assembly. Absent, the translator's own host is
+/// assumed (the historical behaviour); a cross-compiled product names its target explicitly.
+/// Null means the value was present but unrecognised, and the error has already been printed.
+/// </summary>
+static AssemblyTargetOs? ParseTargetOsOption(string[] argsTail)
+{
+    var text = OptionValue(argsTail, "--target-os");
+    if (text is null)
+    {
+        return AssemblyTargetOsSyntax.Host();
+    }
+    if (AssemblyTargetOsSyntax.TryParse(text, out var target))
+    {
+        return target;
+    }
+    Console.Error.WriteLine(
+        $"[translator] --target-os '{text}' is not recognised; expected one of {AssemblyTargetOsSyntax.AcceptedNames}.");
+    return null;
+}
 
 static string? OptionValue(string[] argsTail, string name)
 {

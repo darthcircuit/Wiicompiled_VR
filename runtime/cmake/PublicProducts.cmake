@@ -4,15 +4,38 @@
 # functions are compiled once into mkw_base_shared; only callers whose direct
 # ABI differs between profiles receive small base/RR variants.
 
-set(DATA_INIT_FILE "${MKW_RUNTIME_SOURCE_DIR}/../generated/data_sections_init.cpp")
-set(DATA_INIT_BLOB_ASM "${MKW_RUNTIME_SOURCE_DIR}/../generated/data_sections_init_blobs.S")
+# The translator's output tree. It sits next to runtime/ in the installer's
+# build workspace; a build configured straight from a checkout (the Android
+# app, the test build dirs) names the workspace copy instead.
+set(MKW_GENERATED_DIR "${MKW_RUNTIME_SOURCE_DIR}/../generated" CACHE PATH
+    "Translator output directory holding data_sections_init.cpp and RuntimeConfig.h")
+get_filename_component(MKW_GENERATED_PARENT_DIR "${MKW_GENERATED_DIR}" DIRECTORY)
+
+set(DATA_INIT_FILE "${MKW_GENERATED_DIR}/data_sections_init.cpp")
+set(DATA_INIT_BLOB_ASM "${MKW_GENERATED_DIR}/data_sections_init_blobs.S")
+if(MKW_PLATFORM_ANDROID AND EXISTS "${DATA_INIT_BLOB_ASM}")
+    # The Windows installer generates the blob assembly for PE/COFF. The payload
+    # is byte-identical on every platform (the .S only wraps .incbin
+    # directives), so rewrite the section syntax for ELF here rather than
+    # requiring a second translation pass for the Quest build. A tree generated
+    # with `generate-data-init --target-os android` passes through unchanged.
+    file(READ "${DATA_INIT_BLOB_ASM}" MKW_ANDROID_BLOB_ASM_TEXT)
+    string(REPLACE ".section .rdata,\"dr\"" ".section .rodata,\"a\",@progbits"
+        MKW_ANDROID_BLOB_ASM_ELF "${MKW_ANDROID_BLOB_ASM_TEXT}")
+    if(NOT MKW_ANDROID_BLOB_ASM_ELF STREQUAL MKW_ANDROID_BLOB_ASM_TEXT)
+        string(APPEND MKW_ANDROID_BLOB_ASM_ELF "\n.section .note.GNU-stack,\"\",@progbits\n")
+        set(DATA_INIT_BLOB_ASM "${CMAKE_CURRENT_BINARY_DIR}/data_sections_init_blobs_android.S")
+        file(WRITE "${DATA_INIT_BLOB_ASM}" "${MKW_ANDROID_BLOB_ASM_ELF}")
+        message(STATUS "Rewrote the PE/COFF blob assembly for ELF: ${DATA_INIT_BLOB_ASM}")
+    endif()
+endif()
 if(EXISTS "${DATA_INIT_FILE}")
     list(APPEND SOURCES "${DATA_INIT_FILE}")
 endif()
 # Crash-report symbolization table emitted by generate-data-init. The stub
 # (deliberately outside the globbed src/ tree so it is never picked up twice)
 # keeps link succeeding when the generated table has not been produced yet.
-set(GUEST_SYMBOL_TABLE_FILE "${MKW_RUNTIME_SOURCE_DIR}/../generated/guest_symbol_table.cpp")
+set(GUEST_SYMBOL_TABLE_FILE "${MKW_GENERATED_DIR}/guest_symbol_table.cpp")
 if(EXISTS "${GUEST_SYMBOL_TABLE_FILE}")
     list(APPEND SOURCES "${GUEST_SYMBOL_TABLE_FILE}")
 else()
@@ -45,6 +68,7 @@ function(mkw_configure_object_target target)
         "${MKW_RUNTIME_SOURCE_DIR}/src"
         # Workspace root, so translator output is spelled "generated/<x>.h"
         # instead of a ../ chain whose depth depends on the includer.
+        "${MKW_GENERATED_PARENT_DIR}"
         "${MKW_RUNTIME_SOURCE_DIR}/.."
         "${MKW_RUNTIME_SOURCE_DIR}/../aurora-main/include")
     target_compile_definitions(${target} PRIVATE
@@ -76,8 +100,10 @@ endfunction()
 add_library(mkw_runtime_common OBJECT ${SOURCES})
 mkw_configure_object_target(mkw_runtime_common)
 target_compile_features(mkw_runtime_common PRIVATE cxx_std_20)
+# On Android SDL owns the entry point: main.cpp includes SDL_main.h so that
+# SDLActivity's nativeRunMain finds SDL_main inside libmain.so.
 target_compile_definitions(mkw_runtime_common PRIVATE
-    SDL_MAIN_HANDLED
+    $<$<NOT:$<PLATFORM_ID:Android>>:SDL_MAIN_HANDLED>
     _DISABLE_STRING_ANNOTATION _DISABLE_VECTOR_ANNOTATION)
 target_link_libraries(mkw_runtime_common PRIVATE
     aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
@@ -91,6 +117,10 @@ elseif(MKW_PLATFORM_LINUX)
     # ${CMAKE_DL_LIBS} for music_attenuation.cpp's dlopen of libdbus-1 (MPRIS
     # media monitoring). Empty string on glibc >= 2.34 where dl* is in libc.
     target_link_libraries(mkw_runtime_common PRIVATE mkw::libco ${CMAKE_DL_LIBS})
+elseif(MKW_PLATFORM_ANDROID)
+    # libvulkan for the OpenXR-side device, android/log for AHardwareBuffer,
+    # JNI and logcat.
+    target_link_libraries(mkw_runtime_common PRIVATE mkw::libco android log vulkan ${CMAKE_DL_LIBS})
 endif()
 if(MKW_CPPWINRT_INCLUDE_DIR)
     if(NOT EXISTS "${MKW_CPPWINRT_INCLUDE_DIR}/winrt/base.h")
@@ -167,6 +197,26 @@ if(MKW_HAVE_RETRO_REWIND)
         target_precompile_headers(mkw_retro_sensitive REUSE_FROM mkw_base_shared)
     endif()
 
+    if(MKW_PLATFORM_ANDROID)
+        # Same PE/COFF-to-ELF rewrite as the base data blobs above.
+        set(MKW_ANDROID_RETRO_EXTRA_SOURCES)
+        foreach(source IN LISTS MKW_RETRO_EXTRA_SOURCES)
+            if(source MATCHES "\\.S$")
+                file(READ "${source}" MKW_ANDROID_RETRO_BLOB_TEXT)
+                string(REPLACE ".section .rdata,\"dr\"" ".section .rodata,\"a\",@progbits"
+                    MKW_ANDROID_RETRO_BLOB_ELF "${MKW_ANDROID_RETRO_BLOB_TEXT}")
+                if(NOT MKW_ANDROID_RETRO_BLOB_ELF STREQUAL MKW_ANDROID_RETRO_BLOB_TEXT)
+                    string(APPEND MKW_ANDROID_RETRO_BLOB_ELF "\n.section .note.GNU-stack,\"\",@progbits\n")
+                    get_filename_component(source_name "${source}" NAME_WE)
+                    set(source "${CMAKE_CURRENT_BINARY_DIR}/${source_name}_android.S")
+                    file(WRITE "${source}" "${MKW_ANDROID_RETRO_BLOB_ELF}")
+                endif()
+            endif()
+            list(APPEND MKW_ANDROID_RETRO_EXTRA_SOURCES "${source}")
+        endforeach()
+        set(MKW_RETRO_EXTRA_SOURCES ${MKW_ANDROID_RETRO_EXTRA_SOURCES})
+    endif()
+
     set(MKW_RETRO_TRANSLATED_SOURCES ${MKW_RETRO_MOD_SHARDS} ${MKW_RETRO_EXTRA_SOURCES})
     set(MKW_RETRO_BLOB_OBJECTS)
     foreach(source IN LISTS MKW_RETRO_EXTRA_SOURCES)
@@ -192,10 +242,12 @@ function(mkw_configure_product target)
         "${MKW_RUNTIME_SOURCE_DIR}/src"
         # Workspace root, so translator output is spelled "generated/<x>.h"
         # instead of a ../ chain whose depth depends on the includer.
+        "${MKW_GENERATED_PARENT_DIR}"
         "${MKW_RUNTIME_SOURCE_DIR}/.."
         "${MKW_RUNTIME_SOURCE_DIR}/../aurora-main/include")
     target_compile_definitions(${target} PRIVATE
-        SDL_MAIN_HANDLED _DISABLE_STRING_ANNOTATION _DISABLE_VECTOR_ANNOTATION TARGET_PC)
+        $<$<NOT:$<PLATFORM_ID:Android>>:SDL_MAIN_HANDLED>
+        _DISABLE_STRING_ANNOTATION _DISABLE_VECTOR_ANNOTATION TARGET_PC)
     target_compile_features(${target} PRIVATE cxx_std_20)
     mkw_apply_common_compile_options(${target})
     # The dispatch-table and registration shards compile inside the product target itself and
@@ -244,6 +296,8 @@ function(mkw_configure_product target)
         # here for the same reason: music_attenuation.cpp's dlopen(libdbus-1) lives in those
         # objects (empty string on glibc >= 2.34, where dl* is in libc).
         target_link_libraries(${target} PRIVATE mkw::libco ${CMAKE_DL_LIBS})
+    elseif(MKW_PLATFORM_ANDROID)
+        target_link_libraries(${target} PRIVATE mkw::libco android log vulkan ${CMAKE_DL_LIBS})
     endif()
     if(MKW_PLATFORM_WINDOWS)
         foreach(runtime_dll libc++.dll libunwind.dll)
@@ -296,7 +350,15 @@ function(mkw_configure_product target)
         "$<TARGET_FILE_DIR:${target}>/initial_pipeline_cache.db")
 endfunction()
 
-add_executable(WiiCompiled "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})
+# Android ships each product as the shared library SDLActivity loads; the base
+# game keeps SDL's conventional "main" name and Retro Rewind gets its own so a
+# dual-flavour app can bundle both without a name clash.
+if(MKW_PLATFORM_ANDROID)
+    add_library(WiiCompiled SHARED "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})
+    set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME main)
+else()
+    add_executable(WiiCompiled "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})
+endif()
 mkw_configure_product(WiiCompiled)
 target_precompile_headers(WiiCompiled PRIVATE
     "${MKW_RUNTIME_SOURCE_DIR}/include/mkw_pch.h")
@@ -305,7 +367,12 @@ if(TARGET mkw_base_sensitive)
 endif()
 
 if(MKW_HAVE_RETRO_REWIND)
-    add_executable(RetroRewind "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
+    if(MKW_PLATFORM_ANDROID)
+        add_library(RetroRewind SHARED "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
+        set_target_properties(RetroRewind PROPERTIES OUTPUT_NAME main_retro_rewind)
+    else()
+        add_executable(RetroRewind "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
+    endif()
     mkw_configure_product(RetroRewind)
     target_precompile_headers(RetroRewind REUSE_FROM WiiCompiled)
     if(TARGET mkw_retro_sensitive)
@@ -327,6 +394,11 @@ endif()
 # tuning rather than leaving target-specific performance on the table.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
     set(MKW_BASELINE_ARCH_FLAG -march=x86-64-v3)
+elseif(MKW_PLATFORM_ANDROID)
+    # Cross-compiled, so "native" would describe the build host. Cortex-A77 is
+    # the Snapdragon XR2 Gen 1 (Quest 2) core; Quest 3 / Pro are supersets.
+    set(MKW_ANDROID_CPU "cortex-a77" CACHE STRING "AArch64 -mcpu target for the Android products")
+    set(MKW_BASELINE_ARCH_FLAG -mcpu=${MKW_ANDROID_CPU})
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
     set(MKW_BASELINE_ARCH_FLAG -mcpu=native)
 else()

@@ -131,7 +131,9 @@ inline std::filesystem::path PathFromUtf8(std::string_view text) {
 }
 
 inline constexpr const char* kConfigFileName = "Config.toml";
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__ANDROID__)
+// The Quest activity (android/.../QuestActivity.kt) creates this directory
+// under the app's external files dir and writes Config.toml into it.
 inline constexpr const char* kApplicationDirectoryName = "WiiCompiledOpenXRVR";
 #else
 inline constexpr const char* kApplicationDirectoryName = "WiiCompiled";
@@ -269,7 +271,10 @@ inline std::optional<std::filesystem::path> ExecutableDirectory() {
         }
         buffer.resize(buffer.size() * 2);
     }
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__ANDROID__)
+    // Android has no executable next to which assets could sit; the platform
+    // layer answers with the directory the activity unpacked the bundled
+    // runtime resources into, so the adjacent-file lookups below keep working.
     return RuntimePlatform::ExecutableDirectory();
 #else
     // /proc/self/exe is a Linux-specific magic symlink to the running executable; readlink()
@@ -328,7 +333,7 @@ inline std::filesystem::path ApplicationDataDirectory() {
         CoTaskMemFree(rawPath);
         return directory;
     }
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__ANDROID__)
     return RuntimePlatform::ApplicationDataDirectory(kApplicationDirectoryName);
 #else
     // XDG Base Directory spec equivalent of FOLDERID_LocalAppData: $XDG_DATA_HOME if set and

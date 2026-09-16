@@ -24,7 +24,8 @@ public static class DataSectionGenerator
         string outputPath,
         string projectName = "PowerPC DOL",
         string relName = "rel_module",
-        string? blobReferenceDirectory = null)
+        string? blobReferenceDirectory = null,
+        AssemblyTargetOs? targetOs = null)
     {
         var sections = new List<DataSectionEntry>();
         
@@ -65,7 +66,8 @@ public static class DataSectionGenerator
             sections,
             blobDirectory,
             blobReferenceDirectory ?? blobDirectory,
-            blobAssemblyPath);
+            blobAssemblyPath,
+            targetOs ?? AssemblyTargetOsSyntax.Host());
         WriteSourceFile(sections, outputPath, dol.BssAddress, dol.BssSize, projectName);
     }
     
@@ -90,7 +92,8 @@ public static class DataSectionGenerator
         List<DataSectionEntry> sections,
         string blobDirectory,
         string blobReferenceDirectory,
-        string assemblyPath)
+        string assemblyPath,
+        AssemblyTargetOs targetOs)
     {
         var blobs = sections.Select(section => new AssemblyBlob(
             $"{section.Name}.bin",
@@ -103,6 +106,7 @@ public static class DataSectionGenerator
             blobDirectory,
             blobReferenceDirectory,
             blobs,
+            targetOs,
             "// AUTO-GENERATED - DO NOT EDIT",
             "// Binary DOL/REL section payloads for data_sections_init.cpp.");
     }

@@ -16,7 +16,7 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Media.Control.h>
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
 #include <dlfcn.h>
 
 #include <string>
@@ -196,7 +196,7 @@ void MonitorWindowsMediaSessions() noexcept {
                    << error.message().c_str() << std::endl;
     }
 }
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
 
 // For linux - watches MPRIS players on the D-Bus session bus and drives the
 // same g_externalMediaPlaying / g_mediaControl* atomics.
@@ -453,7 +453,7 @@ void StartMonitor() noexcept {
     // The process owns this monitor for its remaining lifetime. Keeping it
     // detached avoids shutdown ordering between WinRT and static audio state.
     std::thread(MonitorWindowsMediaSessions).detach();
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
     // Detached so there is no shutdown ordering to manage against static audio state.
     std::thread(MonitorLinuxMprisSessions).detach();
 #else

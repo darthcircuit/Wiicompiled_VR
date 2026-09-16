@@ -70,6 +70,13 @@
 #include <aurora/aurora.h>
 #include <aurora/gfx.h>
 #include <dolphin/gx/GXAurora.h>
+
+#if defined(__ANDROID__)
+#include <android/log.h>
+// Renames main() to SDL_main(), which SDLActivity's nativeRunMain resolves
+// from libmain.so with dlsym once the Java side has set up the surface.
+#include <SDL3/SDL_main.h>
+#endif
 #include <dolphin/vi.h>
 
 // Defined in `runtime/src/hle/vi.cpp` (used by GX/VI HLE).
@@ -245,6 +252,11 @@ void WriteProcessTranscriptChunk(ProcessTranscriptState& state, const char* data
 
 void PumpTranscriptPipe(ProcessTranscriptState& state, int readFd, int mirrorFd) {
     std::array<char, 4096> buffer{};
+#if defined(__ANDROID__)
+    // Android sends stdout/stderr to /dev/null, so the mirror fd shows nothing;
+    // forward complete lines to logcat as well (tag WiiCompiled).
+    std::string pendingLine;
+#endif
     for (;;) {
 #if defined(_WIN32)
         const int bytesRead = _read(readFd, buffer.data(), static_cast<unsigned int>(buffer.size()));
@@ -275,6 +287,21 @@ void PumpTranscriptPipe(ProcessTranscriptState& state, int readFd, int mirrorFd)
         }
 
         WriteProcessTranscriptChunk(state, buffer.data(), static_cast<size_t>(bytesRead));
+#if defined(__ANDROID__)
+        pendingLine.append(buffer.data(), static_cast<size_t>(bytesRead));
+        size_t lineStart = 0;
+        for (size_t newline = pendingLine.find('\n'); newline != std::string::npos;
+             newline = pendingLine.find('\n', lineStart)) {
+            const std::string line = pendingLine.substr(lineStart, newline - lineStart);
+            __android_log_write(ANDROID_LOG_INFO, "WiiCompiled", line.c_str());
+            lineStart = newline + 1;
+        }
+        pendingLine.erase(0, lineStart);
+        if (pendingLine.size() > 3500) {
+            __android_log_write(ANDROID_LOG_INFO, "WiiCompiled", pendingLine.c_str());
+            pendingLine.clear();
+        }
+#endif
     }
 }
 
@@ -1352,6 +1379,16 @@ int RuntimeMain(int argc, char** argv) {
         const std::string auroraCachePath = RuntimeConfigFile::PathToUtf8(rendererCacheDirectory);
         auroraConfig.userPath = auroraUserPath.c_str();
         auroraConfig.cachePath = auroraCachePath.c_str();
+#if defined(__ANDROID__)
+        // Aurora defaults resourcesPath to SDL_GetBasePath(), which is empty on
+        // Android; the transferable pipeline cache lives with the other bundled
+        // resources the activity unpacked.
+        std::string auroraResourcesPath;
+        if (const auto resources = RuntimeConfigFile::ExecutableDirectory()) {
+            auroraResourcesPath = RuntimeConfigFile::PathToUtf8(*resources);
+            auroraConfig.resourcesPath = auroraResourcesPath.c_str();
+        }
+#endif
         auroraConfig.logCallback = &RuntimeAuroraLogCallback;
         auroraConfig.logLevel = LOG_DEBUG;
         const bool configWidescreen = RuntimeConfigFile::WidescreenEnabled(true);

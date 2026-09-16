@@ -1,4 +1,7 @@
 #include "fiber_manager.h"
+#if defined(__ANDROID__)
+#include "aurora_events.h"
+#endif
 #include "memory.h"
 #include "abi_bridge.h"
 #include "hle_stubs.h"
@@ -219,6 +222,10 @@ void GuestFiberManager::Shutdown() {
     s_initialized = false;
 }
 
+bool GuestFiberManager::IsOnSchedulerFiber() {
+    return !s_initialized || s_schedulerFiber == nullptr || HostContext::IsCurrent(s_schedulerFiber);
+}
+
 bool GuestFiberManager::IsInitialized() {
     return s_initialized;
 }
@@ -414,6 +421,11 @@ void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu
 
     // Switch to the target fiber (the target fiber will load its own context)
     HostContext::Switch(fiberHandle);
+#if defined(__ANDROID__)
+    // A guest thread running on its own stack may have deferred an SDL event
+    // poll to the scheduler stack; service it now if that is where we are.
+    ServicePendingAuroraEventsOnScheduler();
+#endif
 
     // When we return here, the fiber that issued SwitchToThread has resumed.
     // That does not automatically mean the previous guest thread became runnable

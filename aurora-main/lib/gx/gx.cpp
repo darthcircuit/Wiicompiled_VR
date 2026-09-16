@@ -11,6 +11,9 @@
 #include "../gfx/texture_convert.hpp"
 #include "../gfx/texture_replacement.hpp"
 #include "gx_fmt.hpp"
+#if defined(__ANDROID__)
+#include "../android_debug.hpp"
+#endif
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
@@ -1753,6 +1756,28 @@ static u8 index_attr_size(GXAttr attr, GXCompCnt cnt, GXAttrType type) noexcept 
   return indexSize;
 }
 
+// The Quest 3's Adreno 740 Vulkan driver decodes the wrong bytes when the vertex shader's
+// `ubuf.vtx_start + vidx * stride + offset` uses a stride that is not a multiple of 4. GX packs vertices byte-tight,
+// so every skinned character (a 1-byte PNMTXIDX first, stride 7) exploded and textured menu panels smeared. Rewriting
+// the WGSL byte helpers with constant shifts or integer division did not help; padding each uploaded vertex to a
+// 4-byte stride did, with attribute offsets inside the vertex unchanged (device-tested 2026-09-16). Indexed array
+// reads (`array_start + index * stride`, e.g. 6-byte S16 normals) get the same padding. KartPad reports the same
+// character corruption on Adreno 750. `adb shell setprop debug.wiicompiled.vtxpad 0` turns it off.
+u32 padded_upload_stride(u32 packedStride) noexcept {
+#if defined(__ANDROID__)
+  static const bool pad = [] {
+    const bool enabled = android_debug::property_int("debug.wiicompiled.vtxpad", 1) != 0;
+    Log.info("Vertex stride padding for Adreno: {}", enabled ? "on" : "off");
+    return enabled;
+  }();
+  const u32 padded = (packedStride + 3u) & ~3u;
+  // ShaderConfig::vtxStride is a u8.
+  return pad && padded <= 255u ? padded : packedStride;
+#else
+  return packedStride;
+#endif
+}
+
 void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept {
   ZoneScoped;
 
@@ -1790,12 +1815,12 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
       break;
     }
     case GX_INDEX8:
-      mapping.stride = g_gxState.arrays[i].stride;
+      mapping.stride = static_cast<u8>(padded_upload_stride(g_gxState.arrays[i].stride));
       mapping.le = g_gxState.arrays[i].le;
       vtxOffset += index_attr_size(attr, attrFmt.cnt, type);
       break;
     case GX_INDEX16:
-      mapping.stride = g_gxState.arrays[i].stride;
+      mapping.stride = static_cast<u8>(padded_upload_stride(g_gxState.arrays[i].stride));
       mapping.le = g_gxState.arrays[i].le;
       vtxOffset += index_attr_size(attr, attrFmt.cnt, type);
       break;
@@ -1803,7 +1828,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
       Log.fatal("populate_pipeline_config: Invalid vertex type {}", type);
     }
   }
-  config.shaderConfig.vtxStride = vtxOffset;
+  config.shaderConfig.vtxStride = static_cast<u8>(padded_upload_stride(vtxOffset));
   if (primitive == GX_LINES) {
     config.shaderConfig.lineMode = 1;
   } else if (primitive == GX_LINESTRIP) {

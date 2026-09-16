@@ -194,6 +194,8 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept { return {}; }
 void resolve_sampled_textures(const ShaderInfo& info) noexcept {}
 u8 color_channel(GXChannelID id) noexcept { return 0; }
+// Desktop behaviour: vertices upload with their packed GX stride.
+u32 padded_upload_stride(u32 packedStride) noexcept { return packedStride; }
 u8 comp_type_size(GXAttr attr, GXCompType type) noexcept {
   if (!s_useRealVertexFormatHelpers) {
     return 0;
@@ -281,6 +283,15 @@ namespace aurora::gfx {
 Range push_verts(const uint8_t* data, size_t length) {
   s_lastPushedVertices.assign(data, data + length);
   return {};
+}
+std::pair<ByteBuffer, Range> map_verts(size_t length) {
+  s_lastPushedVertices.assign(length, 0);
+  return {ByteBuffer{s_lastPushedVertices.data(), s_lastPushedVertices.size()}, Range{}};
+}
+std::pair<ByteBuffer, Range> map_storage(size_t length) {
+  static std::vector<uint8_t> storage;
+  storage.assign(length, 0);
+  return {ByteBuffer{storage.data(), storage.size()}, Range{}};
 }
 Range push_indices(const uint8_t* data, size_t length) {
   CHECK(length % sizeof(uint16_t) == 0, "unaligned test index upload");

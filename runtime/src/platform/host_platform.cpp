@@ -46,6 +46,14 @@ std::optional<std::filesystem::path> ExecutableDirectory() noexcept {
     std::error_code ec;
     const auto resolved = std::filesystem::weakly_canonical(path, ec);
     return (ec ? std::filesystem::path(path) : resolved).parent_path();
+#elif defined(__ANDROID__)
+    // Bundled read-only runtime resources (wii_bootstrap/, dsp_coef.bin,
+    // initial_pipeline_cache.db) unpacked from the APK by the activity. Stands
+    // in for the executable directory the desktop builds look next to.
+    if (const char* resources = std::getenv("MKW_ANDROID_RESOURCES_DIR"); resources && *resources) {
+        return std::filesystem::path(resources);
+    }
+    return std::nullopt;
 #else
     return std::nullopt;
 #endif
@@ -65,6 +73,13 @@ std::filesystem::path ApplicationDataDirectory(std::string_view applicationName)
     }
     if (const passwd* user = getpwuid(getuid()); user && user->pw_dir && *user->pw_dir) {
         return std::filesystem::path(user->pw_dir) / "Library" / "Application Support" / applicationName;
+    }
+#elif defined(__ANDROID__)
+    // The app's external files directory (Android/data/<package>/files) so a
+    // user can push game data and Config.toml with adb or a file browser; the
+    // activity falls back to the private files directory when there is none.
+    if (const char* data = std::getenv("MKW_ANDROID_DATA_DIR"); data && *data) {
+        return std::filesystem::path(data) / applicationName;
     }
 #endif
     return std::filesystem::current_path() / applicationName;

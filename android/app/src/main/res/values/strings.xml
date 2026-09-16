@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WiiCompiled VR</string>
+    <string name="missing_game_data_title">Game data not found</string>
+    <string name="missing_game_data_message">Copy the extracted DATA directory of your own PAL RMCP01 Mario Kart Wii disc to:\n\n%1$s\n\nFor example with adb: adb push DATA /sdcard/Android/data/org.wiicompiled.quest/files/WiiCompiledOpenXRVR/DATA\n\nThen start the app again.</string>
+</resources>

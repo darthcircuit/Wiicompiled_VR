@@ -13,9 +13,15 @@ elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|ARM64)$")
     set(MKW_PLATFORM_MACOS TRUE)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64|aarch64|arm64|ARM64)$")
     set(MKW_PLATFORM_LINUX TRUE)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Android" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    # Android arm64 through the NDK toolchain file (Meta Quest standalone).
+    # Bionic is Linux underneath, so the libco fibers, the mmap guest memory
+    # and the POSIX networking all follow the Linux branch; only paths, the
+    # SDL entry point and the OpenXR/Vulkan binding are Android-specific.
+    set(MKW_PLATFORM_ANDROID TRUE)
 else()
     message(FATAL_ERROR
-        "WiiCompiled supports 64-bit LLVM-MinGW Clang on Windows, native Linux x86_64/aarch64, or Apple Clang on macOS arm64")
+        "WiiCompiled supports 64-bit LLVM-MinGW Clang on Windows, native Linux x86_64/aarch64, Apple Clang on macOS arm64, or the Android NDK on arm64-v8a")
 endif()
 if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     message(FATAL_ERROR "WiiCompiled only supports Release builds")
@@ -66,7 +72,7 @@ set_target_properties(mkw_pugixml PROPERTIES UNITY_BUILD OFF)
 # Vendored from upstream (higan-emu/libco @ e18e09d, 2019-10-16, ISC license; valgrind.h is
 # separately BSD-style licensed, see third_party/libco/LICENSE). Windows keeps native Fibers
 # and macOS uses the project's x18-safe AArch64 assembly backend, so this target is Linux-only.
-if(MKW_PLATFORM_LINUX)
+if(MKW_PLATFORM_LINUX OR MKW_PLATFORM_ANDROID)
     add_library(mkw_libco STATIC third_party/libco/libco.c)
     add_library(mkw::libco ALIAS mkw_libco)
     target_include_directories(mkw_libco PUBLIC third_party/libco)
@@ -98,9 +104,24 @@ if(NOT MKW_NATIVE_PREBUILT_DIR)
         "/(adhoc|bench[123]|datatest|dlltest|fipsalgt|fipstest|pch|regtest[1234]|simple|test|validat[0-9]+)\\.cpp$")
     list(FILTER MKW_CRYPTOPP_SOURCES EXCLUDE REGEX
         "(_avx|_ppc|_simd|_sse)\\.cpp$")
+    if(MKW_PLATFORM_ANDROID)
+        # cpu.cpp reads the ARM feature bits through the NDK's cpu-features
+        # library, which the NDK ships as source rather than a prebuilt (see the
+        # comment above its #include "cpu-features.h"). Compiling it here is the
+        # arrangement upstream's own setenv-android.sh sets up.
+        set(MKW_ANDROID_CPU_FEATURES_DIR "${CMAKE_ANDROID_NDK}/sources/android/cpufeatures")
+        if(NOT EXISTS "${MKW_ANDROID_CPU_FEATURES_DIR}/cpu-features.c")
+            message(FATAL_ERROR
+                "Crypto++ needs the NDK cpu-features source: ${MKW_ANDROID_CPU_FEATURES_DIR}")
+        endif()
+        list(APPEND MKW_CRYPTOPP_SOURCES "${MKW_ANDROID_CPU_FEATURES_DIR}/cpu-features.c")
+    endif()
     add_library(mkw_cryptopp STATIC ${MKW_CRYPTOPP_SOURCES})
     add_library(mkw::cryptopp ALIAS mkw_cryptopp)
     target_include_directories(mkw_cryptopp SYSTEM PUBLIC third_party)
+    if(MKW_PLATFORM_ANDROID)
+        target_include_directories(mkw_cryptopp SYSTEM PRIVATE "${MKW_ANDROID_CPU_FEATURES_DIR}")
+    endif()
     target_compile_features(mkw_cryptopp PUBLIC cxx_std_17)
     target_compile_definitions(mkw_cryptopp PUBLIC ${MKW_CRYPTOPP_INTERFACE_DEFINITIONS})
     target_compile_options(mkw_cryptopp PRIVATE -w)
@@ -117,7 +138,7 @@ set(MKW_CPPWINRT_INCLUDE_DIR "" CACHE PATH "Optional self-contained C++/WinRT in
 # available to explicit developer builds without making a nonfunctional SDK
 # fetch part of every normal build.
 set(MKW_ENABLE_OPENXR_DEFAULT OFF)
-if(MKW_PLATFORM_WINDOWS)
+if(MKW_PLATFORM_WINDOWS OR MKW_PLATFORM_ANDROID)
     set(MKW_ENABLE_OPENXR_DEFAULT ON)
 endif()
 option(MKW_ENABLE_OPENXR "Build OpenXR VR support" ${MKW_ENABLE_OPENXR_DEFAULT})
@@ -148,6 +169,18 @@ if(MKW_NATIVE_PREBUILT_DIR)
 else()
     if(NOT EXISTS ${MKW_AURORA_DIR}/CMakeLists.txt)
         message(FATAL_ERROR "Requested aurora-main but ${MKW_AURORA_DIR} is missing")
+    endif()
+    if(MKW_PLATFORM_ANDROID)
+        # encounter/dawn-build publishes the same release for android-aarch64;
+        # the provider pins its digest and maps the asset name. SDL3 is built
+        # from source as a shared library because SDLActivity loads libSDL3.so
+        # before libmain.so; a Gradle build may instead pass
+        # -DAURORA_SDL3_PROVIDER=system to use the prefab from the SDL3 AAR.
+        set(AURORA_DAWN_PROVIDER package CACHE STRING "" FORCE)
+        set(AURORA_SDL3_LINKAGE shared CACHE STRING "" FORCE)
+        if(NOT AURORA_SDL3_PROVIDER OR AURORA_SDL3_PROVIDER STREQUAL "auto")
+            set(AURORA_SDL3_PROVIDER vendor CACHE STRING "" FORCE)
+        endif()
     endif()
     set(DAWN_ENABLE_D3D11 OFF CACHE BOOL "" FORCE)
     if(MKW_PLATFORM_WINDOWS)
@@ -190,8 +223,13 @@ else()
     # should add it to the Dawn targets the same way.
 
     # Keep SDL3 lean when aurora is enabled.
-    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    if(MKW_PLATFORM_ANDROID)
+        set(SDL_SHARED ON CACHE BOOL "" FORCE)
+        set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    else()
+        set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+        set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    endif()
     set(SDL_TEST OFF CACHE BOOL "" FORCE)
 
     # MinGW/WSL can choke on SDL precompiled headers; disable PCH for aurora/SDL.
@@ -250,7 +288,7 @@ endif()
 
 set(MKW_OPENXR_TARGET "")
 if(MKW_ENABLE_OPENXR)
-    if(NOT MKW_PLATFORM_WINDOWS AND NOT MKW_PLATFORM_LINUX)
+    if(NOT MKW_PLATFORM_WINDOWS AND NOT MKW_PLATFORM_LINUX AND NOT MKW_PLATFORM_ANDROID)
         message(WARNING "OpenXR is not wired for this platform; disabling MKW_ENABLE_OPENXR")
         set(MKW_ENABLE_OPENXR OFF)
     else()
@@ -332,6 +370,15 @@ set_target_properties(mkw_platform PROPERTIES UNITY_BUILD OFF)
 
 # Keep these independent from Aurora's BUILD_TESTING option: they validate the
 # project's host-platform contracts, not Aurora's third-party test suite.
+# A cross-compiled Android tree cannot run them, so it does not build them.
+if(MKW_PLATFORM_ANDROID)
+    set(MKW_BUILD_TESTS_DEFAULT OFF)
+else()
+    set(MKW_BUILD_TESTS_DEFAULT ON)
+endif()
+option(MKW_BUILD_TESTS "Build the runtime host-contract test executables" ${MKW_BUILD_TESTS_DEFAULT})
+unset(MKW_BUILD_TESTS_DEFAULT)
+if(MKW_BUILD_TESTS)
 enable_testing()
 add_executable(mkw_frame_interpolation_pacing_tests tests/frame_interpolation_pacing_tests.cpp)
 target_include_directories(mkw_frame_interpolation_pacing_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
@@ -443,6 +490,7 @@ if(MKW_PLATFORM_MACOS)
     target_compile_features(mkw_macos_guest_flat_memory_tests PRIVATE cxx_std_17)
     add_test(NAME mkw_macos_guest_flat_memory_tests COMMAND mkw_macos_guest_flat_memory_tests)
 endif()
+endif() # MKW_BUILD_TESTS
 
 # The translator emits the complete, content-addressed source graph. Consuming
 # this one manifest keeps configure independent of the 28k generated function
@@ -492,6 +540,32 @@ else()
             aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx
             mkw::pugixml mkw::toml11 mkw::cryptopp)
         set_target_properties(mkw_macos_native_compile PROPERTIES UNITY_BUILD OFF)
+    endif()
+    if(MKW_PLATFORM_ANDROID)
+        # Compile-only audit of the native runtime for arm64 Android, including
+        # the OpenXR Vulkan backend and the Android platform glue, without a
+        # translated game. Same exclusions as the macOS audit: those two files
+        # include the translator-emitted RuntimeConfig.h.
+        set(MKW_ANDROID_NATIVE_AUDIT_SOURCES ${SOURCES})
+        list(REMOVE_ITEM MKW_ANDROID_NATIVE_AUDIT_SOURCES
+            "${CMAKE_CURRENT_LIST_DIR}/src/abi_bridge.cpp"
+            "${CMAKE_CURRENT_LIST_DIR}/src/hle/os/os_alarm.cpp")
+        add_library(mkw_android_native_compile OBJECT ${MKW_ANDROID_NATIVE_AUDIT_SOURCES})
+        target_include_directories(mkw_android_native_compile PRIVATE
+            "${CMAKE_CURRENT_LIST_DIR}/include" "${CMAKE_CURRENT_LIST_DIR}/src"
+            "${CMAKE_CURRENT_LIST_DIR}/.." "${CMAKE_CURRENT_LIST_DIR}/../aurora-main/include")
+        target_compile_features(mkw_android_native_compile PRIVATE cxx_std_20)
+        target_compile_definitions(mkw_android_native_compile PRIVATE TARGET_PC)
+        target_link_libraries(mkw_android_native_compile PRIVATE
+            aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx
+            mkw::pugixml mkw::toml11 mkw::cryptopp mkw::libco)
+        if(MKW_ENABLE_OPENXR)
+            target_link_libraries(mkw_android_native_compile PRIVATE ${MKW_OPENXR_TARGET})
+        endif()
+        # Same precompiled header as the product objects: several sources rely on
+        # it for abi_bridge.h / ppc_runtime.h rather than including them directly.
+        target_precompile_headers(mkw_android_native_compile PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include/mkw_pch.h")
+        set_target_properties(mkw_android_native_compile PROPERTIES UNITY_BUILD OFF)
     endif()
     add_custom_target(mkw_platform_paths_check DEPENDS mkw_platform)
     message(STATUS "Translated product targets disabled (MKW_BUILD_PRODUCTS=OFF)")

@@ -75,3 +75,12 @@ output.txt
 
 # Operating System
 .DS_Store
+
+# Android (Meta Quest) app: Gradle outputs and the downloaded SDL3 AAR
+/android/.gradle/
+/android/.dependencies/
+/android/local.properties
+/android/app/build/
+/android/app/.cxx/
+/android/app/libs/*.aar
+/android/.runs/

@@ -44,6 +44,10 @@ void pump_events() noexcept;
 bool native_resize_pending() noexcept;
 bool native_window_size_matches(uint32_t width, uint32_t height) noexcept;
 void set_surface_ready(bool ready) noexcept;
+#if defined(__ANDROID__)
+void begin_surface_mutation() noexcept;
+void end_surface_mutation(bool ready) noexcept;
+#endif
 void set_title(const char* title);
 void set_fullscreen(bool fullscreen);
 bool get_fullscreen();

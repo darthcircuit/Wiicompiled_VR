@@ -59,6 +59,11 @@ public:
     
     // Check if fiber system is initialized
     static bool IsInitialized();
+
+    // True when the caller runs on the scheduler's own host context, i.e. the
+    // original thread stack (also true before the fiber system exists). Code
+    // that may enter Java through JNI on Android must only run there.
+    static bool IsOnSchedulerFiber();
     
     // Create a fiber for a guest thread (called from OSCreateThread HLE).
     // OSCreateThread's stackSize/priority are not passed: the host fiber models

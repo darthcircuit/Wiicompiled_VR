@@ -17,6 +17,7 @@
 #include <magic_enum.hpp>
 #include <webgpu/webgpu_cpp.h>
 
+#include "../android_debug.hpp"
 #include "../gfx/common.hpp"
 #include "../internal.hpp"
 #include "../window.hpp"
@@ -170,6 +171,19 @@ wgpu::TextureFormat best_surface_format() {
   if (g_surfaceCapabilities.formatCount == 0) {
     return wgpu::TextureFormat::Undefined;
   }
+#if defined(__ANDROID__)
+  // The OpenXR bridge shares eyes through AHardwareBuffers, and Android has no
+  // BGRA AHardwareBuffer format, so an XR interop build must render RGBA8 to
+  // keep the eye copy legal. Only the preference order changes; a surface
+  // without RGBA8 still falls through to the generic choice below.
+  if (g_config.xrInterop) {
+    for (size_t i = 0; i < g_surfaceCapabilities.formatCount; ++i) {
+      if (to_linear(g_surfaceCapabilities.formats[i]) == wgpu::TextureFormat::RGBA8Unorm) {
+        return wgpu::TextureFormat::RGBA8Unorm;
+      }
+    }
+  }
+#endif
   for (size_t i = 0; i < g_surfaceCapabilities.formatCount; ++i) {
     const auto format = to_linear(g_surfaceCapabilities.formats[i]);
     if (format == wgpu::TextureFormat::RGBA8Unorm || format == wgpu::TextureFormat::BGRA8Unorm) {
@@ -552,7 +566,7 @@ bool initialize(AuroraBackend auroraBackend) {
     });
     if (g_config.xrInterop) {
       instanceDescriptor.nextInChain = &instanceToggles;
-      Log.info("Enabling Dawn unsafe APIs for OpenXR D3D12 resource interop");
+      Log.info("Enabling Dawn unsafe APIs for OpenXR resource interop");
     }
 #endif
 #if defined(WEBGPU_DAWN) && !defined(__MINGW32__)
@@ -701,6 +715,15 @@ bool initialize(AuroraBackend auroraBackend) {
         requiredFeatures.push_back(feature);
       }
 #endif
+#if defined(WEBGPU_DAWN) && defined(__ANDROID__)
+      // The OpenXR side shares eyes through AHardwareBuffers ordered by sync
+      // file descriptors (lib/webgpu/vulkan_interop.cpp).
+      if (g_config.xrInterop && g_backendType == wgpu::BackendType::Vulkan &&
+          (feature == wgpu::FeatureName::SharedTextureMemoryAHardwareBuffer ||
+           feature == wgpu::FeatureName::SharedFenceSyncFD)) {
+        requiredFeatures.push_back(feature);
+      }
+#endif
     }
     if (!implicitDeviceSynchronizationSupported) {
       Log.warn(
@@ -731,8 +754,17 @@ bool initialize(AuroraBackend auroraBackend) {
         /* clang-format on */
     };
 #ifdef NDEBUG
-    enableToggles.push_back("skip_validation");
-    enableToggles.push_back("disable_robustness");
+#if defined(__ANDROID__)
+    // `adb shell setprop debug.wiicompiled.validation 1` keeps WebGPU validation
+    // and robustness on for a diagnostic run.
+    const bool keepValidation = android_debug::property_int("debug.wiicompiled.validation", 0) == 1;
+    Log.info("Android WebGPU validation: {}", keepValidation ? "on" : "off");
+    if (!keepValidation)
+#endif
+    {
+      enableToggles.push_back("skip_validation");
+      enableToggles.push_back("disable_robustness");
+    }
 #endif
     if (g_backendType == wgpu::BackendType::Vulkan) {
       enableToggles.push_back("vulkan_monolithic_pipeline_cache");

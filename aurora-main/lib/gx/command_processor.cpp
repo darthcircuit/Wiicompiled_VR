@@ -1830,6 +1830,41 @@ static void handle_draw_overrun(u8 cmd, u16 vtxCount, u32 vtxSize, u32 totalVtxB
   Log.warn("stopping FIFO decode at truncated draw: need {} bytes at pos {}, have {}", totalVtxBytes, pos, size);
 }
 
+// Uploads a draw's GX vertices with the stride populate_pipeline_config gave the shader. When that stride is padded
+// (Android, see padded_upload_stride), each vertex is copied with zeroed trailing bytes; attribute offsets inside the
+// vertex are unchanged. Every padded upload is a multiple of 4 bytes, so consecutive draws stay contiguous for merging.
+static gfx::Range push_draw_vertices(const u8* vertices, u32 vtxCount, u32 vtxSize) {
+  const u32 uploadStride = padded_upload_stride(vtxSize);
+  if (uploadStride == vtxSize)
+    LIKELY { return gfx::push_verts(vertices, static_cast<size_t>(vtxCount) * vtxSize); }
+  auto [buffer, range] = gfx::map_verts(static_cast<size_t>(vtxCount) * uploadStride);
+  u8* dst = buffer.data();
+  const u32 padding = uploadStride - vtxSize;
+  for (u32 i = 0; i < vtxCount; ++i) {
+    std::memcpy(dst, vertices + static_cast<size_t>(i) * vtxSize, vtxSize);
+    std::memset(dst + vtxSize, 0, padding);
+    dst += uploadStride;
+  }
+  return range;
+}
+
+// Uploads an indexed vertex array with elements `uploadStride` bytes apart (see padded_upload_stride). A padded upload
+// copies each element and zeroes its trailing bytes; a trailing partial element is copied as far as the array goes.
+static gfx::Range push_vertex_array(const AttrArray& array, u32 uploadStride) {
+  const auto* data = static_cast<const u8*>(array.data);
+  if (uploadStride == array.stride || array.stride == 0)
+    LIKELY { return gfx::push_storage(data, array.size); }
+  const size_t count = (static_cast<size_t>(array.size) + array.stride - 1) / array.stride;
+  auto [buffer, range] = gfx::map_storage(count * uploadStride);
+  u8* dst = buffer.data();
+  std::memset(dst, 0, count * uploadStride);
+  for (size_t i = 0; i < count; ++i) {
+    const size_t start = i * array.stride;
+    std::memcpy(dst + i * uploadStride, data + start, std::min<size_t>(array.stride, array.size - start));
+  }
+  return range;
+}
+
 // Draw command handler - parses vertices inline and caches results
 static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
   u32 vtxSize = 0;
@@ -2248,7 +2283,7 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
 
   // This entry point bypasses process(), so it owns the renderer lock itself.
   std::lock_guard gpuLock(aurora::renderer_gpu_mutex());
-  const gfx::Range vertRange = gfx::push_verts(vertices, vertexBytes);
+  const gfx::Range vertRange = push_draw_vertices(vertices, vtxCount, vtxSize);
   const bool interpolationIdentityActive = frame_interpolation_identity_needed();
   const PnMtxUsage matrixUsage = interpolationIdentityActive ? pn_mtx_usage(vertices, vtxCount, vtxSize) : PnMtxUsage{};
   handle_draw_unmerged(prim, fmt, vtxCount, vertRange, matrixUsage.mask, matrixUsage.topologySignature,
@@ -2283,7 +2318,7 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
 
   // Push raw vertex data to buffer
   const uint8_t* vertices = data + pos;
-  gfx::Range vertRange = gfx::push_verts(vertices, totalVtxBytes);
+  gfx::Range vertRange = push_draw_vertices(vertices, vtxCount, vtxSize);
   pos += totalVtxBytes;
 
   // Try to merge with previous draw call
@@ -2350,12 +2385,14 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
       continue;
     }
     auto& array = g_gxState.arrays[i];
-    if (array.cachedRange.size > 0) {
+    const u32 uploadStride = padded_upload_stride(array.stride);
+    if (array.cachedRange.size > 0 && array.cachedStride == uploadStride) {
       ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
     } else {
-      const auto range = gfx::push_storage(static_cast<const uint8_t*>(array.data), array.size);
+      const auto range = push_vertex_array(array, uploadStride);
       ranges.vaRanges[i - GX_VA_POS] = range;
       array.cachedRange = range;
+      array.cachedStride = uploadStride;
     }
   }
 

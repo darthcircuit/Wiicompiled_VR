@@ -215,6 +215,7 @@ bool OpenXRRuntime::CreateInstance() {
     }
 
     XrInstanceCreateInfo create_info{XR_TYPE_INSTANCE_CREATE_INFO};
+    create_info.next = m_config.instance_create_next;
     CopyOpenXRName(create_info.applicationInfo.applicationName,
                    XR_MAX_APPLICATION_NAME_SIZE, m_config.application_name);
     create_info.applicationInfo.applicationVersion = m_config.application_version;

@@ -2,6 +2,7 @@
 
 #include "settings_overlay.h"
 #include "runtime_config.h"
+#include "fiber_manager.h"
 
 #include <aurora/aurora.h>
 #include <aurora/event.h>
@@ -136,7 +137,30 @@ inline bool BeginAuroraFrame() {
     return true;
 }
 
+#if defined(__ANDROID__)
+inline std::atomic_bool g_androidAuroraPollPending{false};
+#endif
+
 // Poll Aurora events and update cached window/framebuffer dimensions.
 inline void UpdateAuroraAndProcessEvents() {
+#if defined(__ANDROID__)
+    // aurora_update() pumps SDL, which can call into Java; ART only tolerates
+    // that on the thread's real stack. A guest thread on its own fiber stack
+    // leaves the poll for the scheduler to service after the next switch.
+    if (!Fiber::GuestFiberManager::IsOnSchedulerFiber()) {
+        g_androidAuroraPollPending.store(true, std::memory_order_release);
+        return;
+    }
+    g_androidAuroraPollPending.store(false, std::memory_order_release);
+#endif
     ProcessAuroraEvents(aurora_update());
+}
+
+inline void ServicePendingAuroraEventsOnScheduler() {
+#if defined(__ANDROID__)
+    if (Fiber::GuestFiberManager::IsOnSchedulerFiber() &&
+        g_androidAuroraPollPending.exchange(false, std::memory_order_acq_rel)) {
+        ProcessAuroraEvents(aurora_update());
+    }
+#endif
 }

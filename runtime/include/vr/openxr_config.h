@@ -46,6 +46,10 @@ struct OpenXRConfig {
 
     // Destruction never waits indefinitely for a runtime to acknowledge an exit.
     uint32_t shutdown_timeout_ms = 500;
+
+    // Platform structure chained into XrInstanceCreateInfo::next (Android needs
+    // XrInstanceCreateInfoAndroidKHR). Must outlive Initialize(); null elsewhere.
+    const void* instance_create_next = nullptr;
 };
 
 } // namespace mkw::vr

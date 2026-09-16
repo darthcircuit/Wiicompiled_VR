@@ -255,12 +255,13 @@ ended up; its original viewport is folded into the projection instead.
 | Backend | Status |
 | --- | --- |
 | Windows D3D12 | Implemented: same-adapter, same-device asynchronous OpenXR submission. |
-| Linux Vulkan | Capability-gated scaffold. The pinned Dawn package does not expose the complete native Vulkan instance/device/queue context needed for safe same-device OpenXR interop, so the runtime logs the limitation and falls back to desktop rendering. |
+| Android Vulkan (Meta Quest) | Implemented and running on a Quest 3: the OpenXR side owns its own Vulkan device (`XR_KHR_vulkan_enable2`, `XR_KHR_vulkan_enable` fallback) and shares eyes with Dawn through `AHardwareBuffer`s ordered by sync-fd fences. Controllers arrive through OpenXR actions as a virtual SDL gamepad. See `docs/quest-port.md`. |
+| Linux Vulkan | Not wired. The pinned Dawn package does not expose a native Vulkan device, and the AHardwareBuffer bridge is Android-only; a dma-buf/opaque-fd variant of the same design would cover desktop Linux. |
 | Other platforms | Not wired yet. |
 
-The Vulkan path intentionally does not create an unrelated Vulkan device or use a CPU readback as
-a workaround. It accepts a future explicit Dawn native context, including external queue locking,
-so it can be enabled once Aurora exposes those handles safely.
+Both bindings share `openxr_integration.cpp`: the pacing thread, policy evaluation, the
+retained-layer protocol and the head-pose maths are compiled once against the neutral types in
+`vr/openxr_backend.h`, and only the backend class differs per platform.
 
 ### Interpolation validation
 
@@ -308,11 +309,12 @@ ends, including mid-frame flushes, so live setting changes cannot invalidate pen
 ## Current limitations
 
 - Only the project's supported PAL `RMCP01` translation has race instrumentation addresses.
-- Motion-controller/Wii Remote emulation and OpenXR action bindings are not implemented yet; use
-  the existing game-controller input path.
-- Dedicated Quest, Android, and Apple visionOS packaging is not implemented. The static recompilation
-  architecture avoids a runtime JIT, but each platform still needs an Aurora graphics bridge,
-  windowing/lifecycle work, and packaging.
+- Wii Remote pointer/motion emulation from tracked controllers is not implemented. OpenXR action
+  bindings exist only on the Android build, where they present the Touch controllers as one
+  ordinary gamepad; on Windows use the existing game-controller input path.
+- The Quest build (`android/`, `docs/quest-port.md`) runs on a Quest 3 through menus and races.
+  Lifecycle events and performance (about 43 game FPS) are still open. Apple visionOS packaging
+  is not implemented.
 - Scene-specific comfort options, culling fixes, replay/spectator classification, and a broader VR
   settings UI beyond the current enable/replay controls are future work.
 - The desktop window remains available as a mirror/fallback.

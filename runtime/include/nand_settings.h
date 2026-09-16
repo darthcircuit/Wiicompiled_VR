@@ -15,6 +15,8 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <cerrno>
+#include <cstdio>
 #include <unistd.h>
 #endif
 
@@ -202,6 +204,17 @@ inline bool Ensure(const std::filesystem::path& root, std::string& error,
         published = MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH) != 0;
 #else
         published = ::link(temporary.c_str(), path.c_str()) == 0;
+#if defined(__ANDROID__)
+        // Android's shared storage (the FUSE-backed Android/data tree) has no
+        // hard links; on a Quest 3 link() fails with EACCES, not EPERM, so the
+        // errno is not a usable signal. The no-replace publish exists for
+        // competing desktop launchers; an Android app runs one process, so an
+        // existence check followed by an atomic rename keeps the "never
+        // overwrite" guarantee. A real permission problem fails the rename too.
+        if (!published && !std::filesystem::exists(path)) {
+            published = ::rename(temporary.c_str(), path.c_str()) == 0;
+        }
+#endif
 #endif
     }
     std::filesystem::remove(temporary, ec);

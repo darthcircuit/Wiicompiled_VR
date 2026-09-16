@@ -50,6 +50,8 @@ if (_aurora_dawn_provider STREQUAL "auto")
     set(_has_package TRUE)
   elseif (APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|x86_64)$")
     set(_has_package TRUE)
+  elseif (CMAKE_SYSTEM_NAME STREQUAL "Android" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    set(_has_package TRUE)
   endif ()
 
   if (_has_package)
@@ -161,6 +163,12 @@ elseif (_aurora_dawn_provider STREQUAL "package")
       set(AURORA_DAWN_PACKAGE_URL_HASH
         "SHA256=7785373d569b3b0237918ec9c523239f7d0667857c5ea8242e3cdfde95e6aeab")
     endif ()
+    if (NOT AURORA_DAWN_PACKAGE_URL_HASH
+        AND AURORA_DAWN_VERSION STREQUAL "v20260603.191052"
+        AND _dawn_system STREQUAL "android" AND _dawn_arch STREQUAL "aarch64")
+      set(AURORA_DAWN_PACKAGE_URL_HASH
+        "SHA256=27d910dee1201fd1e5b6ac567f0ba2306ebf2135e9f40b6929976c365d38b09b")
+    endif ()
   endif ()
   message(STATUS "aurora: Fetching prebuilt Dawn package from ${AURORA_DAWN_PACKAGE_URL}")
 
@@ -196,6 +204,25 @@ elseif (_aurora_dawn_provider STREQUAL "package")
   # Static Dawn packages may link Threads::Threads
   find_package(Threads QUIET)
 
+  if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+    # The android-aarch64 package records the absolute path of the liblog.so
+    # its CI sysroot linked against. Rewrite that to the logical library name
+    # so the NDK on this machine resolves it.
+    foreach (_targets_file
+      "${_dawn_pkg_dir}/lib/cmake/Dawn/DawnTargets.cmake"
+      "${_dawn_pkg_dir}/lib64/cmake/Dawn/DawnTargets.cmake")
+      if (EXISTS "${_targets_file}")
+        file(READ "${_targets_file}" _dawn_targets_text)
+        string(REGEX REPLACE "[^;\"]*/sysroot/usr/lib/aarch64-linux-android/[0-9]+/liblog\\.so" "log"
+          _dawn_targets_sanitized "${_dawn_targets_text}")
+        if (NOT _dawn_targets_sanitized STREQUAL _dawn_targets_text)
+          file(WRITE "${_targets_file}" "${_dawn_targets_sanitized}")
+          message(STATUS "aurora: Rewrote the Dawn package's absolute liblog.so reference")
+        endif ()
+      endif ()
+    endforeach ()
+  endif ()
+
   # Find DawnConfig.cmake in the package
   set(_dawn_cmake_found FALSE)
   foreach (_cmake_path
@@ -206,7 +233,10 @@ elseif (_aurora_dawn_provider STREQUAL "package")
   )
     if (EXISTS "${_cmake_path}/DawnConfig.cmake")
       set(CMAKE_FIND_PACKAGE_TARGETS_GLOBAL ON)
-      find_package(Dawn REQUIRED CONFIG PATHS "${_cmake_path}" NO_DEFAULT_PATH)
+      # NO_CMAKE_FIND_ROOT_PATH: cross toolchains (the Android NDK) root package
+      # discovery inside their sysroot; the extracted package is a verified host
+      # path this one lookup must be allowed to see.
+      find_package(Dawn REQUIRED CONFIG PATHS "${_cmake_path}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
       set(CMAKE_FIND_PACKAGE_TARGETS_GLOBAL OFF)
       set(_dawn_cmake_found TRUE)
       break()

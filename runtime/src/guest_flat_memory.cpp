@@ -33,6 +33,15 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#if defined(__ANDROID__) && __ANDROID_API__ < 30
+// Bionic only declares memfd_create() from API 30, but every Android kernel
+// this build can run on (4.x on the Quest line) has had the syscall since 3.17.
+#include <linux/memfd.h>
+#include <sys/syscall.h>
+static int memfd_create(const char* name, unsigned int flags) {
+    return static_cast<int>(syscall(__NR_memfd_create, name, flags));
+}
+#endif
 #endif
 
 namespace GuestFlat {

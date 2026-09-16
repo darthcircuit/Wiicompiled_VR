@@ -285,6 +285,8 @@ struct AttrArray {
   u8 stride;
   bool le = true;
   gfx::Range cachedRange;
+  // Element stride of the cached upload, which differs from `stride` when the upload is padded.
+  u32 cachedStride = 0;
 };
 inline bool operator==(const AttrArray& lhs, const AttrArray& rhs) {
   return lhs.data == rhs.data && lhs.size == rhs.size && lhs.stride == rhs.stride && lhs.le == rhs.le;
@@ -771,4 +773,8 @@ void notify_copy_texture_created() noexcept;
 
 u8 comp_type_size(GXAttr attr, GXCompType type) noexcept;
 u8 comp_cnt_count(GXAttr attr, GXCompCnt cnt) noexcept;
+// Bytes per uploaded vertex or vertex-array element, and so the stride the shader multiplies an index by, for GX
+// data packed at `packedStride` bytes. Equal to `packedStride` except on Android, which pads to a multiple of 4
+// (see gx.cpp).
+u32 padded_upload_stride(u32 packedStride) noexcept;
 } // namespace aurora::gx

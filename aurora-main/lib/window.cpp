@@ -7,6 +7,7 @@
 #include "input.hpp"
 #include "internal.hpp"
 
+#include <aurora/android.h>
 #include <aurora/aurora.h>
 #include <aurora/event.h>
 #include <aurora/gfx.h>
@@ -28,12 +29,11 @@
 
 #if defined(SDL_PLATFORM_ANDROID)
 #include <jni.h>
-extern "C" void Android_LockActivityMutex(void);
-extern "C" void Android_UnlockActivityMutex(void);
 #endif
 
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <vector>
 
 #include "dolphin/vi/vi_internal.hpp"
@@ -55,6 +55,10 @@ std::atomic_bool g_backgrounded = false;
 std::atomic_bool g_nativeResizePending = false;
 std::atomic<AuroraDisplayMode> g_displayMode{AURORA_DISPLAY_MODE_WINDOWED};
 #if defined(SDL_PLATFORM_ANDROID)
+// SDL's own activity mutex (Android_LockActivityMutex) is internal and not
+// exported from libSDL3.so, so SurfaceLock owns an equivalent one. Recursive
+// because a surface-recreation path can re-enter through refresh_surface().
+std::recursive_mutex g_surfaceMutex;
 std::atomic_bool g_surfaceReady = false;
 #else
 std::atomic_bool g_surfaceReady = true;
@@ -582,10 +586,19 @@ bool is_presentable() noexcept {
 }
 
 void pump_events() noexcept {
+#if defined(SDL_PLATFORM_ANDROID)
+  // Guest fibers run on libco stacks inside the SDL thread. SDL's Android pump
+  // reaches Java (joystick polling, HIDAPI), and ART binds JNI transitions to
+  // the thread's real stack, so pumping here from a fiber can crash the VM.
+  // Events are pumped only by the host through aurora_update(), which the
+  // runtime calls on the scheduler's own stack (KartPad found this on device).
+  return;
+#else
   if (g_window != nullptr) {
     SDL_SyncWindow(g_window);
   }
   SDL_PumpEvents();
+#endif
 }
 
 bool native_resize_pending() noexcept { return g_nativeResizePending.load(std::memory_order_acquire); }
@@ -605,15 +618,29 @@ bool native_window_size_matches(uint32_t width, uint32_t height) noexcept {
 
 void set_surface_ready(bool ready) noexcept { g_surfaceReady.store(ready, std::memory_order_release); }
 
+#if defined(SDL_PLATFORM_ANDROID)
+// Held across the Java side's surface change so no present can race an
+// ANativeWindow SDL is destroying or replacing (see aurora/android.h).
+void begin_surface_mutation() noexcept {
+  g_surfaceMutex.lock();
+  set_surface_ready(false);
+}
+
+void end_surface_mutation(bool ready) noexcept {
+  set_surface_ready(ready);
+  g_surfaceMutex.unlock();
+}
+#endif
+
 SurfaceLock::SurfaceLock() noexcept {
 #if defined(SDL_PLATFORM_ANDROID)
-  Android_LockActivityMutex();
+  g_surfaceMutex.lock();
 #endif
 }
 
 SurfaceLock::~SurfaceLock() {
 #if defined(SDL_PLATFORM_ANDROID)
-  Android_UnlockActivityMutex();
+  g_surfaceMutex.unlock();
 #endif
 }
 
@@ -814,5 +841,13 @@ void set_background_input(bool value) { SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACK
 extern "C" JNIEXPORT void JNICALL Java_org_libsdl_app_SDLSurface_auroraNativeSetSurfaceReady(JNIEnv*, jclass,
                                                                                              jboolean ready) {
   aurora::window::set_surface_ready(ready == JNI_TRUE);
+}
+
+void aurora_android_begin_surface_mutation(void) {
+  aurora::window::begin_surface_mutation();
+}
+
+void aurora_android_end_surface_mutation(bool ready) {
+  aurora::window::end_surface_mutation(ready);
 }
 #endif

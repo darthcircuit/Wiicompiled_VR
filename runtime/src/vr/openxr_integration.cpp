@@ -27,18 +27,38 @@
 #include <thread>
 
 #if defined(MKW_ENABLE_OPENXR)
+#include "vr/openxr_backend.h"
+#include "vr/openxr_input.h"
 #include "vr/openxr_runtime.h"
 #if defined(_WIN32)
 #include "vr/openxr_d3d12.h"
+#define MKW_OPENXR_GRAPHICS_BACKEND 1
+#elif defined(__ANDROID__)
+#include "vr/openxr_android.h"
+#include "vr/openxr_vulkan.h"
+#include <time.h>
+#define XR_USE_TIMESPEC
+#include <openxr/openxr_platform.h>
+#define MKW_OPENXR_GRAPHICS_BACKEND 1
 #else
-#include "vr/openxr_vulkan_backend.h"
+#define MKW_OPENXR_GRAPHICS_BACKEND 0
 #endif
+#else
+#define MKW_OPENXR_GRAPHICS_BACKEND 0
 #endif
 
 namespace mkw::vr {
 namespace {
 
 inline constexpr float kDegreesToRadians = 0.01745329252f;
+
+// A standalone headset has no desktop to fall back to, so VR is on unless the
+// user's configuration turns it off. Desktop builds keep the opt-in default.
+#if defined(__ANDROID__)
+inline constexpr bool kVrEnabledDefault = true;
+#else
+inline constexpr bool kVrEnabledDefault = false;
+#endif
 
 void ConfigurePolicy(bool enabled) noexcept {
     MkwVRPolicyReset();
@@ -54,7 +74,15 @@ void ConfigurePolicy(bool enabled) noexcept {
     MkwVRFirstPersonApplyConfiguredSettings();
 }
 
-#if defined(MKW_ENABLE_OPENXR) && defined(_WIN32)
+#if MKW_OPENXR_GRAPHICS_BACKEND
+
+#if defined(_WIN32)
+using GraphicsBackend = OpenXRD3D12Backend;
+inline constexpr const char* kGraphicsBackendName = "D3D12";
+#else
+using GraphicsBackend = OpenXRVulkanBackend;
+inline constexpr const char* kGraphicsBackendName = "Vulkan";
+#endif
 
 struct Quaternion {
     float x = 0.0f;
@@ -240,17 +268,16 @@ public:
             last_error_.clear();
         }
         if (graphics_retained_) {
-            SetError("OpenXR cannot be restarted after an unfenceable D3D12 submission");
+            SetError(std::string("OpenXR cannot be restarted after an unfenceable ") +
+                     kGraphicsBackendName + " submission");
             return OpenXRStartupResult::Unavailable;
         }
-        requested_ = RuntimeConfigFile::VrEnabled(false);
+        requested_ = RuntimeConfigFile::VrEnabled(kVrEnabledDefault);
         ConfigurePolicy(requested_);
         if (!requested_) {
             return OpenXRStartupResult::Disabled;
         }
-        if (aurora_config.desiredBackend != BACKEND_AUTO &&
-            aurora_config.desiredBackend != BACKEND_D3D12) {
-            SetError("OpenXR currently requires the D3D12 graphics backend on Windows");
+        if (!BackendMatchesConfiguredGraphicsApi(aurora_config)) {
             return OpenXRStartupResult::Unavailable;
         }
 
@@ -259,27 +286,56 @@ public:
                                level == OpenXRLogLevel::Warning ? "warning" : "info";
             RT_LOG(RT_TAG_RUNTIME) << "[openxr::" << name << "] " << message << std::endl;
         };
+#if defined(__ANDROID__)
+        {
+            std::string loader_error;
+            if (!OpenXRAndroidInitializeLoader(logger_, &loader_error)) {
+                SetError("OpenXR Android loader initialization failed: " + loader_error);
+                return OpenXRStartupResult::Unavailable;
+            }
+        }
+#endif
         runtime_ = std::make_unique<OpenXRRuntime>(logger_);
-        backend_ = std::make_unique<OpenXRD3D12Backend>(logger_);
+        backend_ = std::make_unique<GraphicsBackend>(logger_);
 
         OpenXRConfig config{};
         config.application_name = aurora_config.appName != nullptr ? aurora_config.appName
                                                                     : "WiiCompiled";
         config.engine_name = "Aurora";
         config.resolution_scale = RuntimeConfigFile::VrRenderScale(1.0f);
+#if defined(_WIN32)
         config.required_extensions = {"XR_KHR_D3D12_enable"};
-        config.optional_extensions = {"XR_KHR_win32_convert_performance_counter_time", "XR_FB_display_refresh_rate"};
+        config.optional_extensions = {"XR_KHR_win32_convert_performance_counter_time",
+                                      "XR_FB_display_refresh_rate"};
+#else
+        // Either Vulkan binding extension is acceptable; the backend picks
+        // whichever the runtime enabled, preferring enable2.
+        config.required_extensions = {"XR_KHR_android_create_instance"};
+        config.optional_extensions = {"XR_KHR_vulkan_enable2", "XR_KHR_vulkan_enable",
+                                      "XR_KHR_convert_timespec_time",
+                                      "XR_KHR_android_thread_settings",
+                                      "XR_FB_display_refresh_rate"};
+        config.instance_create_next = OpenXRAndroidInstanceCreateNext();
+#endif
         if (!runtime_->Initialize(config)) {
             SetError("OpenXR instance initialization failed: " + runtime_->LastError().message);
             ResetPreparedObjects();
             return OpenXRStartupResult::Unavailable;
         }
         const auto& extensions = runtime_->EnabledExtensions();
-        if (std::find(extensions.begin(), extensions.end(),
-                      "XR_KHR_win32_convert_performance_counter_time") != extensions.end()) {
+        const auto has_extension = [&](const char* name) {
+            return std::find(extensions.begin(), extensions.end(), name) != extensions.end();
+        };
+#if defined(_WIN32)
+        if (has_extension("XR_KHR_win32_convert_performance_counter_time")) {
             runtime_->LoadFunction("xrConvertTimeToWin32PerformanceCounterKHR", &convert_display_time_);
         }
-        if (std::find(extensions.begin(), extensions.end(), "XR_FB_display_refresh_rate") != extensions.end()) {
+#else
+        if (has_extension("XR_KHR_convert_timespec_time")) {
+            runtime_->LoadFunction("xrConvertTimeToTimespecTimeKHR", &convert_display_time_);
+        }
+#endif
+        if (has_extension("XR_FB_display_refresh_rate")) {
             runtime_->LoadFunction("xrGetDisplayRefreshRateFB", &get_display_refresh_rate_);
         }
         interpolation_available_.store(convert_display_time_ != nullptr, std::memory_order_release);
@@ -289,12 +345,7 @@ public:
             return OpenXRStartupResult::Unavailable;
         }
 
-        const auto& requirements = backend_->GraphicsRequirements();
-        aurora_config.desiredBackend = BACKEND_D3D12;
-        aurora_config.xrInterop = true;
-        aurora_config.hasD3D12AdapterLuid = true;
-        aurora_config.d3d12AdapterLuidLow = requirements.adapter_luid_low;
-        aurora_config.d3d12AdapterLuidHigh = requirements.adapter_luid_high;
+        ApplyGraphicsRequirements(aurora_config);
         prepared_ = true;
         return OpenXRStartupResult::Prepared;
     }
@@ -303,8 +354,9 @@ public:
         if (!prepared_ || runtime_ == nullptr || backend_ == nullptr) {
             return !requested_;
         }
-        if (active_backend != BACKEND_D3D12) {
-            SetError("Aurora could not create the OpenXR-required D3D12 backend");
+        if (active_backend != kRequiredAuroraBackend) {
+            SetError(std::string("Aurora could not create the OpenXR-required ") +
+                     kGraphicsBackendName + " backend");
             ResetPreparedObjects();
             return false;
         }
@@ -312,6 +364,12 @@ public:
             SetError(backend_->LastError());
             ResetPreparedObjects();
             return false;
+        }
+        input_ = std::make_unique<OpenXRInput>(logger_);
+        if (!input_->Create(*runtime_)) {
+            RT_LOG(RT_TAG_RUNTIME) << "OpenXR controller input unavailable: " << input_->LastError()
+                                   << std::endl;
+            input_.reset();
         }
 
         stop_.store(false, std::memory_order_release);
@@ -334,7 +392,8 @@ public:
             ResetPreparedObjects();
             return false;
         }
-        RT_LOG(RT_TAG_RUNTIME) << "OpenXR asynchronous D3D12 presentation started" << std::endl;
+        RT_LOG(RT_TAG_RUNTIME) << "OpenXR asynchronous " << kGraphicsBackendName
+                               << " presentation started" << std::endl;
         return true;
     }
 
@@ -426,17 +485,51 @@ private:
         AuroraStereoFrame frame{};
     };
 
+#if defined(_WIN32)
+    static constexpr AuroraBackend kRequiredAuroraBackend = BACKEND_D3D12;
+#else
+    static constexpr AuroraBackend kRequiredAuroraBackend = BACKEND_VULKAN;
+#endif
+
+    bool BackendMatchesConfiguredGraphicsApi(const AuroraConfig& aurora_config) {
+        if (aurora_config.desiredBackend == BACKEND_AUTO ||
+            aurora_config.desiredBackend == kRequiredAuroraBackend) {
+            return true;
+        }
+        SetError(std::string("OpenXR requires the ") + kGraphicsBackendName +
+                 " graphics backend on this platform");
+        return false;
+    }
+
+    void ApplyGraphicsRequirements(AuroraConfig& aurora_config) {
+        aurora_config.desiredBackend = kRequiredAuroraBackend;
+        aurora_config.xrInterop = true;
+#if defined(_WIN32)
+        const auto& requirements = backend_->GraphicsRequirements();
+        aurora_config.hasD3D12AdapterLuid = true;
+        aurora_config.d3d12AdapterLuidLow = requirements.adapter_luid_low;
+        aurora_config.d3d12AdapterLuidHigh = requirements.adapter_luid_high;
+#endif
+    }
+
     void ResetPreparedObjects() {
         ShutdownOrRetainGraphicsObjects();
+        input_.reset();
         backend_.reset();
         runtime_.reset();
         prepared_ = false;
     }
 
     bool ShutdownOrRetainGraphicsObjects() noexcept {
+        if (input_ != nullptr) {
+            // Actions belong to the session and must go before it does.
+            input_->Destroy();
+            input_.reset();
+        }
         if (backend_ != nullptr && !backend_->Shutdown()) {
             RT_LOG(RT_TAG_RUNTIME)
-                << "OpenXR D3D12 queue completion is unknown; retaining the backend, "
+                << "OpenXR " << kGraphicsBackendName
+                << " queue completion is unknown; retaining the backend, "
                    "runtime, session, and graphics resources until process exit"
                 << std::endl;
             (void)backend_.release();
@@ -468,6 +561,11 @@ private:
     }
 
     void PacingThread() noexcept {
+#if defined(__ANDROID__)
+        if (runtime_ != nullptr) {
+            OpenXRAndroidRegisterThread(*runtime_, OpenXRAndroidThreadType::RendererMain);
+        }
+#endif
         bool fatal = false;
         bool presentation_logged = false;
         VRPresentationMode logged_presentation = VRPresentationMode::Desktop;
@@ -489,7 +587,7 @@ private:
                 }
             }
             if (events == OpenXREventStatus::ExitRequested) {
-                SetError("OpenXR runtime requested session exit; continuing on the desktop mirror");
+                SetError("OpenXR runtime requested session exit; continuing on the mirror output");
                 break;
             }
             if (events == OpenXREventStatus::Error) {
@@ -525,10 +623,10 @@ private:
                     << ", bindings=0x" << std::hex << policy.available_bindings
                     << std::dec << std::endl;
             }
-            OpenXRD3D12Presentation presentation{};
+            OpenXRPresentation presentation{};
             const bool immersive = policy.presentation == VRPresentationMode::ImmersiveRace;
-            presentation.mode = immersive ? OpenXRD3D12FrameMode::ImmersiveProjection
-                                           : OpenXRD3D12FrameMode::VirtualScreen;
+            presentation.mode = immersive ? OpenXRFrameMode::ImmersiveProjection
+                                           : OpenXRFrameMode::VirtualScreen;
             presentation.quad_distance_meters = policy.config.hud_distance_meters;
             presentation.quad_width_meters = policy.config.hud_width_meters;
 
@@ -537,23 +635,26 @@ private:
             const uint32_t interpolation_target = frame_interpolation_fps_.load(std::memory_order_relaxed);
             SetInterpolationActive(immersive && FrameInterpolationAvailable() && interpolation_target != 0);
 
-            OpenXRD3D12Frame frame{};
-            const OpenXRD3D12BeginStatus begin = backend_->BeginFrame(presentation, frame);
-            if (begin == OpenXRD3D12BeginStatus::SessionNotRunning) {
+            OpenXRBackendFrame frame{};
+            const OpenXRBeginStatus begin = backend_->BeginFrame(presentation, frame);
+            if (begin == OpenXRBeginStatus::SessionNotRunning) {
                 MkwVRPolicySetSessionActive(false);
                 continue;
             }
-            if (begin == OpenXRD3D12BeginStatus::ExitRequested) {
-                SetError("OpenXR runtime requested session exit; continuing on the desktop mirror");
+            if (begin == OpenXRBeginStatus::ExitRequested) {
+                SetError("OpenXR runtime requested session exit; continuing on the mirror output");
                 break;
             }
-            if (begin == OpenXRD3D12BeginStatus::Error) {
+            if (begin == OpenXRBeginStatus::Error) {
                 SetError(backend_->LastError());
                 fatal = true;
                 break;
             }
 
             UpdateFrameTiming(frame.xr_frame);
+            if (input_ != nullptr) {
+                input_->Sync(frame.xr_frame.predicted_display_time);
+            }
             // Both of these read this frame's located head pose and must run
             // before FinishFrame submits a layer built from it.
             ServiceRecenterRequest();
@@ -588,16 +689,16 @@ private:
             }
             aurora_notify_stereo_frame();
 
-            OpenXRD3D12SubmissionStatus submission = OpenXRD3D12SubmissionStatus::Timeout;
+            OpenXRSubmissionStatus submission = OpenXRSubmissionStatus::Timeout;
             bool canceled_before_encode = false;
             const auto cancel_after =
                 std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
             while (!stop_.load(std::memory_order_acquire) &&
-                   submission == OpenXRD3D12SubmissionStatus::Timeout) {
+                   submission == OpenXRSubmissionStatus::Timeout) {
                 // Fresh rendering wakes us immediately. A 50 ms keep-alive
                 // protects stalls without issuing eager repeats during GPU work.
                 submission = backend_->WaitForSubmission(frame, 50);
-                if (submission == OpenXRD3D12SubmissionStatus::Timeout) {
+                if (submission == OpenXRSubmissionStatus::Timeout) {
                     // A pause, minimized window, or guest stall may leave no GX
                     // frame to consume this packet. Withdraw it, then cancel the
                     // matching bridge target only if Encode has not taken ownership.
@@ -632,12 +733,13 @@ private:
             if (fatal) {
                 break;
             }
-            const bool submit = submission == OpenXRD3D12SubmissionStatus::Success;
+            const bool submit = submission == OpenXRSubmissionStatus::Success;
             if (!backend_->FinishFrame(frame, submit)) {
                 SetError(backend_->LastError());
                 fatal = true;
             } else if (!submit) {
-                SetError("Aurora's D3D12 stereo copy failed; continuing on the desktop mirror");
+                SetError(std::string("Aurora's ") + kGraphicsBackendName +
+                         " stereo copy failed; continuing on the mirror output");
                 fatal = true;
             } else {
                 ++timing_submissions_;
@@ -665,7 +767,7 @@ private:
         ShutdownOrRetainGraphicsObjects();
     }
 
-    void BuildPublishedFrame(const OpenXRD3D12Frame& source, bool immersive,
+    void BuildPublishedFrame(const OpenXRBackendFrame& source, bool immersive,
                              float units_per_meter, uint64_t content_tag) noexcept {
         ApplyPendingReferenceSpaceChange(source.xr_frame);
         auto& destination = published_frame_.frame;
@@ -722,8 +824,8 @@ private:
     // Anchors the menu screen in the application space and holds it there. The
     // pose is captured once, from the first frame whose head pose is good enough
     // to place it, and released again by a recenter or an origin change.
-    void UpdateVirtualScreenPose(OpenXRD3D12Frame& frame) noexcept {
-        if (frame.presentation.mode != OpenXRD3D12FrameMode::VirtualScreen) {
+    void UpdateVirtualScreenPose(OpenXRBackendFrame& frame) noexcept {
+        if (frame.presentation.mode != OpenXRFrameMode::VirtualScreen) {
             return;
         }
         constexpr XrViewStateFlags kPoseUsable =
@@ -775,17 +877,31 @@ private:
         }
     }
 
+    // Converts the compositor's predicted display time onto the runtime's
+    // steady clock, which is what Aurora's interpolation deadlines are paced by.
     uint64_t DisplayTimeNanos(XrTime display_time) noexcept {
         if (convert_display_time_ == nullptr) return 0;
+        const auto now = std::chrono::steady_clock::now();
+        const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+#if defined(_WIN32)
         LARGE_INTEGER display_counter{}, counter{}, frequency{};
         if (XR_FAILED(convert_display_time_(runtime_->Instance(), display_time, &display_counter)) ||
             !QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0 ||
             !QueryPerformanceCounter(&counter)) return 0;
-        const auto now = std::chrono::steady_clock::now();
-        const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
         const auto delta = static_cast<int64_t>(
             (static_cast<double>(display_counter.QuadPart) - static_cast<double>(counter.QuadPart)) *
             1.0e9 / static_cast<double>(frequency.QuadPart));
+#else
+        // XR_KHR_convert_timespec_time yields CLOCK_MONOTONIC, the clock behind
+        // libc++'s steady_clock, so the delta is measured on that clock too.
+        timespec display_spec{};
+        timespec now_spec{};
+        if (XR_FAILED(convert_display_time_(runtime_->Instance(), display_time, &display_spec)) ||
+            clock_gettime(CLOCK_MONOTONIC, &now_spec) != 0) return 0;
+        const int64_t display_ns = static_cast<int64_t>(display_spec.tv_sec) * 1'000'000'000ll + display_spec.tv_nsec;
+        const int64_t monotonic_ns = static_cast<int64_t>(now_spec.tv_sec) * 1'000'000'000ll + now_spec.tv_nsec;
+        const int64_t delta = display_ns - monotonic_ns;
+#endif
         return now_ns + delta > 0 ? static_cast<uint64_t>(now_ns + delta) : 0;
     }
 
@@ -810,7 +926,8 @@ private:
 
     OpenXRLogCallback logger_;
     std::unique_ptr<OpenXRRuntime> runtime_;
-    std::unique_ptr<OpenXRD3D12Backend> backend_;
+    std::unique_ptr<GraphicsBackend> backend_;
+    std::unique_ptr<OpenXRInput> input_;
     std::thread pacing_thread_;
     std::atomic_bool stop_{false};
     std::atomic_bool running_{false};
@@ -827,7 +944,11 @@ private:
     std::chrono::steady_clock::time_point timing_start_ = std::chrono::steady_clock::now();
     uint32_t timing_submissions_ = 0;
     PFN_xrGetDisplayRefreshRateFB get_display_refresh_rate_ = nullptr;
+#if defined(_WIN32)
     using ConvertDisplayTime = XrResult (XRAPI_PTR*)(XrInstance, XrTime, LARGE_INTEGER*);
+#else
+    using ConvertDisplayTime = XrResult (XRAPI_PTR*)(XrInstance, XrTime, struct timespec*);
+#endif
     ConvertDisplayTime convert_display_time_ = nullptr;
     std::atomic<PublishedFrame*> published_{nullptr};
     PublishedFrame published_frame_{};
@@ -849,7 +970,7 @@ private:
     bool graphics_retained_ = false;
 };
 
-#endif // defined(MKW_ENABLE_OPENXR) && defined(_WIN32)
+#endif // MKW_OPENXR_GRAPHICS_BACKEND
 
 } // namespace
 
@@ -857,32 +978,32 @@ OpenXRStartupResult OpenXRPrepareAurora(AuroraConfig& config) {
 #if !defined(MKW_ENABLE_OPENXR)
     (void)config;
     ConfigurePolicy(false);
-    return RuntimeConfigFile::VrEnabled(false) ? OpenXRStartupResult::Unavailable
-                                               : OpenXRStartupResult::Disabled;
-#elif defined(_WIN32)
+    return RuntimeConfigFile::VrEnabled(kVrEnabledDefault) ? OpenXRStartupResult::Unavailable
+                                                           : OpenXRStartupResult::Disabled;
+#elif MKW_OPENXR_GRAPHICS_BACKEND
     return OpenXRIntegration::Get().Prepare(config);
 #else
-    ConfigurePolicy(RuntimeConfigFile::VrEnabled(false));
-    if (!RuntimeConfigFile::VrEnabled(false)) {
+    (void)config;
+    ConfigurePolicy(RuntimeConfigFile::VrEnabled(kVrEnabledDefault));
+    if (!RuntimeConfigFile::VrEnabled(kVrEnabledDefault)) {
         return OpenXRStartupResult::Disabled;
     }
-    const OpenXRVulkanCapabilityInfo capability = OpenXRVulkanBackend::DawnInteropCapability();
-    RT_LOG(RT_TAG_RUNTIME) << "OpenXR Vulkan unavailable: " << capability.reason << std::endl;
+    RT_LOG(RT_TAG_RUNTIME) << "OpenXR is not wired to a graphics backend on this platform" << std::endl;
     return OpenXRStartupResult::Unavailable;
 #endif
 }
 
 bool OpenXRStartAfterAurora(AuroraBackend active_backend) {
-#if defined(MKW_ENABLE_OPENXR) && defined(_WIN32)
+#if MKW_OPENXR_GRAPHICS_BACKEND
     return OpenXRIntegration::Get().Start(active_backend);
 #else
     (void)active_backend;
-    return !RuntimeConfigFile::VrEnabled(false);
+    return !RuntimeConfigFile::VrEnabled(kVrEnabledDefault);
 #endif
 }
 
 void OpenXRShutdownBeforeAurora() noexcept {
-#if defined(MKW_ENABLE_OPENXR) && defined(_WIN32)
+#if MKW_OPENXR_GRAPHICS_BACKEND
     OpenXRIntegration::Get().Shutdown();
 #else
     MkwVRPolicySetSessionActive(false);
@@ -890,13 +1011,13 @@ void OpenXRShutdownBeforeAurora() noexcept {
 }
 
 void OpenXRServiceProducerFrameBoundary() noexcept {
-#if defined(MKW_ENABLE_OPENXR) && defined(_WIN32)
+#if MKW_OPENXR_GRAPHICS_BACKEND
     OpenXRIntegration::Get().ServiceProducerFrameBoundary();
 #endif
 }
 
 bool OpenXRIsRunning() noexcept {
-#if defined(MKW_ENABLE_OPENXR) && defined(_WIN32)
+#if MKW_OPENXR_GRAPHICS_BACKEND
     return OpenXRIntegration::Get().IsRunning();
 #else
     return false;
@@ -904,13 +1025,13 @@ bool OpenXRIsRunning() noexcept {
 }
 
 void OpenXRRequestRecenter() noexcept {
-#if defined(MKW_ENABLE_OPENXR) && defined(_WIN32)
+#if MKW_OPENXR_GRAPHICS_BACKEND
     OpenXRIntegration::Get().RequestRecenter();
 #endif
 }
 
 void OpenXRSetLeanBackDegrees(float degrees) noexcept {
-#if defined(MKW_ENABLE_OPENXR) && defined(_WIN32)
+#if MKW_OPENXR_GRAPHICS_BACKEND
     OpenXRIntegration::Get().SetLeanBackDegrees(degrees);
 #else
     (void)degrees;
@@ -918,7 +1039,7 @@ void OpenXRSetLeanBackDegrees(float degrees) noexcept {
 }
 
 void OpenXRSetFrameInterpolationFps(uint32_t target) noexcept {
-#if defined(MKW_ENABLE_OPENXR) && defined(_WIN32)
+#if MKW_OPENXR_GRAPHICS_BACKEND
     OpenXRIntegration::Get().SetFrameInterpolationFps(target);
 #else
     (void)target;
@@ -926,7 +1047,7 @@ void OpenXRSetFrameInterpolationFps(uint32_t target) noexcept {
 }
 
 OpenXRFrameTiming OpenXRGetFrameTiming() noexcept {
-#if defined(MKW_ENABLE_OPENXR) && defined(_WIN32)
+#if MKW_OPENXR_GRAPHICS_BACKEND
     return OpenXRIntegration::Get().FrameTiming();
 #else
     return {};
@@ -934,7 +1055,7 @@ OpenXRFrameTiming OpenXRGetFrameTiming() noexcept {
 }
 
 bool OpenXRFrameInterpolationAvailable() noexcept {
-#if defined(MKW_ENABLE_OPENXR) && defined(_WIN32)
+#if MKW_OPENXR_GRAPHICS_BACKEND
     return OpenXRIntegration::Get().FrameInterpolationAvailable();
 #else
     return false;
@@ -944,10 +1065,10 @@ bool OpenXRFrameInterpolationAvailable() noexcept {
 std::string OpenXRLastError() {
 #if !defined(MKW_ENABLE_OPENXR)
     return "this build was compiled without OpenXR support";
-#elif defined(_WIN32)
+#elif MKW_OPENXR_GRAPHICS_BACKEND
     return OpenXRIntegration::Get().LastError();
 #else
-    return OpenXRVulkanBackend::DawnInteropCapability().reason;
+    return "OpenXR is not wired to a graphics backend on this platform";
 #endif
 }
 

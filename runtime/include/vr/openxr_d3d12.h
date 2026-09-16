@@ -4,6 +4,7 @@
 
 #if defined(MKW_ENABLE_OPENXR) && defined(_WIN32)
 
+#include "vr/openxr_backend.h"
 #include "vr/openxr_runtime.h"
 
 #include <array>
@@ -13,53 +14,19 @@
 
 namespace mkw::vr {
 
-enum class OpenXRD3D12FrameMode {
-    ImmersiveProjection,
-    VirtualScreen,
-};
-
-enum class OpenXRD3D12BeginStatus {
-    Ready,
-    SessionNotRunning,
-    ExitRequested,
-    Error,
-};
-
-enum class OpenXRD3D12SubmissionStatus {
-    Success,
-    Failed,
-    Timeout,
-    ShuttingDown,
-};
+// The frame vocabulary is shared with the Vulkan backend (vr/openxr_backend.h).
+// These aliases keep the D3D12 spelling that the replay tests and the original
+// integration code were written against.
+using OpenXRD3D12FrameMode = OpenXRFrameMode;
+using OpenXRD3D12BeginStatus = OpenXRBeginStatus;
+using OpenXRD3D12SubmissionStatus = OpenXRSubmissionStatus;
+using OpenXRD3D12Presentation = OpenXRPresentation;
+using OpenXRD3D12Frame = OpenXRBackendFrame;
 
 struct OpenXRD3D12GraphicsRequirements {
     uint32_t adapter_luid_low = 0;
     int32_t adapter_luid_high = 0;
     uint32_t minimum_feature_level = 0;
-};
-
-struct OpenXRD3D12Presentation {
-    OpenXRD3D12FrameMode mode = OpenXRD3D12FrameMode::ImmersiveProjection;
-
-    // Used only by VirtualScreen.
-    float quad_distance_meters = 2.0f;
-    float quad_width_meters = 2.4f;
-
-    // When quad_anchored is set, the quad is placed at quad_pose in the
-    // application reference space and stays put as the player looks around.
-    // Otherwise it falls back to being head-locked in XR_VIEW_SPACE, centered
-    // straight ahead at -Z, which is what happens until tracking has produced a
-    // head pose good enough to anchor against.
-    bool quad_anchored = false;
-    XrPosef quad_pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
-};
-
-struct OpenXRD3D12Frame {
-    OpenXRFrame xr_frame;
-    OpenXRD3D12Presentation presentation;
-    std::array<uint32_t, kOpenXREyeCount> render_width{};
-    std::array<uint32_t, kOpenXREyeCount> render_height{};
-    bool expects_gpu_submission = false;
 };
 
 // Same-device Dawn/OpenXR D3D12 backend.
