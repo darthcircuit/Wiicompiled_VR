@@ -13,9 +13,10 @@
 # downloaded, the toolkit's ninja and the workspace's recomp.yml.
 #
 # -Generated is the translator output (the dev workspace's generated/ by default). -Kit is the game
-# kit the Quest app carries; it defaults to the one the last APK build of -Flavor (base or
-# retroRewind, whose translation must include the mod) exported. -Data adds the
-# extracted disc (the directory holding sys/ and files/) so the headset needs nothing else.
+# kit the Quest app carries; it defaults to the one the last APK build exported. -Product picks the
+# game: base, or retro_rewind (whose translation must include the mod). -Data adds the extracted
+# disc (the directory holding sys/ and files/) and -Mod the RetroRewind6 pack, so the headset needs
+# nothing else.
 # -Install pushes the package into the app's Import folder over adb, where the launcher picks it
 # up the next time it opens.
 [CmdletBinding()]
@@ -31,7 +32,8 @@ param(
     [string]$Sysroot = '',
     [string]$Ninja = '',
     [string]$BuiltBy = 'android/Build-QuestGame.ps1',
-    [ValidateSet('base', 'retroRewind')] [string]$Flavor = 'base',
+    [ValidateSet('base', 'retro_rewind')] [string]$Product = 'base',
+    [string]$Mod = '',
     [int]$TranslatedJobs = 0,
     [switch]$Install
 )
@@ -42,17 +44,15 @@ $root = $PSScriptRoot
 $workspace = (Resolve-Path (Join-Path $root '..')).Path
 if (-not $Generated) { $Generated = Join-Path $workspace '.scratch\vr-build-workspace\BuildWorkspace\generated' }
 if (-not $Manifest) { $Manifest = Join-Path $workspace 'projects\mkwii\recomp.yml' }
-if (-not $BuildDir) { $BuildDir = Join-Path $root "app\build\questGame\$Flavor" }
+if (-not $BuildDir) { $BuildDir = Join-Path $root "app\build\questGame\$Product" }
 if (-not $Kit) {
-    # The kit this flavour's last APK build packaged (its export<Flavor>*QuestGameKit task), so the
-    # game matches the app it will be imported into.
-    $exportTask = 'export' + $Flavor.Substring(0, 1).ToUpper() + $Flavor.Substring(1)
+    # The kit the last APK build packaged, so the game matches the app it will be imported into.
     $Kit = Get-ChildItem -Path (Join-Path $root 'app\build\generated') -Filter kit.json -Recurse -ErrorAction SilentlyContinue |
-        Where-Object { $_.Directory.Name -eq 'game_kit' -and $_.FullName -like "*$exportTask*" } |
+        Where-Object { $_.Directory.Name -eq 'game_kit' } |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1 | ForEach-Object { $_.DirectoryName }
 }
 if (-not $Kit -or -not (Test-Path (Join-Path $Kit 'kit.json'))) {
-    throw "No $Flavor game kit; run Build-Quest.ps1 -Flavor $Flavor first, or pass -Kit"
+    throw 'No game kit; run Build-Quest.ps1 first, or pass -Kit'
 }
 if (-not (Test-Path (Join-Path $Generated 'build_shards\shards.cmake'))) { throw "No translated graph at $Generated" }
 
@@ -85,19 +85,18 @@ if (-not $gameId -or -not $dolSha -or -not $relSha) { throw "Cannot read the dis
 
 $stopwatch = [Diagnostics.Stopwatch]::StartNew()
 $library = Invoke-QuestGameBuild -KitDir $Kit -GeneratedDir $Generated -BuildDir $BuildDir `
-    -ClangCxx $ClangCxx -ClangC $ClangC -Sysroot $Sysroot -Ninja $Ninja -TranslatedJobs $TranslatedJobs
+    -ClangCxx $ClangCxx -ClangC $ClangC -Sysroot $Sysroot -Ninja $Ninja -TranslatedJobs $TranslatedJobs -Product $Product
 Write-Host ("Built {0} in {1:N1} min" -f $library, $stopwatch.Elapsed.TotalMinutes)
 
 if (-not $Output) { $Output = Join-Path $BuildDir 'MarioKartWii.wcgame' }
 Write-Host 'MKWCBUILD:STEP:quest-package Packaging the game for Quest'
-$game = New-QuestGamePackage -Library $library -DataDir $Data -KitDir $Kit -GameId $gameId -DolSha256 $dolSha -RelSha256 $relSha `
-    -BuiltBy $BuiltBy -OutputPath $Output
+$game = New-QuestGamePackage -Library $library -DataDir $Data -ModDir $Mod -KitDir $Kit -GameId $gameId -DolSha256 $dolSha -RelSha256 $relSha `
+    -BuiltBy $BuiltBy -OutputPath $Output -Product $Product
 Write-Host "Game package: $Output (kit $($game.kitFingerprint))"
 
 if ($Install) {
     $adb = Join-Path $sdkRoot 'platform-tools\adb.exe'
-    $package = if ($Flavor -eq 'retroRewind') { 'org.wiicompiled.quest.retrorewind' } else { 'org.wiicompiled.quest' }
-    $import = "/sdcard/Android/data/$package/files/WiiCompiledOpenXRVR/Import"
+    $import = '/sdcard/Android/data/org.wiicompiled.quest/files/WiiCompiledOpenXRVR/Import'
     # The launcher creates Import itself and must own it to remove imported packages (see
     # Run-Quest.ps1 on adb-created directories), so only push into one that exists.
     $exists = ((& $adb shell "test -d '$import' && echo yes") | Out-String).Trim()

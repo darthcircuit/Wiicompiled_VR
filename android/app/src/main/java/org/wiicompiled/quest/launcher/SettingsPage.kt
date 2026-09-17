@@ -19,6 +19,7 @@ import android.widget.Toast
 import kotlin.math.roundToInt
 import org.wiicompiled.quest.BuildConfig
 import org.wiicompiled.quest.GameLibrary
+import org.wiicompiled.quest.GameProfile
 import org.wiicompiled.quest.GameStorage
 import org.wiicompiled.quest.R
 
@@ -260,7 +261,7 @@ class SettingsPage(
 
     private fun buildAbout() {
         section(R.string.section_about_app) {
-            info(R.string.about_version, activity.getString(R.string.about_version_value, BuildConfig.VERSION_NAME, BuildConfig.PROFILE))
+            info(R.string.about_version, BuildConfig.VERSION_NAME)
         }
         section(R.string.section_about_storage) {
             val disc = GameStorage.discDirectory(activity).absolutePath
@@ -273,15 +274,18 @@ class SettingsPage(
             action(R.string.about_extract, R.string.about_extract_helper, R.string.home_select_disc, enabled = !GameSetup.isRunning) {
                 selectDiscImage()
             }
-            val manifest = GameLibrary.manifest(activity)
-            val gameText = when (GameLibrary.status(activity)) {
-                GameLibrary.Status.Ready -> manifest?.let {
-                    activity.getString(R.string.about_game_ready, it.optString("builtBy"), it.optString("builtAt"))
-                } ?: activity.getString(R.string.about_game_missing)
-                GameLibrary.Status.Stale -> activity.getString(R.string.about_game_stale)
-                GameLibrary.Status.Missing -> activity.getString(R.string.about_game_missing)
+            // One row per game this app carries a kit for, so both are visible at once.
+            for (profile in GameProfile.available(activity)) {
+                val manifest = GameLibrary.manifest(activity, profile)
+                val gameText = when (GameLibrary.status(activity, profile)) {
+                    GameLibrary.Status.Ready -> manifest?.let {
+                        activity.getString(R.string.about_game_ready, it.optString("builtBy"), it.optString("builtAt"))
+                    } ?: activity.getString(R.string.about_game_missing)
+                    GameLibrary.Status.Stale -> activity.getString(R.string.about_game_stale)
+                    GameLibrary.Status.Missing -> activity.getString(R.string.about_game_missing)
+                }
+                info(profile.title, gameText, stacked = true)
             }
-            info(R.string.about_game, gameText, stacked = true)
             if (BuildConfig.ON_DEVICE_BUILD) {
                 action(
                     R.string.home_build, R.string.about_build_helper, R.string.home_build,

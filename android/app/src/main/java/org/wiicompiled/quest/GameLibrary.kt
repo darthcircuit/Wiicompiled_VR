@@ -5,8 +5,9 @@ import java.io.File
 import org.json.JSONObject
 
 /**
- * The player's compiled game: libmain.so built from their own disc against the game kit this
- * APK carries (assets/game_kit, see android/QuestGameKit.psm1), plus the game.json it came with.
+ * A player's compiled game: libmain.so built from their own disc against the game kit this APK
+ * carries (assets/game_kit, see android/QuestGameKit.psm1), plus the game.json it came with. One
+ * per [GameProfile], so the unmodded game and Retro Rewind can both be installed.
  *
  * It lives in internal private storage, the one place Android lets an app load native code it
  * did not install (execution from shared or external storage is blocked). A library built for
@@ -23,13 +24,16 @@ object GameLibrary {
     @Volatile
     private var cachedKitFingerprint: String? = null
 
-    fun directory(context: Context): File = File(context.filesDir, "game/${BuildConfig.PROFILE}")
+    fun directory(context: Context, profile: GameProfile = GameProfile.selected(context)): File =
+        File(context.filesDir, "game/${profile.id}")
 
-    fun library(context: Context): File = File(directory(context), LIBRARY_NAME)
+    fun library(context: Context, profile: GameProfile = GameProfile.selected(context)): File =
+        File(directory(context, profile), LIBRARY_NAME)
 
-    fun manifest(context: Context): JSONObject? = File(directory(context), MANIFEST_NAME)
-        .takeIf { it.isFile }
-        ?.let { runCatching { JSONObject(it.readText()) }.getOrNull() }
+    fun manifest(context: Context, profile: GameProfile = GameProfile.selected(context)): JSONObject? =
+        File(directory(context, profile), MANIFEST_NAME)
+            .takeIf { it.isFile }
+            ?.let { runCatching { JSONObject(it.readText()) }.getOrNull() }
 
     /** The fingerprint of the kit in this APK's assets, which every game must be built against. */
     fun kitFingerprint(context: Context): String? {
@@ -41,12 +45,9 @@ object GameLibrary {
         return fingerprint
     }
 
-    fun status(context: Context): Status {
-        if (!BuildConfig.EXTERNAL_GAME) {
-            return Status.Ready
-        }
-        val manifest = manifest(context)
-        if (manifest == null || !library(context).isFile) {
+    fun status(context: Context, profile: GameProfile = GameProfile.selected(context)): Status {
+        val manifest = manifest(context, profile)
+        if (manifest == null || !library(context, profile).isFile) {
             return Status.Missing
         }
         return if (manifest.optString("kitFingerprint") == kitFingerprint(context)) Status.Ready else Status.Stale

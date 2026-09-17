@@ -11,6 +11,9 @@ import org.junit.Test
  */
 class TomlConfigTest {
 
+    private val dvdRoot =
+        "dvd_root = \"/storage/emulated/0/Android/data/org.wiicompiled.quest/files/WiiCompiledOpenXRVR/DATA\""
+
     private val sample = """
         # WiiCompiled Quest configuration.
         [paths]
@@ -48,6 +51,21 @@ class TomlConfigTest {
             "resolution_multiplier = 1.0\nskip_unready_pipelines = false\n\n[vr]",
         )
         assertEquals(expected, config.text())
+    }
+
+    @Test
+    fun addsTheRetroRewindPackPathToAConfigThatPredatesIt() {
+        // What GameStorage.prepare does to an install made before the app offered Retro Rewind:
+        // the pack path joins [paths], and nothing else moves.
+        val config = TomlConfig.parse(sample)
+        assertNull(config.string("paths", "retro_rewind_root"))
+        val pack = "/storage/emulated/0/Android/data/org.wiicompiled.quest/files/WiiCompiledOpenXRVR/RetroRewind6"
+        config.setString("paths", "retro_rewind_root", pack)
+        assertEquals(
+            sample.replace("$dvdRoot\n\n[video]", "$dvdRoot\nretro_rewind_root = \"$pack\"\n\n[video]"),
+            config.text(),
+        )
+        assertEquals(pack, TomlConfig.parse(config.text()).string("paths", "retro_rewind_root"))
     }
 
     @Test

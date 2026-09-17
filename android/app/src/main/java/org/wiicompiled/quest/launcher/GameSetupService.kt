@@ -13,6 +13,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import kotlin.concurrent.thread
+import org.wiicompiled.quest.GameProfile
 import org.wiicompiled.quest.R
 
 /**
@@ -51,13 +52,14 @@ class GameSetupService : Service() {
         }
         GameSetup.addListener(listener)
         val deleteSource = intent?.getBooleanExtra(EXTRA_DELETE_SOURCE, false) ?: false
+        val profile = GameProfile.of(intent?.getStringExtra(EXTRA_PROFILE)) ?: GameProfile.selected(this)
 
         val wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WiiCompiled:GameSetup")
         wakeLock.acquire(if (task == GameSetup.Task.BuildGame) BUILD_WAKE_LOCK_TIMEOUT_MS else WAKE_LOCK_TIMEOUT_MS)
         thread(name = "GameSetup") {
             try {
-                GameSetup.run(applicationContext, task, uri, deleteSource)
+                GameSetup.run(applicationContext, task, uri, deleteSource, profile)
             } finally {
                 uri?.let(::releaseReadPermission)
                 if (wakeLock.isHeld) wakeLock.release()
@@ -115,21 +117,24 @@ class GameSetupService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val NOTIFY_INTERVAL_MS = 1000L
         private const val EXTRA_TASK = "task"
+        private const val EXTRA_PROFILE = "profile"
         private const val EXTRA_DELETE_SOURCE = "deleteSource"
         // Longer than any real task; only a hung run would reach it.
         private const val WAKE_LOCK_TIMEOUT_MS = 60L * 60 * 1000
         private const val BUILD_WAKE_LOCK_TIMEOUT_MS = 3L * 60 * 60 * 1000
 
+        /** Builds [profile]'s game from DATA on this headset ([GameBuild]). */
+        fun startBuild(context: Context, profile: GameProfile) {
+            val intent = Intent(context, GameSetupService::class.java)
+                .putExtra(EXTRA_TASK, GameSetup.Task.BuildGame.name)
+                .putExtra(EXTRA_PROFILE, profile.id)
+            context.startForegroundService(intent)
+        }
+
         /**
          * Starts [task] on [uri]: a document the player picked, or a file in the Import folder,
          * which [deleteSource] removes once it has been imported.
          */
-        /** Builds the game from DATA on this headset ([GameBuild]). */
-        fun startBuild(context: Context) {
-            val intent = Intent(context, GameSetupService::class.java).putExtra(EXTRA_TASK, GameSetup.Task.BuildGame.name)
-            context.startForegroundService(intent)
-        }
-
         fun start(context: Context, task: GameSetup.Task, uri: Uri, deleteSource: Boolean = false) {
             if (uri.scheme == "content") {
                 try {

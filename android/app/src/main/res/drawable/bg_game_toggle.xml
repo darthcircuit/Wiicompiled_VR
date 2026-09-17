@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- One side of Home's game toggle: the selected game is filled, as WheelWizard's game switch is. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_selected="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/primary_400" />
+            <corners android:radius="999dp" />
+        </shape>
+    </item>
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/neutral_700" />
+            <corners android:radius="999dp" />
+        </shape>
+    </item>
+    <item android:state_hovered="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/neutral_800" />
+            <corners android:radius="999dp" />
+        </shape>
+    </item>
+    <item android:drawable="@android:color/transparent" />
+</selector>

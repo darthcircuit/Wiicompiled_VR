@@ -223,8 +223,8 @@ The kit is exported from CMake's own build graph, so its flags cannot drift from
 - `runtime/cmake/PublicProducts.cmake` defines `mkw_quest_kit_probe` on Android: WiiCompiled
   `WITHOUT_GAME` (no base shards, and the runtime objects `$<FILTER>`ed of the two
   disc-generated sources, which skip the unity build on Android for that reason), linked with the
-  game's symbols unresolved. The base flavour builds this probe instead of the product.
-- `android/QuestGameKit.psm1` (`Export-QuestGameKit`, run by the `exportBase*QuestGameKit`
+  game's symbols unresolved. The app builds this probe instead of the product.
+- `android/QuestGameKit.psm1` (`Export-QuestGameKit`, run by the `export*QuestGameKit`
   Gradle tasks) turns the probe's ninja link edge into `kit.json`'s ordered link inputs. It adds
   `{game:runtime}`, `{game:product}` and `{game:translated}` markers where WiiCompiled had those
   objects, and translated shards link inside `--start-lib/--end-lib` with archive semantics as
@@ -234,40 +234,56 @@ The kit is exported from CMake's own build graph, so its flags cannot drift from
   this way had the same 61,975 defined and 785 undefined dynamic symbols, 29,995 translated
   functions, `NEEDED` list and soname as the CMake-built one, in 2.4 minutes.
 
-`Build-Quest.ps1` refuses an APK that contains any `libmain*.so` or lacks the kit, and every
-variant excludes `**/libmain*.so` and the probes from packaging, since AGP packages every library
+`Build-Quest.ps1` refuses an APK that contains any `libmain*.so` or lacks the kit, and packaging
+excludes `**/libmain*.so` and `**/libmkw_quest_kit_probe*.so`, since AGP packages every library
 left in the CMake output directory. The `func_8…` symbols the kit's runtime objects define are
 hand-written HLE overrides (`PPC_NATIVE_OVERRIDE_*` in `hle_stubs.h`), not translated code.
 
-**Retro Rewind has its own kit** (`mkw_quest_kit_probe_retro`, RetroRewind without any translated
-code), so that APK ships no game either. It needs one more link slot than the base flavour, because
-the modded product links more kinds of translated code: `{game:runtime}` (the disc-generated
-sources), `{game:product}` (the mod's registration and dispatch shards), `{game:mod}` (the mod's own
-shards, the profile-sensitive base shards it replaces, and the mod's data patches) and
-`{game:translated}` (the shared base shards, with the archive semantics `libmkw_base_shared.a` has).
-Rather than teach each builder which flavour it is building, `kit.json` now carries a `sources`
-map naming the `shards.cmake` list behind each slot, and the builders just follow it (kit schema 2).
-Its game is built on a PC for now: building it on the headset would also need the mod's `Code.pul`
-and its 2 GB pack there, so only the base APK carries the on-device toolchain
-(`BuildConfig.ON_DEVICE_BUILD`). The Retro Rewind app writes `[paths] retro_rewind_root` into its
-first `Config.toml` and Home says so when that pack is missing.
+**Retro Rewind rides in the same app, on its own kit** (`mkw_quest_kit_probe_retro`, RetroRewind
+without any translated code), so the APK ships neither game. The mod needs one more link slot than
+the base game, because the modded product links more kinds of translated code: `{game:runtime}`
+(the disc-generated sources), `{game:product}` (the mod's registration and dispatch shards),
+`{game:mod}` (the mod's own shards, the profile-sensitive base shards it replaces, and the mod's
+data patches) and `{game:translated}` (the shared base shards, with the archive semantics
+`libmkw_base_shared.a` has). Rather than teach each builder which game it is building, `kit.json`
+carries a `sources` map naming the `shards.cmake` list behind each slot, and the builders just
+follow it.
+
+One APK, one kit: `kit.json` (schema 3) holds a `products` map with a `base` entry and, when the
+translation includes the mod, a `retro_rewind` entry, each with its own compile flags, link line,
+slots and `fingerprint`; `runtimeIncludeFingerprint` and the kit's own `fingerprint` stay at the
+top level. Everything that builds a game names the product it wants: `Build-QuestGame.ps1
+-Product base|retro_rewind`, `Setup --quest-product`, and on the headset `GameProfile`. Each game
+lives in its own directory under `files/game/<profile>`, so both can be installed at once and the
+launcher's toggle switches between them; the selected one is remembered in `filesDir/selected-game`
+(a plain file, because the launcher and the `:game` process do not share preferences).
+
+Retro Rewind also needs its 2 GB pack on the headset. The app writes `[paths] retro_rewind_root`
+into `Config.toml`, Home says so when the pack is missing, and a `.wcgame` can carry it (below).
+Building the mod on the headset additionally needs the mod's `Code.pul`, which arrives with that
+pack, so **Build on this Quest** offers Retro Rewind only once the pack is installed.
 
 ### Game packages (.wcgame) and Import from computer
 
 A `.wcgame` is a zip holding `game.json`, `libmain.so` and optionally `DATA/…` (the extracted
-disc, written without compression). `game.json` records the profile, game ID, `main.dol` and
-`StaticR.rel` pins, the kit fingerprint, the library's SHA-256 and who built it.
-`android/Build-QuestGame.ps1` builds one on a PC from the translator's output and the kit the
-last APK build exported, and `-Data` includes the game files. `-Install` pushes it into the app's
-`Import` folder. The launcher creates that folder itself so it owns it, and imports the newest
-package the next time it opens, once per package.
+disc) and `MOD/…` (the RetroRewind6 pack), both written without compression. `game.json` records
+the profile, game ID, `main.dol` and `StaticR.rel` pins, the kit fingerprint, the library's
+SHA-256, whether the package carries game files and mod content, and who built it.
+`android/Build-QuestGame.ps1 -Product base|retro_rewind` builds one on a PC from the translator's
+output and the kit the last APK build exported; `-Data` includes the game files and `-Mod
+<RetroRewind6>` the pack. `-Install` pushes it into the app's `Import` folder. The launcher
+creates that folder itself so it owns it, and imports the newest package the next time it opens,
+once per package. An import selects the game it just installed.
 
 Players get the same build from WheelWizard VR: Settings → WiiCompiled → Meta Quest → **Build**.
-WheelWizard asks for the Quest app's APK, whether to include the game files and where to save the
-package, then runs the installed setup:
+WheelWizard asks which game, whether to include the game files, for Retro Rewind whether to
+include its pack, for the Quest app's APK and where to save the package, then runs the installed
+setup:
 
 ```
-WiiCompiled-Setup.exe --build-quest --install-dir <install> --quest-apk <app.apk> --output <file.wcgame> [--include-game-files] --progress-json
+WiiCompiled-Setup.exe --build-quest --install-dir <install> --quest-apk <app.apk> --output <file.wcgame>
+                      --quest-product base|retro_rewind [--include-game-files]
+                      [--retro-dir <RetroRewind6> --include-mod-content] --progress-json
 ```
 
 Setup extracts `assets/game_kit` from the APK into `<install>\QuestBuild\kit`, so the game always
@@ -375,10 +391,11 @@ Android facts this design rests on, all measured on a Quest 3:
   also learned `--target-os windows|macos|linux|android` for
   `generate-data-init` and `translate-mod`, for pipelines that generate on
   another host.
-- `android/`: the Gradle project. `app/src/main/cpp/CMakeLists.txt` adds the
-  repository's `runtime/` as a subdirectory with those Android choices;
-  flavours `base` and `retroRewind` each build their own game kit probe, and only `base` carries
-  the on-headset toolchain.
+- `android/`: the Gradle project, one app with no flavours.
+  `app/src/main/cpp/CMakeLists.txt` adds the repository's `runtime/` as a
+  subdirectory with those Android choices and builds both game kit probes
+  (the Retro Rewind one only when the translation includes the mod), which
+  `exportDebugQuestGameKit` turns into the single kit the app carries.
 - `android/nod-jni`: Gradle's `buildNodJni` task runs `cargo build --release
   --locked --target aarch64-linux-android` with the NDK's clang as linker and C
   compiler. `stageNodJni` puts `libnod_jni.so` into the APK's `arm64-v8a`
@@ -389,7 +406,7 @@ Android facts this design rests on, all measured on a Quest 3:
 Prerequisites on the Windows host (all already present on the machine this
 was developed on): JDK 17, Android SDK with platform 34+, NDK `29.0.14206865`,
 SDK CMake `3.22.1`, `adb`, Rust 1.85+ with `rustup target add aarch64-linux-android`,
-the .NET 10 SDK (for the headset's translator; the base APK build downloads ~70 MB of Termux
+the .NET 10 SDK (for the headset's translator; the APK build downloads ~70 MB of Termux
 packages into `android/.dependencies` the first time); a translated graph for your own disc (the
 installer's `BuildWorkspace/generated`, produced by the normal Windows pipeline).
 
@@ -397,8 +414,7 @@ installer's `BuildWorkspace/generated`, produced by the normal Windows pipeline)
 powershell -ExecutionPolicy Bypass -File android/Prepare-QuestDependencies.ps1        # SDL3 3.4.4 AAR into android/app/libs
 powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Install             # the app, its game kit and toolchain, debug-signed
 powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Install         # your game, against that kit, into Import (or WheelWizard VR's Build for Quest)
-powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Flavor retroRewind  # Retro Rewind app and its kit (needs translate-mod output)
-powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Flavor retroRewind -Data <dir> -Install  # its game, with the disc files
+powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Product retro_rewind -Mod <RetroRewind6> -Install  # the mod and its pack (needs translate-mod output)
 adb push MarioKart.iso /sdcard/Download/                                               # then Select disc image in the launcher
 ```
 
@@ -468,6 +484,16 @@ What has been verified on the development machine (September 2026):
   the base library does not have. Packaged with the disc files (2.55 GB), imported on the Quest 3 in
   under two minutes, and the mod runs: its own title screen, "Press the A Button", and the licence
   menu, with the pack read from `retro_rewind_root`.
+- **Device, 2026-09-17: one app, both games.** The merged APK (121 MB) carries one kit with a `base`
+  and a `retro_rewind` recipe, no `libmain*.so` and no probe. Both games were built on the PC from
+  that one kit (base in 0.1 min from cached objects, Retro Rewind in 3.3 min) and imported on a
+  Quest 3: the base package in 3 s, the Retro Rewind one — 2.0 GB, carrying the pack — in 93 s,
+  which installed `RetroRewind6` and selected the game it had just installed. Both live side by
+  side in `files/game/<profile>`. Retro Rewind ran first (its title screen), then Home's toggle
+  switched to Mario Kart Wii, which ran from the same app. Two bugs this found: the on-device
+  builder read a per-product `fingerprint` that schema 3 keeps at the kit's top level, and a
+  `Config.toml` written before this app offered Retro Rewind named no pack, so the mod would have
+  found none — `GameStorage.prepare` now adds that one line to an existing config.
 
 Bring-up fixes that only a device could reveal:
 

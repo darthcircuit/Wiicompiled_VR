@@ -25,7 +25,11 @@ dotnet test translator/Translator.sln -c Release
 
 `--version` still prints a plain version. `--info-json` additionally reports `productId` as
 `wiicompiled-openxr-vr`, `version`, `openxrD3D12: true`, and `questBuild: true` when the setup
-supports `--build-quest` (see `docs/quest-port.md`). VR refuses installation, repair,
+supports `--build-quest` (see `docs/quest-port.md`). From 0.2.39 every release declares it, and
+`Verify-Release.ps1` refuses one whose payload lacks the `BuildWorkspace/android` scripts that
+build runs, so a release that claims Quest support can always deliver it. WheelWizard offers
+Build for Quest only once the installed setup reports `questBuild`, and asks the player to update
+otherwise. VR refuses installation, repair,
 launch, or uninstall of a normal or unidentified installation. Nonportable VR installations use
 `WiiCompiledOpenXRVR` application data and a distinct uninstall registration and shortcut.
 

@@ -11,12 +11,15 @@ import android.os.Bundle
 import android.text.format.Formatter
 import android.util.Log
 import android.view.View
+import android.view.ViewGroup
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import org.wiicompiled.quest.BuildConfig
 import org.wiicompiled.quest.GameLibrary
+import org.wiicompiled.quest.GameProfile
 import org.wiicompiled.quest.GameStorage
 import org.wiicompiled.quest.QuestActivity
 import org.wiicompiled.quest.R
@@ -56,7 +59,13 @@ class LauncherActivity : Activity() {
     private lateinit var dataBanner: View
     private lateinit var dataBannerIcon: ImageView
     private lateinit var dataBannerText: TextView
+    private lateinit var homeTitle: TextView
+    private lateinit var gameToggle: LinearLayout
     private lateinit var settings: SettingsPage
+
+    /** The games this APK carries a kit for, and the one the player picked. */
+    private val profiles: List<GameProfile> by lazy { GameProfile.available(this) }
+    private var profile = GameProfile.Base
 
     private var page = Page.Home
     private var launching = false
@@ -99,9 +108,9 @@ class LauncherActivity : Activity() {
         dataBannerIcon = findViewById(R.id.home_data_banner_icon)
         dataBannerText = findViewById(R.id.home_data_banner_text)
 
-        findViewById<TextView>(R.id.home_title).setText(
-            if (BuildConfig.PROFILE == "retro_rewind") R.string.home_title_retro_rewind else R.string.home_title_base,
-        )
+        homeTitle = findViewById(R.id.home_title)
+        gameToggle = findViewById(R.id.home_game_toggle)
+        buildGameToggle()
         findViewById<TextView>(R.id.launcher_version).text = getString(R.string.launcher_version, BuildConfig.VERSION_NAME)
 
         settings = SettingsPage(
@@ -131,13 +140,15 @@ class LauncherActivity : Activity() {
             !GameSetup.isRunning && GameStorage.discStatus(this) == GameStorage.DiscStatus.Ready
         ) {
             Log.i(TAG, "Starting a game build requested over adb")
-            GameSetupService.startBuild(this)
+            GameSetupService.startBuild(this, GameProfile.selected(this))
         }
     }
 
     override fun onResume() {
         super.onResume()
         launching = false
+        // An import can install the other game and select it, so the toggle follows the file.
+        profile = GameProfile.selected(this)
         importDroppedPackage()
         setupKind = GameSetup.state.javaClass
         refresh()
@@ -198,7 +209,11 @@ class LauncherActivity : Activity() {
     private fun refreshHome() {
         val disc = GameStorage.discDirectory(this).absolutePath
         val discStatus = GameStorage.discStatus(this)
-        val gameStatus = GameLibrary.status(this)
+        val gameStatus = GameLibrary.status(this, profile)
+        homeTitle.setText(profile.title)
+        for ((index, entry) in profiles.withIndex()) {
+            gameToggle.getChildAt(index).isSelected = entry == profile
+        }
         val running = isGameRunning()
         val setup = GameSetup.state
         val settingUp = GameSetup.isRunning
@@ -211,7 +226,7 @@ class LauncherActivity : Activity() {
         mainAction = when {
             running -> Action.Resume
             discStatus != GameStorage.DiscStatus.Ready -> Action.SelectDisc
-            gameStatus != GameLibrary.Status.Ready -> if (BuildConfig.ON_DEVICE_BUILD) Action.BuildGame else Action.ImportGame
+            gameStatus != GameLibrary.Status.Ready -> Action.BuildGame
             else -> Action.Play
         }
         secondaryAction = when {
@@ -280,14 +295,12 @@ class LauncherActivity : Activity() {
             setup is GameSetup.State.Failed && building -> showBanner(getString(R.string.home_build_failed, setup.message), warning = true)
             setup is GameSetup.State.Failed -> showBanner(getString(R.string.home_setup_failed, setup.message), warning = true)
             discStatus == GameStorage.DiscStatus.Incomplete -> showBanner(getString(R.string.home_data_incomplete, disc), warning = true)
-            !GameStorage.modContentReady(this) ->
+            !GameStorage.modContentReady(this, profile) ->
                 showBanner(getString(R.string.home_mod_missing, GameStorage.modDirectory(this).absolutePath), warning = true)
-            gameStatus == GameLibrary.Status.Stale ->
-                showBanner(getString(if (BuildConfig.ON_DEVICE_BUILD) R.string.home_game_stale else R.string.home_game_stale_pc), warning = true)
+            gameStatus == GameLibrary.Status.Stale -> showBanner(getString(R.string.home_game_stale), warning = true)
             gameStatus == GameLibrary.Status.Missing && discStatus == GameStorage.DiscStatus.Missing ->
-                showBanner(getString(if (BuildConfig.ON_DEVICE_BUILD) R.string.home_setup_intro else R.string.home_setup_intro_pc), warning = false)
-            gameStatus == GameLibrary.Status.Missing ->
-                showBanner(getString(if (BuildConfig.ON_DEVICE_BUILD) R.string.home_game_missing else R.string.home_game_missing_pc), warning = false)
+                showBanner(getString(R.string.home_setup_intro), warning = false)
+            gameStatus == GameLibrary.Status.Missing -> showBanner(getString(R.string.home_game_missing), warning = false)
             discStatus == GameStorage.DiscStatus.Missing -> showBanner(getString(R.string.home_data_missing, disc), warning = false)
             else -> showBanner(null)
         }
@@ -296,6 +309,40 @@ class LauncherActivity : Activity() {
             trailsAway = false
             trails.enter()
         }
+    }
+
+    /**
+     * Home's game switch, shown only when this APK carries more than one kit. Each game keeps its
+     * own built library, so switching is immediate; only the panel's state changes.
+     */
+    private fun buildGameToggle() {
+        for (entry in profiles) {
+            val button = TextView(this).apply {
+                setText(entry.title)
+                textSize = 14f
+                setTextColor(getColorStateList(R.color.game_toggle_text))
+                setBackgroundResource(R.drawable.bg_game_toggle)
+                gravity = android.view.Gravity.CENTER
+                // One line: the pill has a fixed height, so a wrapped "Retro Rewind" loses half of itself.
+                isSingleLine = true
+                setPadding(10.dp(), 0, 10.dp(), 0)
+                isClickable = true
+                isFocusable = true
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 38.dp())
+                setOnClickListener { selectProfile(entry) }
+            }
+            gameToggle.addView(button)
+        }
+        gameToggle.visibility = if (profiles.size > 1) View.VISIBLE else View.GONE
+    }
+
+    private fun Int.dp(): Int = (this * resources.displayMetrics.density).toInt()
+
+    private fun selectProfile(target: GameProfile) {
+        if (target == profile || GameSetup.isRunning) return
+        profile = target
+        GameProfile.select(this, target)
+        refresh()
     }
 
     private fun label(action: Action): Int = when (action) {
@@ -325,12 +372,20 @@ class LauncherActivity : Activity() {
         GameBuild.Step.Prepare, null -> getString(R.string.build_step_prepare)
     }
 
-    /** Builds the game on this headset from DATA, after saying what that takes. */
+    /** Builds the selected game on this headset from DATA, after saying what that takes. */
     private fun buildGame() {
-        if (!BuildConfig.ON_DEVICE_BUILD || GameSetup.isRunning || GameStorage.discStatus(this) != GameStorage.DiscStatus.Ready) return
-        val message = if (GameLibrary.status(this) == GameLibrary.Status.Ready) R.string.home_build_replace_message else R.string.home_build_message
+        if (GameSetup.isRunning || GameStorage.discStatus(this) != GameStorage.DiscStatus.Ready) return
+        if (!GameStorage.modContentReady(this, profile)) {
+            confirm(R.string.home_mod_needed_title, R.string.home_mod_needed_message, R.string.home_import) { importGame() }
+            return
+        }
+        val message = if (GameLibrary.status(this, profile) == GameLibrary.Status.Ready) {
+            R.string.home_build_replace_message
+        } else {
+            R.string.home_build_message
+        }
         confirm(R.string.home_build_title, message, R.string.home_build) {
-            GameSetupService.startBuild(this)
+            GameSetupService.startBuild(this, profile)
             showPage(Page.Home)
         }
     }
@@ -362,7 +417,7 @@ class LauncherActivity : Activity() {
     /** Opens the document picker for a .wcgame, asking first when it would replace the game. */
     private fun importGame() {
         if (GameSetup.isRunning) return
-        if (GameLibrary.status(this) != GameLibrary.Status.Ready) {
+        if (GameLibrary.status(this, profile) != GameLibrary.Status.Ready) {
             openPicker(REQUEST_GAME_PACKAGE)
             return
         }

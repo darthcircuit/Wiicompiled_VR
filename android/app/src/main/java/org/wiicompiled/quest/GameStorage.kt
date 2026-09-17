@@ -2,6 +2,7 @@ package org.wiicompiled.quest
 
 import android.content.Context
 import java.io.File
+import org.wiicompiled.quest.launcher.TomlConfig
 
 /**
  * Where the game's user files live on the headset. The launcher and the game
@@ -30,9 +31,12 @@ object GameStorage {
 
     fun modDirectory(context: Context): File = File(gameRoot(context), MOD_DIRECTORY)
 
-    /** Whether this app needs the Retro Rewind pack and has it. Always true for the base game. */
-    fun modContentReady(context: Context): Boolean =
-        BuildConfig.PROFILE != "retro_rewind" || File(modDirectory(context), "Binaries/Code.pul").isFile
+    /** The pack's own Code.pul, which is what a modded game and a mod translation both need. */
+    fun modCodePul(context: Context): File = File(modDirectory(context), "Binaries/Code.pul")
+
+    /** Whether the pack a profile needs is there. Always true for the unmodded game. */
+    fun modContentReady(context: Context, profile: GameProfile): Boolean =
+        !profile.modPack || modCodePul(context).isFile
 
     fun configFile(context: Context): File = File(gameRoot(context), "Config.toml")
 
@@ -58,7 +62,8 @@ object GameStorage {
 
     /**
      * Creates the game directory and a first Config.toml with VR on and the
-     * disc path filled in. An existing file is left alone: the launcher, the
+     * disc path filled in. An existing file keeps every setting it has, and only
+     * gains the Retro Rewind pack path when it predates it: the launcher, the
      * in-headset settings panel and the player all edit it in place.
      */
     fun prepare(context: Context): File {
@@ -75,10 +80,9 @@ object GameStorage {
                 "[paths]",
                 "dvd_root = \"${discDirectory(context).absolutePath}\"",
             )
-            // The modded product reads its pack from retro_rewind_root, which sits next to DATA here.
-            if (BuildConfig.PROFILE == "retro_rewind") {
-                lines += "retro_rewind_root = \"${modDirectory(context).absolutePath}\""
-            }
+            // The modded product reads its pack from retro_rewind_root, which sits next to DATA
+            // here. Harmless for the unmodded game, and one config serves both.
+            lines += "retro_rewind_root = \"${modDirectory(context).absolutePath}\""
             lines += listOf(
                 "",
                 "[video]",
@@ -90,6 +94,14 @@ object GameStorage {
                 "render_scale = 1.0",
             )
             config.writeText(lines.joinToString("\n", postfix = "\n"))
+        } else {
+            // A config written before this app offered Retro Rewind names no pack, and the modded
+            // game would find none. Only that one line is added; the rest is the player's.
+            val toml = TomlConfig.parse(config.readText())
+            if (toml.string("paths", "retro_rewind_root").isNullOrBlank()) {
+                toml.setString("paths", "retro_rewind_root", modDirectory(context).absolutePath)
+                config.writeText(toml.text())
+            }
         }
         return gameRoot
     }

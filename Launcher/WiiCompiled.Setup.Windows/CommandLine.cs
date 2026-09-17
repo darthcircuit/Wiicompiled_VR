@@ -52,6 +52,9 @@ internal sealed class CommandLine
     public string? QuestApkPath { get; private set; }
     public string? OutputPath { get; private set; }
     public bool IncludeGameFiles { get; private set; }
+    /// <summary>Which game the Quest app is to build: "base" (the default) or "retro_rewind".</summary>
+    public string QuestProduct { get; private set; } = "base";
+    public bool IncludeModContent { get; private set; }
 
     public static bool WantsProgressJson(string[] args) =>
         args.Any(argument => argument.Equals("--progress-json", StringComparison.OrdinalIgnoreCase));
@@ -97,6 +100,8 @@ internal sealed class CommandLine
                 case "--quest-apk": result.QuestApkPath = RequireValue(args, ref i); break;
                 case "--output": result.OutputPath = RequireValue(args, ref i); break;
                 case "--include-game-files": result.IncludeGameFiles = true; break;
+                case "--quest-product": result.QuestProduct = RequireValue(args, ref i); break;
+                case "--include-mod-content": result.IncludeModContent = true; break;
                 default:
                     throw new ArgumentException($"Unknown CLI option: {args[i]}");
             }
@@ -149,7 +154,7 @@ internal sealed class CommandLine
         [AppMode.BuildQuest] = new ModeRules
         {
             Flag = "--build-quest", AcceptsProgressJson = true, RequiresInstallDirectory = true,
-            AcceptsQuestBuild = true
+            AcceptsQuestBuild = true, AcceptsRetroDirectory = true
         }
     };
 
@@ -170,6 +175,13 @@ internal sealed class CommandLine
         Reject(QuestApkPath is not null && !rules.AcceptsQuestBuild, "--quest-apk");
         Reject(OutputPath is not null && !rules.AcceptsQuestBuild, "--output");
         Reject(IncludeGameFiles && !rules.AcceptsQuestBuild, "--include-game-files");
+        Reject(IncludeModContent && !rules.AcceptsQuestBuild, "--include-mod-content");
+        if (rules.AcceptsQuestBuild && QuestProduct is not ("base" or "retro_rewind"))
+            throw new ArgumentException("--quest-product must be base or retro_rewind.");
+        if (IncludeModContent && QuestProduct != "retro_rewind")
+            throw new ArgumentException("--include-mod-content needs --quest-product retro_rewind.");
+        if (IncludeModContent && string.IsNullOrWhiteSpace(RetroDirectoryPath))
+            throw new ArgumentException("--include-mod-content needs --retro-dir.");
         if (rules.AcceptsQuestBuild && (string.IsNullOrWhiteSpace(QuestApkPath) || string.IsNullOrWhiteSpace(OutputPath)))
             throw new ArgumentException($"--quest-apk and --output are required with {rules.Flag}.");
         Reject(RetroWfcPayloadMode != RetroWfcPayloadMode.NotApplicable && !rules.AcceptsPayloadMode,

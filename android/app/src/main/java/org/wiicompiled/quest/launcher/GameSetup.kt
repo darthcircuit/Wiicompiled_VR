@@ -7,6 +7,7 @@ import android.os.Looper
 import android.util.Log
 import java.io.File
 import java.io.InterruptedIOException
+import org.wiicompiled.quest.GameProfile
 
 /**
  * The long-running steps that make the game playable from what the player owns, one at a time,
@@ -87,7 +88,7 @@ object GameSetup {
     }
 
     /** The whole task, on a worker thread. Always ends in Done, Failed or Cancelled. [uri] is null only for a build. */
-    fun run(context: Context, task: Task, uri: Uri?, deleteSource: Boolean) {
+    fun run(context: Context, task: Task, uri: Uri?, deleteSource: Boolean, profile: GameProfile = GameProfile.selected(context)) {
         val progress = Progress { done, total ->
             publish(State.Working(task, done, total))
             !cancelRequested
@@ -99,7 +100,7 @@ object GameSetup {
                     publish(State.Working(task, permille.toLong(), 1000, step, done, total))
                     !cancelRequested
                 }
-                GameBuild.run(context, reporter, cancelled = { cancelRequested }, finishing)
+                GameBuild.run(context, profile, reporter, cancelled = { cancelRequested }, finishing)
             } else {
                 uri?.let { context.contentResolver.openFileDescriptor(it, "r") }?.use { descriptor ->
                     when (task) {

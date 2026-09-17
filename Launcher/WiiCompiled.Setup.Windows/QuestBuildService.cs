@@ -49,7 +49,8 @@ internal sealed class QuestBuildService
     internal sealed record Toolchain(string ClangCxx, string ClangC, string Sysroot);
 
     public async Task<Result> BuildAsync(Installation installation, string apkPath, string outputPath,
-        bool includeGameFiles, CancellationToken cancellationToken)
+        bool includeGameFiles, CancellationToken cancellationToken, string product = "base",
+        string? modContentDirectory = null)
     {
         _reporter.Progress(InstallStages.Validate, "Checking the installation and the Quest app...", 1);
         var workspace = installation.WorkspaceDirectory;
@@ -73,14 +74,24 @@ internal sealed class QuestBuildService
         var kitDirectory = Path.Combine(questRoot, "kit");
         _reporter.Progress(InstallStages.QuestKit, "Reading the game kit from the Quest app...", 2);
         var kit = ExtractKit(apkPath, kitDirectory, cancellationToken);
-        _reporter.Diagnostic($"Quest game kit {kit.Fingerprint} ({kit.Product})");
-        // A Retro Rewind app needs this installation's Retro Rewind translation, which only exists
-        // once the mod has been built here at least once.
-        if (kit.Product == "retro_rewind" && !HasRetroRewindShards(generated))
+        _reporter.Diagnostic($"Quest game kit {kit.Fingerprint} [{string.Join(", ", kit.Products)}]");
+        if (!kit.Products.Contains(product))
         {
             throw new InvalidOperationException(
-                "This Quest app is the Retro Rewind one, and this installation has no Retro Rewind " +
-                "translation. Install or repair Retro Rewind, then build for Quest again.");
+                $"The Quest app cannot play {product}: its game kit carries {string.Join(", ", kit.Products)}.");
+        }
+        // Retro Rewind needs this installation's own Retro Rewind translation, which only exists
+        // once the mod has been built here at least once.
+        if (product == "retro_rewind" && !HasRetroRewindShards(generated))
+        {
+            throw new InvalidOperationException(
+                "This installation has no Retro Rewind translation. Install or repair Retro Rewind, " +
+                "then build for Quest again.");
+        }
+        if (modContentDirectory is not null && !File.Exists(Path.Combine(modContentDirectory, "Binaries", "Code.pul")))
+        {
+            throw new InvalidOperationException(
+                "The Retro Rewind content to put in the game file is missing its Binaries/Code.pul.");
         }
 
         var toolchain = await EnsureToolchainAsync(questRoot, cancellationToken);
@@ -94,12 +105,17 @@ internal sealed class QuestBuildService
             "-Generated", generated, "-Kit", kitDirectory, "-Manifest", manifest,
             "-BuildDir", Path.Combine(questRoot, "build"), "-Output", temporaryOutput,
             "-ClangCxx", toolchain.ClangCxx, "-ClangC", toolchain.ClangC, "-Sysroot", toolchain.Sysroot,
-            "-Ninja", ninja, "-BuiltBy", $"WiiCompiled Setup {ProductInfo.Version}"
+            "-Ninja", ninja, "-BuiltBy", $"WiiCompiled Setup {ProductInfo.Version}", "-Product", product
         };
         if (includeGameFiles)
         {
             arguments.Add("-Data");
             arguments.Add(installation.GameDataDirectory);
+        }
+        if (modContentDirectory is not null)
+        {
+            arguments.Add("-Mod");
+            arguments.Add(modContentDirectory);
         }
 
         _reporter.Progress(InstallStages.QuestBuild, "Preparing the Quest build...", 40);
@@ -168,8 +184,8 @@ internal sealed class QuestBuildService
         File.Exists(Path.Combine(directory, "sys", "fst.bin")) &&
         File.Exists(Path.Combine(directory, "sys", "main.dol"));
 
-    /// <summary>What the extracted kit says it builds: its fingerprint and product ("base" or "retro_rewind").</summary>
-    internal sealed record Kit(string Fingerprint, string Product);
+    /// <summary>What the extracted kit says it builds: its fingerprint and the products it carries.</summary>
+    internal sealed record Kit(string Fingerprint, IReadOnlyCollection<string> Products);
 
     /// <summary>Extracts <c>assets/game_kit</c> from the Quest app's APK and reads what it is for.</summary>
     internal static Kit ExtractKit(string apkPath, string destination, CancellationToken cancellationToken)
@@ -203,11 +219,11 @@ internal sealed class QuestBuildService
         {
             throw new InvalidDataException("The Quest app's game kit has no fingerprint.");
         }
-        var product = document.RootElement.TryGetProperty("product", out var value) &&
-                      value.ValueKind == JsonValueKind.String
-            ? value.GetString()!
-            : "base";
-        return new Kit(fingerprint.GetString()!, product);
+        var products = document.RootElement.TryGetProperty("products", out var value) &&
+                       value.ValueKind == JsonValueKind.Object
+            ? value.EnumerateObject().Select(property => property.Name).ToArray()
+            : throw new InvalidDataException("The Quest app's game kit lists no games it can build.");
+        return new Kit(fingerprint.GetString()!, products);
     }
 
     private async Task<Toolchain> EnsureToolchainAsync(string questRoot, CancellationToken cancellationToken)

@@ -24,7 +24,7 @@
 
 Set-StrictMode -Version Latest
 
-$script:KitSchema = 2
+$script:KitSchema = 3
 $script:GameSchema = 1
 
 # What each app flavour's kit is made of. Slots name the game's objects in the probe's link line,
@@ -268,34 +268,15 @@ function Export-QuestGameKit {
         [Parameter(Mandatory)] [string]$CMakeBinaryDir,
         [Parameter(Mandatory)] [string]$OutputDir,
         [Parameter(Mandatory)] [string]$RepoRoot,
-        [Parameter(Mandatory)] [string]$LlvmStrip,
-        [ValidateSet('base', 'retro_rewind')] [string]$Product = 'base'
+        [Parameter(Mandatory)] [string]$LlvmStrip
     )
     $ErrorActionPreference = 'Stop'
     $binary = ConvertTo-ForwardPath $CMakeBinaryDir
     $runtimeInclude = ConvertTo-ForwardPath (Join-Path $RepoRoot 'runtime/include')
-    $kitProfile = $script:KitProfiles[$Product]
-
-    # The probe's link edge: explicit inputs are the objects, LINK_LIBRARIES the archives.
     $ninja = [IO.File]::ReadAllText("$binary/build.ninja")
-    $edge = [regex]::Match($ninja, "(?m)^build (\S*$([regex]::Escape($kitProfile.Probe))\.so): (\S+) ([^\r\n]*)\r?\n((?:  [^\r\n]*\r?\n)+)")
-    if (-not $edge.Success) { throw "No $($kitProfile.Probe) link edge in $binary/build.ninja" }
-    $explicit = ($edge.Groups[3].Value.Replace('$ ', '<ninja-space>') -split ' \|')[0]
-    $objects = @($explicit -split ' ' | Where-Object { $_ } | ForEach-Object { ConvertFrom-NinjaPath $_.Replace('<ninja-space>', '$ ') })
-    $vars = @{}
-    foreach ($line in ($edge.Groups[4].Value -split "\r?\n")) {
-        if ($line -match '^  (\w+) = (.*)$') { $vars[$Matches[1]] = $Matches[2] }
-    }
-    $rule = [regex]::Match($ninja, "(?ms)^rule $([regex]::Escape($edge.Groups[2].Value))\r?\n.*?command = ([^\r\n]*)")
-    if (-not $rule.Success) {
-        $rules = [IO.File]::ReadAllText("$binary/CMakeFiles/rules.ninja")
-        $rule = [regex]::Match($rules, "(?ms)^rule $([regex]::Escape($edge.Groups[2].Value))\r?\n.*?command = ([^\r\n]*)")
-    }
-    $target = [regex]::Match($rule.Groups[1].Value, '--target=(\S+)').Groups[1].Value
-    if (-not $target) { throw "Cannot read the link target triple from rule $($edge.Groups[2].Value)" }
-
-    # Compile flags per generated kind, from CMake's own commands.
     $commands = Read-CompileCommands "$binary/compile_commands.json"
+    $rules = if (Test-Path "$binary/CMakeFiles/rules.ninja") { [IO.File]::ReadAllText("$binary/CMakeFiles/rules.ninja") } else { '' }
+
     function Find-Command([string]$Pattern) {
         $entry = @($commands | Where-Object { $_.file.Replace('\', '/') -match $Pattern })
         if ($entry.Count -eq 0) { throw "compile_commands.json has no source matching $Pattern" }
@@ -307,20 +288,15 @@ function Export-QuestGameKit {
         param($Entry)
         ConvertTo-KitCompileFlags -Arguments (Split-CommandLine $Entry.command) -RuntimeInclude $runtimeInclude -Workspace $workspace
     }
-    $compile = [ordered]@{
-        translated = & $flagsFor $translatedEntry
-        product = & $flagsFor (Find-Command $kitProfile.RegistrationPattern)
-        runtime = & $flagsFor (Find-Command '/generated/data_sections_init\.cpp$')
-        asm = & $flagsFor (Find-Command 'data_sections_init_blobs[^/]*\.S$')
-    }
 
     if (Test-Path $OutputDir) { Remove-Item -Recurse -Force $OutputDir }
-    $objectsDir = Join-Path $OutputDir 'objects'
-    $libsDir = Join-Path $OutputDir 'libs'
-    New-Item -ItemType Directory -Force $objectsDir, $libsDir | Out-Null
+    New-Item -ItemType Directory -Force (Join-Path $OutputDir 'objects'), (Join-Path $OutputDir 'libs') | Out-Null
     Copy-Item -Recurse (Join-Path $RepoRoot 'runtime/include') (Join-Path $OutputDir 'include')
 
+    # One copy of every object and archive, however many products link it: the two probes differ
+    # only in their own product object.
     $copied = @{}
+    $script:kitIndex = 0
     $copy = {
         param([string]$Source, [string]$Directory)
         $full = ConvertTo-ForwardPath $(if ([IO.Path]::IsPathRooted($Source)) { $Source } else { "$binary/$Source" })
@@ -333,51 +309,91 @@ function Export-QuestGameKit {
         $copied[$full] = "{kit}/$Directory/$name"
         return $copied[$full]
     }
-    $script:kitIndex = 0
 
-    # Link inputs in the probe's order, with the game's slots marked where WiiCompiled has them.
-    $inputs = New-Object System.Collections.Generic.List[string]
-    $lastRuntime = -1
-    for ($i = 0; $i -lt $objects.Count; $i++) {
-        if ($objects[$i] -match '/mkw_runtime_common\.dir/') { $lastRuntime = $i }
-    }
-    for ($i = 0; $i -lt $objects.Count; $i++) {
-        $inputs.Add((& $copy $objects[$i] 'objects'))
-        if ($objects[$i] -match $kitProfile.ProductObjectPattern) { $inputs.Add('{game:product}') }
-        if ($i -eq $lastRuntime) {
-            $inputs.Add('{game:runtime}')
-            # Retro Rewind links the mod's own objects after the runtime's, as its CMake target does.
-            if ($kitProfile.Slots -contains 'mod') { $inputs.Add('{game:mod}') }
+    # One recipe per product this CMake tree built a probe for. The base one must be there; Retro
+    # Rewind's exists only once translate-mod and emit-build-shards have run.
+    $products = [ordered]@{}
+    foreach ($product in 'base', 'retro_rewind') {
+        $kitProfile = $script:KitProfiles[$product]
+        $edge = [regex]::Match($ninja, "(?m)^build (\S*$([regex]::Escape($kitProfile.Probe))\.so): (\S+) ([^\r\n]*)\r?\n((?:  [^\r\n]*\r?\n)+)")
+        if (-not $edge.Success) {
+            if ($product -eq 'base') { throw "No $($kitProfile.Probe) link edge in $binary/build.ninja" }
+            Write-Host "No $($kitProfile.Probe) in this build; the kit carries the base game only."
+            continue
         }
-    }
-    foreach ($slot in $kitProfile.Slots) {
-        if ($slot -ne 'translated' -and -not $inputs.Contains("{game:$slot}")) {
-            throw "The probe link line lacks the objects the {game:$slot} slot follows"
+        $explicit = ($edge.Groups[3].Value.Replace('$ ', '<ninja-space>') -split ' \|')[0]
+        $objects = @($explicit -split ' ' | Where-Object { $_ } | ForEach-Object { ConvertFrom-NinjaPath $_.Replace('<ninja-space>', '$ ') })
+        $vars = @{}
+        foreach ($line in ($edge.Groups[4].Value -split "\r?\n")) {
+            if ($line -match '^  (\w+) = (.*)$') { $vars[$Matches[1]] = $Matches[2] }
         }
-    }
-    foreach ($token in ((ConvertFrom-NinjaPath $vars['LINK_LIBRARIES']) -split ' ' | Where-Object { $_ })) {
-        if ($token.StartsWith('-')) { $inputs.Add($token); continue }
-        $path = $token.Replace('\', '/')
-        if ($path -match '/sysroot/(.+)$') { $inputs.Add("{sysroot}/$($Matches[1])") }
-        else { $inputs.Add((& $copy $token 'libs')) }
-        if ($path -match '/libmkw_platform\.a$') { $inputs.Add('{game:translated}') }
-    }
-    if (-not $inputs.Contains('{game:translated}')) { throw 'The probe link line lacks libmkw_platform.a' }
+        $rule = [regex]::Match($ninja, "(?ms)^rule $([regex]::Escape($edge.Groups[2].Value))\r?\n.*?command = ([^\r\n]*)")
+        if (-not $rule.Success) {
+            $rule = [regex]::Match($rules, "(?ms)^rule $([regex]::Escape($edge.Groups[2].Value))\r?\n.*?command = ([^\r\n]*)")
+        }
+        $target = [regex]::Match($rule.Groups[1].Value, '--target=(\S+)').Groups[1].Value
+        if (-not $target) { throw "Cannot read the link target triple from rule $($edge.Groups[2].Value)" }
 
-    $linkFlags = New-Object System.Collections.Generic.List[string]
-    $linkFlags.Add("--target=$target"); $linkFlags.Add('--sysroot={sysroot}'); $linkFlags.Add('-fPIC')
-    foreach ($name in 'LANGUAGE_COMPILE_FLAGS', 'ARCH_FLAGS', 'LINK_FLAGS') {
-        if (-not $vars.ContainsKey($name)) { continue }
-        $tokens = Split-CommandLine (ConvertFrom-NinjaPath $vars[$name])
-        for ($i = 0; $i -lt $tokens.Length; $i++) {
-            if ($tokens[$i] -eq '-g' -or $tokens[$i] -eq '-Wl,--unresolved-symbols=ignore-all') { continue }
-            if ($tokens[$i] -eq '-Xlinker' -and $i + 1 -lt $tokens.Length -and $tokens[$i + 1].StartsWith('--dependency-file')) { $i++; continue }
-            $linkFlags.Add($tokens[$i])
+        # Link inputs in the probe's order, with the game's slots marked where the product has them.
+        $inputs = New-Object System.Collections.Generic.List[string]
+        $lastRuntime = -1
+        for ($i = 0; $i -lt $objects.Count; $i++) {
+            if ($objects[$i] -match '/mkw_runtime_common\.dir/') { $lastRuntime = $i }
+        }
+        for ($i = 0; $i -lt $objects.Count; $i++) {
+            $inputs.Add((& $copy $objects[$i] 'objects'))
+            if ($objects[$i] -match $kitProfile.ProductObjectPattern) { $inputs.Add('{game:product}') }
+            if ($i -eq $lastRuntime) {
+                $inputs.Add('{game:runtime}')
+                # Retro Rewind links the mod's own objects after the runtime's, as its CMake target does.
+                if ($kitProfile.Slots -contains 'mod') { $inputs.Add('{game:mod}') }
+            }
+        }
+        foreach ($slot in $kitProfile.Slots) {
+            if ($slot -ne 'translated' -and -not $inputs.Contains("{game:$slot}")) {
+                throw "The $product probe link line lacks the objects the {game:$slot} slot follows"
+            }
+        }
+        foreach ($token in ((ConvertFrom-NinjaPath $vars['LINK_LIBRARIES']) -split ' ' | Where-Object { $_ })) {
+            if ($token.StartsWith('-')) { $inputs.Add($token); continue }
+            $path = $token.Replace('\', '/')
+            if ($path -match '/sysroot/(.+)$') { $inputs.Add("{sysroot}/$($Matches[1])") }
+            else { $inputs.Add((& $copy $token 'libs')) }
+            if ($path -match '/libmkw_platform\.a$') { $inputs.Add('{game:translated}') }
+        }
+        if (-not $inputs.Contains('{game:translated}')) { throw "The $product probe link line lacks libmkw_platform.a" }
+
+        $linkFlags = New-Object System.Collections.Generic.List[string]
+        $linkFlags.Add("--target=$target"); $linkFlags.Add('--sysroot={sysroot}'); $linkFlags.Add('-fPIC')
+        foreach ($name in 'LANGUAGE_COMPILE_FLAGS', 'ARCH_FLAGS', 'LINK_FLAGS') {
+            if (-not $vars.ContainsKey($name)) { continue }
+            $tokens = Split-CommandLine (ConvertFrom-NinjaPath $vars[$name])
+            for ($i = 0; $i -lt $tokens.Length; $i++) {
+                if ($tokens[$i] -eq '-g' -or $tokens[$i] -eq '-Wl,--unresolved-symbols=ignore-all') { continue }
+                if ($tokens[$i] -eq '-Xlinker' -and $i + 1 -lt $tokens.Length -and $tokens[$i + 1].StartsWith('--dependency-file')) { $i++; continue }
+                $linkFlags.Add($tokens[$i])
+            }
+        }
+        $linkFlags.Add('-Wl,-soname,libmain.so')
+
+        $products[$product] = [ordered]@{
+            output = 'libmain.so'
+            target = $target
+            compile = [ordered]@{
+                translated = & $flagsFor $translatedEntry
+                product = & $flagsFor (Find-Command $kitProfile.RegistrationPattern)
+                runtime = & $flagsFor (Find-Command '/generated/data_sections_init\.cpp$')
+                asm = & $flagsFor (Find-Command 'data_sections_init_blobs[^/]*\.S$')
+            }
+            sources = $kitProfile.Sources
+            link = [ordered]@{
+                flags = $linkFlags.ToArray()
+                inputs = $inputs.ToArray()
+                lld = Get-KitLldArguments -ClangCxx (Join-Path (Split-Path -Parent $LlvmStrip) 'clang++.exe') -KitDir $OutputDir `
+                    -Flags $linkFlags.ToArray() -Inputs $inputs.ToArray() -Slots $kitProfile.Slots
+            }
         }
     }
-    $linkFlags.Add('-Wl,-soname,libmain.so')
-    $lld = Get-KitLldArguments -ClangCxx (Join-Path (Split-Path -Parent $LlvmStrip) 'clang++.exe') -KitDir $OutputDir `
-        -Flags $linkFlags.ToArray() -Inputs $inputs.ToArray() -Slots $kitProfile.Slots
 
     # What the headset's translator needs besides the disc: the game manifest and symbol map, and
     # the runtime sources it indexes for native registrations, which must be the ones compiled into
@@ -389,13 +405,8 @@ function Export-QuestGameKit {
 
     $recipe = [ordered]@{
         schema = $script:KitSchema
-        product = $Product
-        output = 'libmain.so'
-        target = $target
         runtimeIncludeFingerprint = Get-RuntimeIncludeFingerprint (Join-Path $OutputDir 'include')
-        compile = $compile
-        sources = $kitProfile.Sources
-        link = [ordered]@{ flags = $linkFlags.ToArray(); inputs = $inputs.ToArray(); lld = $lld }
+        products = $products
     }
     $recipeJson = $recipe | ConvertTo-Json -Depth 8 -Compress
     $files = Get-RelativeFiles $OutputDir | Sort-Object FullName | ForEach-Object {
@@ -403,7 +414,7 @@ function Export-QuestGameKit {
     }
     $recipe.fingerprint = Get-StringSha256Hex ($recipeJson + "`n" + ($files -join "`n"))
     [IO.File]::WriteAllText((Join-Path $OutputDir 'kit.json'), ($recipe | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false))
-    return $recipe.fingerprint
+    return [pscustomobject]@{ Fingerprint = $recipe.fingerprint; Products = @($products.Keys) }
 }
 
 # The generated source lists emit-build-shards wrote into shards.cmake.
@@ -425,7 +436,8 @@ function Invoke-QuestGameBuild {
         [Parameter(Mandatory)] [string]$ClangC,
         [Parameter(Mandatory)] [string]$Sysroot,
         [Parameter(Mandatory)] [string]$Ninja,
-        [Parameter(Mandatory)] [int]$TranslatedJobs
+        [Parameter(Mandatory)] [int]$TranslatedJobs,
+        [ValidateSet('base', 'retro_rewind')] [string]$Product = 'base'
     )
     $ErrorActionPreference = 'Stop'
     $kit = ConvertTo-ForwardPath $KitDir
@@ -433,6 +445,10 @@ function Invoke-QuestGameBuild {
     $workspace = ConvertTo-ForwardPath (Split-Path -Parent $generated)
     $recipe = [IO.File]::ReadAllText("$kit/kit.json") | ConvertFrom-Json
     if ($recipe.schema -ne $script:KitSchema) { throw "Unsupported game kit schema $($recipe.schema)" }
+    if (-not $recipe.products.PSObject.Properties.Name.Contains($Product)) {
+        throw "This Quest app's game kit cannot build $Product (it has: $($recipe.products.PSObject.Properties.Name -join ', '))"
+    }
+    $productRecipe = $recipe.products.$Product
     # The translation must come from the same release as the kit: its code is compiled against the
     # kit's runtime headers and linked with the kit's runtime objects.
     $workspaceInclude = Join-Path $workspace 'runtime/include'
@@ -447,10 +463,10 @@ function Invoke-QuestGameBuild {
     $expand = { param([string]$s) $s.Replace('{kit}', $kit).Replace('{sysroot}', (ConvertTo-ForwardPath $Sysroot)).Replace('{workspace}', $workspace) }
 
     foreach ($kind in 'translated', 'product', 'runtime', 'asm') {
-        $lines = @($recipe.compile.$kind | ForEach-Object { ConvertTo-QuotedArgument (& $expand $_) })
+        $lines = @($productRecipe.compile.$kind | ForEach-Object { ConvertTo-QuotedArgument (& $expand $_) })
         [IO.File]::WriteAllText("$build/$kind.rsp", ($lines -join "`n"), (New-Object Text.UTF8Encoding $false))
     }
-    $linkLines = @($recipe.link.flags | ForEach-Object { ConvertTo-QuotedArgument (& $expand $_) })
+    $linkLines = @($productRecipe.link.flags | ForEach-Object { ConvertTo-QuotedArgument (& $expand $_) })
     [IO.File]::WriteAllText("$build/link.rsp", ($linkLines -join "`n"), (New-Object Text.UTF8Encoding $false))
 
     # The Windows installer generates blob assembly for PE/COFF; every one of them is rewritten for
@@ -469,9 +485,9 @@ function Invoke-QuestGameBuild {
     # file.
     $shards = "$generated/build_shards/shards.cmake"
     $sources = [ordered]@{}
-    foreach ($slot in $recipe.sources.PSObject.Properties.Name) {
+    foreach ($slot in $productRecipe.sources.PSObject.Properties.Name) {
         $slotSources = New-Object System.Collections.Generic.List[string]
-        foreach ($entry in $recipe.sources.$slot) {
+        foreach ($entry in $productRecipe.sources.$slot) {
             if ($entry.StartsWith('@')) {
                 Read-ShardList $shards $entry.Substring(1) | ForEach-Object { $slotSources.Add($_) }
             } else {
@@ -482,7 +498,7 @@ function Invoke-QuestGameBuild {
     }
     if ($sources.translated.Count -eq 0) { throw "No translated shards in $shards" }
     foreach ($slot in $sources.Keys) {
-        if ($sources[$slot].Count -eq 0) { throw "The $slot sources of a $($recipe.product) game are missing from $shards" }
+        if ($sources[$slot].Count -eq 0) { throw "The $slot sources of a $Product game are missing from $shards" }
     }
 
     $ninjaText = New-Object System.Text.StringBuilder
@@ -511,7 +527,7 @@ function Invoke-QuestGameBuild {
         }
     }
     $linkInputs = New-Object System.Collections.Generic.List[string]
-    foreach ($linkInput in $recipe.link.inputs) {
+    foreach ($linkInput in $productRecipe.link.inputs) {
         $slot = [regex]::Match($linkInput, '^\{game:(\w+)\}$').Groups[1].Value
         if (-not $slot) { $linkInputs.Add((& $expand $linkInput)); continue }
         if (-not $objectsOf.ContainsKey($slot)) { throw "The kit recipe links a {game:$slot} slot it names no sources for" }
@@ -534,33 +550,38 @@ function Invoke-QuestGameBuild {
     return "$build/libmain.so"
 }
 
-# A .wcgame: the built library and what it was built from, for the headset to import. With
-# -DataDir it also carries the extracted disc (DATA/...), written without compression, so a player who
-# builds on a PC copies one file to the headset and never needs the disc image there.
+# A .wcgame: the built library and what it was built from, for the headset to import. It can also
+# carry, written without compression, the extracted disc (-DataDir, as DATA/...) and the Retro
+# Rewind pack (-ModDir, as MOD/...), so a player who builds on a PC copies one file to the headset
+# and needs nothing else there.
 function New-QuestGamePackage {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$Library,
         [string]$DataDir = '',
+        [string]$ModDir = '',
         [Parameter(Mandatory)] [string]$KitDir,
         [Parameter(Mandatory)] [string]$GameId,
         [Parameter(Mandatory)] [string]$DolSha256,
         [Parameter(Mandatory)] [string]$RelSha256,
         [Parameter(Mandatory)] [string]$BuiltBy,
-        [Parameter(Mandatory)] [string]$OutputPath
+        [Parameter(Mandatory)] [string]$OutputPath,
+        [ValidateSet('base', 'retro_rewind')] [string]$Product = 'base'
     )
     $ErrorActionPreference = 'Stop'
     $recipe = [IO.File]::ReadAllText((Join-Path $KitDir 'kit.json')) | ConvertFrom-Json
+    if ($ModDir -and $Product -ne 'retro_rewind') { throw 'Only a Retro Rewind game carries the mod pack.' }
     $game = [ordered]@{
         schema = $script:GameSchema
-        profile = $recipe.product
+        profile = $Product
         gameId = $GameId
         dolSha256 = $DolSha256
         relSha256 = $RelSha256
         kitFingerprint = $recipe.fingerprint
-        library = $recipe.output
+        library = $recipe.products.$Product.output
         librarySha256 = Get-Sha256Hex $Library
         includesData = [bool]$DataDir
+        includesMod = [bool]$ModDir
         builtBy = $BuiltBy
         builtAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     }
@@ -572,10 +593,12 @@ function New-QuestGamePackage {
         $entry = $zip.CreateEntry('game.json')
         $writer = New-Object IO.StreamWriter($entry.Open(), (New-Object Text.UTF8Encoding $false))
         try { $writer.Write(($game | ConvertTo-Json)) } finally { $writer.Dispose() }
-        [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $Library, $recipe.output, 'Optimal')
-        if ($DataDir) {
-            foreach ($file in Get-RelativeFiles $DataDir) {
-                [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $file.FullName, "DATA/$($file.Relative)", 'NoCompression')
+        [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $Library, $game.library, 'Optimal')
+        foreach ($tree in @{ Prefix = 'DATA'; Directory = $DataDir }, @{ Prefix = 'MOD'; Directory = $ModDir }) {
+            if (-not $tree.Directory) { continue }
+            foreach ($file in Get-RelativeFiles $tree.Directory) {
+                [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                    $zip, $file.FullName, "$($tree.Prefix)/$($file.Relative)", 'NoCompression')
             }
         }
     } finally { $zip.Dispose() }

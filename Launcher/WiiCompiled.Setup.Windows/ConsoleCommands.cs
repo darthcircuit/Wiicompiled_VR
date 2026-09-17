@@ -17,7 +17,8 @@ internal static class ConsoleCommands
         Console.Out.WriteLine("  --repair-products --install-dir <dir> --retro-dir <folder> " +
                              "(--download-retro-wfc-payload | --skip-retro-wfc-payload) [--progress-json]");
         Console.Out.WriteLine("  --build-quest --install-dir <dir> --quest-apk <apk> --output <file.wcgame> " +
-                             "[--include-game-files] [--progress-json]");
+                             "[--quest-product base|retro_rewind] [--include-game-files] " +
+                             "[--retro-dir <folder> --include-mod-content] [--progress-json]");
         Console.Out.WriteLine("  --launch-retro | --launch-base");
         Console.Out.WriteLine("  --uninstall --install-dir <dir>");
         Console.Out.WriteLine("  --version");
@@ -293,7 +294,8 @@ internal static class ConsoleCommands
             using var operationLock = InstallOperationLock.Acquire(installation.Root, reporter);
             var result = await new QuestBuildService(reporter).BuildAsync(installation,
                 Path.GetFullPath(command.QuestApkPath!), Path.GetFullPath(command.OutputPath!),
-                command.IncludeGameFiles, cancellationToken);
+                command.IncludeGameFiles, cancellationToken, command.QuestProduct,
+                command.IncludeModContent ? Path.GetFullPath(command.RetroDirectoryPath!) : null);
             if (ndjson is null)
                 Console.Out.WriteLine($"Quest game package: {result.PackagePath} ({result.SizeBytes / 1_000_000} MB)");
             ndjson?.QuestPackage(result);

@@ -302,8 +302,17 @@ internal static class SelfTests
             "--output", "D:\\MarioKartWii.wcgame", "--include-game-files", "--progress-json"
         ]);
         if (build.Mode != AppMode.BuildQuest || build.QuestApkPath != "quest.apk" ||
-            build.OutputPath != "D:\\MarioKartWii.wcgame" || !build.IncludeGameFiles || !build.ProgressJson)
+            build.OutputPath != "D:\\MarioKartWii.wcgame" || !build.IncludeGameFiles || !build.ProgressJson ||
+            build.QuestProduct != "base" || build.IncludeModContent)
             throw new Exception("The Quest build contract did not parse.");
+
+        var retro = CommandLine.Parse([
+            "--build-quest", "--install-dir", "C:\\Games\\MKW", "--quest-apk", "quest.apk",
+            "--output", "D:\\RetroRewind.wcgame", "--quest-product", "retro_rewind",
+            "--retro-dir", "D:\\RetroRewind6", "--include-mod-content"
+        ]);
+        if (retro.QuestProduct != "retro_rewind" || !retro.IncludeModContent || retro.RetroDirectoryPath != "D:\\RetroRewind6")
+            throw new Exception("The Retro Rewind Quest build contract did not parse.");
 
         void Rejects(string description, params string[] args)
         {
@@ -319,6 +328,12 @@ internal static class SelfTests
         Rejects("A Quest build without an installation", "--build-quest", "--quest-apk", "a.apk", "--output", "o");
         Rejects("--quest-apk outside a Quest build", "--launch-base", "--quest-apk", "a.apk");
         Rejects("--include-game-files outside a Quest build", "--check-products", "--include-game-files");
+        Rejects("An unknown Quest product", "--build-quest", "--install-dir", "i", "--quest-apk", "a.apk",
+            "--output", "o.wcgame", "--quest-product", "mario-kart-8");
+        Rejects("The mod content of a base game", "--build-quest", "--install-dir", "i", "--quest-apk", "a.apk",
+            "--output", "o.wcgame", "--retro-dir", "r", "--include-mod-content");
+        Rejects("Mod content without its source", "--build-quest", "--install-dir", "i", "--quest-apk", "a.apk",
+            "--output", "o.wcgame", "--quest-product", "retro_rewind", "--include-mod-content");
     }
 
     private static void TestQuestToolchainSelection()
@@ -369,15 +384,16 @@ internal static class SelfTests
                     using var writer = new StreamWriter(zip.CreateEntry(name).Open());
                     writer.Write(text);
                 }
-                Add("assets/game_kit/kit.json", "{\"schema\":2,\"product\":\"retro_rewind\",\"fingerprint\":\"abc123\"}");
+                Add("assets/game_kit/kit.json", "{\"schema\":3,\"fingerprint\":\"abc123\",\"products\":{\"base\":{},\"retro_rewind\":{}}}");
                 Add("assets/game_kit/include/memory.h", "#pragma once");
                 Add("assets/runtime_resources/dsp_coef.bin", "not the kit");
                 Add("lib/arm64-v8a/libSDL3.so", "not the kit");
             }
             var kit = Path.Combine(temp, "kit");
             var extracted = QuestBuildService.ExtractKit(apk, kit, CancellationToken.None);
-            if (extracted.Fingerprint != "abc123" || extracted.Product != "retro_rewind")
-                throw new Exception("The kit fingerprint or product was not read.");
+            if (extracted.Fingerprint != "abc123" || !extracted.Products.Contains("base") ||
+                !extracted.Products.Contains("retro_rewind"))
+                throw new Exception("The kit fingerprint or its games were not read.");
             if (!File.Exists(Path.Combine(kit, "include", "memory.h")) ||
                 Directory.GetFiles(kit, "*", SearchOption.AllDirectories).Length != 2)
                 throw new Exception("The kit extraction took the wrong files.");

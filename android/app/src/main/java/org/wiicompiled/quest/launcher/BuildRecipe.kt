@@ -61,6 +61,14 @@ object BuildRecipe {
             ?: throw IllegalArgumentException("recomp.yml names no translation entry point")
 
     /**
+     * Where recomp.yml's Retro Rewind profile expects the mod, relative to the workspace. A base
+     * translation only accounts for a mod whose Code.pul is there.
+     */
+    fun modRoot(manifest: String): String =
+        Regex("""\n\s*mod_root:\s*(\S+)""").find(manifest)?.groupValues?.get(1)
+            ?: throw IllegalArgumentException("recomp.yml names no Retro Rewind mod_root")
+
+    /**
      * The blob assembly for ELF, as runtime/cmake/PublicProducts.cmake rewrites a Windows-generated
      * one. The headset's translator already writes ELF sections, so this normally changes nothing.
      */

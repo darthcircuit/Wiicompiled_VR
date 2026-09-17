@@ -24,6 +24,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.wiicompiled.quest.BuildConfig
 import org.wiicompiled.quest.GameLibrary
+import org.wiicompiled.quest.GameProfile
 import org.wiicompiled.quest.GameStorage
 
 /**
@@ -53,7 +54,7 @@ object GameBuild {
     }
 
     private const val TAG = "WiiCompiledLauncher"
-    private const val KIT_SCHEMA = 2
+    private const val KIT_SCHEMA = 3
     private const val TOOLCHAIN_ASSETS = "quest_toolchain"
     private const val KIT_ASSETS = "game_kit"
     private const val MARKER = ".complete"
@@ -65,14 +66,18 @@ object GameBuild {
     private const val EXPECTED_TRANSLATION_SECONDS = 600.0
     private const val COMPILE_MEMORY_BYTES = 700L * 1024 * 1024
 
-    /** Null on success, otherwise the message to show. */
-    fun run(context: Context, reporter: Reporter, cancelled: () -> Boolean, finishing: () -> Unit): String? {
+    /** Builds [profile]'s game. Null on success, otherwise the message to show. */
+    fun run(context: Context, profile: GameProfile, reporter: Reporter, cancelled: () -> Boolean, finishing: () -> Unit): String? {
         if (!BuildConfig.ON_DEVICE_BUILD) {
             return "This app cannot build its game on the headset. Build it on a computer and use Import from computer."
         }
         val disc = GameStorage.discDirectory(context)
         if (GameStorage.discStatus(context) != GameStorage.DiscStatus.Ready) {
             return "The game files (DATA) are needed to build the game. Select your disc image first."
+        }
+        if (!GameStorage.modContentReady(context, profile)) {
+            return "Retro Rewind needs its pack before it can be built. Import a Retro Rewind game file that " +
+                "carries it, or copy the RetroRewind6 folder to ${GameStorage.modDirectory(context).absolutePath}."
         }
         GameFiles.validateData(disc)?.let { return it }
         val root = File(context.filesDir, "build")
@@ -85,7 +90,7 @@ object GameBuild {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val log = BuildLog(File(GameStorage.logsDirectory(context), "build_$stamp.log"))
         try {
-            return Build(context, root, disc, reporter, cancelled, finishing, log).run()
+            return Build(context, profile, root, disc, reporter, cancelled, finishing, log).run()
         } catch (e: InterruptedIOException) {
             throw e
         } catch (e: Exception) {
@@ -99,6 +104,7 @@ object GameBuild {
 
     private class Build(
         val context: Context,
+        val profile: GameProfile,
         val root: File,
         val disc: File,
         val reporter: Reporter,
@@ -109,24 +115,26 @@ object GameBuild {
         val toolchain = File(root, "toolchain")
         val ndk = File(root, "ndk")
         val kit = File(root, "kit")
-        val work = File(root, GameLibrary.directory(context).name)
+        val work = File(root, profile.id)
         val workspace = File(work, "ws")
         val objects = File(work, "obj")
         val temporary = File(root, "tmp")
         val failure = AtomicReference<String?>(null)
 
         fun run(): String? {
-            log.line("WiiCompiled Quest ${BuildConfig.VERSION_NAME} building ${BuildConfig.PROFILE} on this headset")
+            log.line("WiiCompiled Quest ${BuildConfig.VERSION_NAME} building ${profile.id} on this headset")
             report(0, Step.Prepare)
             val toolchainManifest = JSONObject(context.assets.open("$TOOLCHAIN_ASSETS/toolchain.json").reader().use { it.readText() })
             unpackToolchain(toolchainManifest)
             report(30, Step.Prepare)
             val kitFingerprint = GameLibrary.kitFingerprint(context) ?: return "This app carries no game kit."
             unpackKit(kitFingerprint)
-            val recipe = JSONObject(File(kit, "kit.json").readText())
-            if (recipe.optInt("schema") != KIT_SCHEMA) {
-                return "This app's game kit is version ${recipe.optInt("schema")}, which this builder does not know."
+            val kitJson = JSONObject(File(kit, "kit.json").readText())
+            if (kitJson.optInt("schema") != KIT_SCHEMA) {
+                return "This app's game kit is version ${kitJson.optInt("schema")}, which this builder does not know."
             }
+            val recipe = kitJson.getJSONObject("products").optJSONObject(profile.id)
+                ?: return "This app's game kit cannot build ${profile.id}."
             report(40, Step.Prepare)
             downloadNdk(JSONObject(context.assets.open("$TOOLCHAIN_ASSETS/${toolchainManifest.getString("ndk")}").reader().use { it.readText() }))
 
@@ -141,8 +149,9 @@ object GameBuild {
                 log,
                 cancelled = { cancelled() || failure.get() != null },
             )
-            translate(tools, "$kitFingerprint ${toolchainManifest.getString("fingerprint")}")?.let { return it }
-            val objectsBySlot = compile(tools, recipe, toolchainManifest.getString("fingerprint"))
+            val buildIdentity = "$kitFingerprint ${toolchainManifest.getString("fingerprint")}"
+            translate(tools, buildIdentity)?.let { return it }
+            val objectsBySlot = compile(tools, recipe, buildIdentity)
             failure.get()?.let { return it }
             val library = link(tools, recipe, objectsBySlot) ?: return failure.get() ?: "Linking the game failed."
 
@@ -271,7 +280,10 @@ object GameBuild {
         fun translate(tools: ToolProcess, identity: String): String? {
             val generated = File(workspace, "generated")
             val provenance = File(generated, "translation-provenance.txt")
-            val expected = "$identity ${BuildConfig.DISC_DOL_SHA256} ${BuildConfig.DISC_REL_SHA256}"
+            // A modded game needs a base translation that knows this Code.pul, so the pack's own
+            // identity is part of what the stored translation is reused for.
+            val modIdentity = if (profile.modPack) BuildRecipe.hex(sha256(GameStorage.modCodePul(context))) else ""
+            val expected = "$identity ${profile.id} ${BuildConfig.DISC_DOL_SHA256} ${BuildConfig.DISC_REL_SHA256} $modIdentity"
             val shards = File(generated, "build_shards/shards.cmake")
             if (provenance.isFile && provenance.readText() == expected && shards.isFile) {
                 log.line("Reusing the translation of an earlier build")
@@ -286,9 +298,17 @@ object GameBuild {
             File(disc, DiscChecks.DOL_PATH).copyTo(File(workspace, "Assets/main.dol"), overwrite = true)
             File(disc, DiscChecks.REL_PATH).copyTo(File(workspace, "Assets/StaticR.rel"), overwrite = true)
             val manifest = "projects/mkwii/recomp.yml"
-            val entryPoint = BuildRecipe.entryPoint(File(workspace, manifest).readText())
+            val manifestText = File(workspace, manifest).readText()
+            val entryPoint = BuildRecipe.entryPoint(manifestText)
+            // The base translation only knows a mod's patches when the profile's Code.pul sits
+            // where recomp.yml's mod_root says, so the pack's copy is staged there first.
+            val steps = if (profile.modPack) 4 else 3
+            if (profile.modPack) {
+                val modRoot = File(workspace, BuildRecipe.modRoot(manifestText))
+                GameStorage.modCodePul(context).copyTo(File(modRoot, "Binaries/Code.pul"), overwrite = true)
+            }
 
-            report(50, Step.Translate, 1, 3)
+            report(50, Step.Translate, 1, steps)
             val timing = Regex("""\(t=([0-9.]+)s\)""")
             translator(
                 tools, "translating the game",
@@ -299,20 +319,64 @@ object GameBuild {
             ) { line ->
                 timing.find(line)?.groupValues?.get(1)?.toDoubleOrNull()?.let { seconds ->
                     val fraction = minOf(seconds / EXPECTED_TRANSLATION_SECONDS, 0.97)
-                    reporter.update(50 + (320 * fraction).toInt(), Step.Translate, 1, 3)
+                    reporter.update(50 + (300 * fraction).toInt(), Step.Translate, 1, steps)
                 }
             }?.let { return it }
-            report(370, Step.Translate, 2, 3)
+
+            // Retro Rewind's own code: its Code.pul translated against the base translation, as
+            // Launcher/LocalBuild.ps1 does on a PC. Online play needs a payload this cannot fetch.
+            val modOutput = "build/mods/retro_rewind_full_cpp"
+            if (profile.modPack) {
+                report(350, Step.Translate, 2, steps)
+                translator(
+                    tools, "creating the base manifest",
+                    "emit-base-manifest", "--project", manifest, "--out", "build/base",
+                    "--functions-dir", "generated/functions",
+                    "--translation-output-metadata", "generated/base_translation_output.json", "--region", "P",
+                )?.let { return it }
+                translator(
+                    tools, "translating Retro Rewind",
+                    "translate-mod", "--project", manifest, "--profile", "retro-rewind",
+                    "--base-manifest", "build/base/mkwii_base_manifest.json",
+                    "--base-translation-output-metadata", "generated/base_translation_output.json",
+                    "--code-pul", GameStorage.modCodePul(context).absolutePath,
+                    "--mod-root", GameStorage.modDirectory(context).absolutePath,
+                    "--mod-name", "Retro Rewind", "--region", "P", "--out", modOutput,
+                    "--prefer-cached-inputs", "--emit-cpp", "--skip-retro-wfc",
+                    "--threads", TRANSLATOR_THREADS.toString(),
+                )?.let { return it }
+            }
+
+            report(370, Step.Translate, steps - 1, steps)
             translator(tools, "generating the game data", "generate-data-init", "--project", manifest, "--target-os", "android")?.let { return it }
-            report(385, Step.Translate, 3, 3)
-            translator(
-                tools, "preparing the build",
+            report(385, Step.Translate, steps, steps)
+            val shardArguments = mutableListOf(
                 "emit-build-shards", "--project", manifest, "--base-metadata", "generated/base_translation_output.json",
                 "--base-functions-dir", "generated/functions", "--native-source-dir", "runtime/src", "--out", "generated/build_shards",
-            )?.let { return it }
+            )
+            if (profile.modPack) {
+                shardArguments += listOf(
+                    "--resolved-profile", "$modOutput/resolved_dispatch_profile.json",
+                    "--retro-cpp-dir", "$modOutput/cpp",
+                )
+            }
+            translator(tools, "preparing the build", *shardArguments.toTypedArray())?.let { return it }
             provenance.writeText(expected)
-            report(400, Step.Translate, 3, 3)
+            report(400, Step.Translate, steps, steps)
             return null
+        }
+
+        fun sha256(file: File): ByteArray {
+            val digest = MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buffer = ByteArray(1 shl 20)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    digest.update(buffer, 0, read)
+                }
+            }
+            return digest.digest()
         }
 
         fun translator(tools: ToolProcess, what: String, vararg arguments: String, onLine: (String) -> Unit = {}): String? {
@@ -332,11 +396,12 @@ object GameBuild {
         }
 
         /** Compiles every generated source; returns their objects by link slot (runtime, product, translated). */
-        fun compile(tools: ToolProcess, recipe: JSONObject, toolchainFingerprint: String): Map<String, List<String>> {
+        // The identity is the kit's fingerprint and the toolchain's: the kit is fingerprinted as a
+        // whole, and each game already compiles in its own work directory.
+        fun compile(tools: ToolProcess, recipe: JSONObject, identity: String): Map<String, List<String>> {
             val generated = File(workspace, "generated")
             val shards = File(generated, "build_shards/shards.cmake").readText()
             val stamp = File(objects, ".stamp")
-            val identity = "${recipe.getString("fingerprint")} $toolchainFingerprint"
             if (stamp.takeIf { it.isFile }?.readText() != identity) {
                 objects.deleteRecursively()
                 objects.mkdirs()
@@ -481,7 +546,7 @@ object GameBuild {
         }
 
         fun install(library: File, kitFingerprint: String): String? {
-            val destination = GameLibrary.directory(context)
+            val destination = GameLibrary.directory(context, profile)
             val staging = File(destination.parentFile, "${destination.name}.building")
             staging.deleteRecursively()
             staging.mkdirs()
@@ -500,7 +565,7 @@ object GameBuild {
                 val builtAt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(Date())
                 val manifest = JSONObject()
                     .put("schema", 1)
-                    .put("profile", BuildConfig.PROFILE)
+                    .put("profile", profile.id)
                     .put("gameId", BuildConfig.DISC_GAME_ID)
                     .put("dolSha256", BuildConfig.DISC_DOL_SHA256)
                     .put("relSha256", BuildConfig.DISC_REL_SHA256)

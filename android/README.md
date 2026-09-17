@@ -9,17 +9,25 @@ holds the Gradle project, its helper scripts, the game kit tooling
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File android/Prepare-QuestDependencies.ps1          # stages the SDL3 3.4.4 AAR once
-powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Install               # base game, debug-signed, installs over adb
-powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Flavor retroRewind    # Retro Rewind product
+powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Install               # the app, debug-signed, installs over adb
 ```
 
-The translated game (the translator's `generated/` tree for **your own**
-PAL `RMCP01` disc) is passed with `-Generated <dir>`; it defaults to the
-installer workspace next to this checkout. No game data is ever part of the
-APK, and neither is any translated game code: the base APK carries a game kit,
-and your `libmain.so` is built from your own disc, either on the headset
-(**Build on this Quest**, about half an hour) or on a PC and imported
-(`Build-QuestGame.ps1 -Install`, or **Import from computer** with its `.wcgame`).
+One app offers both games, with a toggle on Home: Mario Kart Wii and, when your
+translation includes the mod, Retro Rewind. The translated game (the translator's
+`generated/` tree for **your own** PAL `RMCP01` disc) is passed with
+`-Generated <dir>`; it defaults to the installer workspace next to this checkout.
+No game data is ever part of the APK, and neither is any translated game code:
+the APK carries one game kit holding a recipe per game, and your `libmain.so` is
+built from your own disc, either on the headset (**Build on this Quest**, about
+half an hour) or on a PC and imported:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Product base -Install
+powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Product retro_rewind -Mod <RetroRewind6> -Install
+```
+
+`-Mod` puts the Retro Rewind pack in the package, which is how the headset gets
+it; **Import from computer** takes the same `.wcgame` from the Import folder.
 Copy your disc image to the headset (for example `adb push MarioKart.iso
 /sdcard/Download/`) and press **Select disc image** in the launcher, which checks
 and extracts it with nod, as the PC installer does. Or push an already extracted
@@ -32,8 +40,9 @@ disc to
 `Config.toml`, saves and logs live in the same `WiiCompiledOpenXRVR` directory.
 
 The app opens on a 2D launcher panel modelled on the PC launcher (WheelWizard VR):
-**Home** starts the game in the headset and says when DATA is missing, and
+**Home** picks the game with a toggle, starts it in the headset and says what is
+still missing (the disc files, the game itself, or Retro Rewind's pack), and
 **Settings** edits `Config.toml` (VR camera, render scale, virtual screen,
-resolution, controllers, audio). The game itself is `QuestActivity`, in its own
+resolution, controllers, audio) and lists both games. The game itself is `QuestActivity`, in its own
 `:game` process; `adb shell am start -n org.wiicompiled.quest/.QuestActivity`
 still starts it directly.

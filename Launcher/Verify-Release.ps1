@@ -9,6 +9,9 @@ if ($SetupPath) {
     $info = (& $SetupPath --info-json | Out-String) | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or $info.productId -cne 'wiicompiled-openxr-vr' -or
         $info.version -cne $version -or $info.openxrD3D12 -ne $true) { throw 'Setup VR identity mismatch.' }
+    # WheelWizard offers Build for Quest only to a setup that declares it, so a release that says
+    # so must also carry what the build runs.
+    if ($info.questBuild -ne $true) { throw 'Setup does not declare Quest build support.' }
     # Inspect the appended payload as well: a correctly versioned host can still wrap stale tools.
     Add-Type -AssemblyName System.IO.Compression
     $stream = [IO.File]::OpenRead((Resolve-Path -LiteralPath $SetupPath))
@@ -42,6 +45,12 @@ if ($SetupPath) {
             try { $manifest = $textReader.ReadToEnd() | ConvertFrom-Json } finally { $textReader.Dispose() }
             if ($manifest.ProductId -cne $info.productId -or $manifest.ProductVersion -cne $version) {
                 throw 'Payload identity/version does not match the executable.'
+            }
+            # The scripts --build-quest runs live in the installed workspace, not the toolkit.
+            foreach ($script in 'QuestGameKit.psm1', 'Build-QuestGame.ps1') {
+                if (-not $zip.GetEntry("BuildWorkspace/android/$script")) {
+                    throw "The payload has no BuildWorkspace/android/$script, so --build-quest cannot run."
+                }
             }
         } finally { $zip.Dispose() }
     } finally { $payload.Dispose(); $stream.Dispose() }

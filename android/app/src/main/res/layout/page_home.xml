@@ -90,6 +90,16 @@
                 android:layout_height="0dp"
                 android:layout_weight="1" />
 
+            <LinearLayout
+                android:id="@+id/home_game_toggle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="10dp"
+                android:background="@drawable/bg_pill"
+                android:orientation="horizontal"
+                android:padding="3dp"
+                android:visibility="gone" />
+
             <TextView
                 android:id="@+id/home_title"
                 android:layout_width="match_parent"

@@ -40,27 +40,26 @@ import org.libsdl.app.SDLSurface
  */
 class QuestActivity : SDLActivity() {
 
-    override fun getLibraries(): Array<String> =
-        if (BuildConfig.EXTERNAL_GAME) arrayOf("SDL3") else arrayOf("SDL3", BuildConfig.MAIN_LIBRARY)
+    /** The game the launcher's toggle last selected; read once, since a session plays one game. */
+    private val profile: GameProfile by lazy { GameProfile.selected(this) }
+
+    override fun getLibraries(): Array<String> = arrayOf("SDL3")
 
     /**
      * The game is not part of the APK: it is the libmain.so the player built from their own disc
-     * ([GameLibrary]), loaded from private storage. Its libSDL3.so, libpng16.so and
-     * libc++_shared.so dependencies resolve against the ones this APK installed.
+     * ([GameLibrary]) for the selected profile, loaded from private storage. Its libSDL3.so,
+     * libpng16.so and libc++_shared.so dependencies resolve against the ones this APK installed.
      */
     override fun loadLibraries() {
         super.loadLibraries()
-        if (BuildConfig.EXTERNAL_GAME) {
-            // SDLActivity reports a failed load in its own error dialog and never starts the game.
-            if (GameLibrary.status(this) != GameLibrary.Status.Ready) {
-                throw UnsatisfiedLinkError(getString(R.string.game_not_installed))
-            }
-            System.load(GameLibrary.library(this).absolutePath)
+        // SDLActivity reports a failed load in its own error dialog and never starts the game.
+        if (GameLibrary.status(this, profile) != GameLibrary.Status.Ready) {
+            throw UnsatisfiedLinkError(getString(R.string.game_not_installed))
         }
+        System.load(GameLibrary.library(this, profile).absolutePath)
     }
 
-    override fun getMainSharedObject(): String =
-        if (BuildConfig.EXTERNAL_GAME) GameLibrary.library(this).absolutePath else super.getMainSharedObject()
+    override fun getMainSharedObject(): String = GameLibrary.library(this, profile).absolutePath
 
     override fun createSDLSurface(context: Context): SDLSurface = QuestSurface(context)
 

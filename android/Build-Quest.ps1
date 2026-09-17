@@ -1,7 +1,10 @@
 # Builds the standalone Meta Quest APK on a Windows host.
 #
-#   powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 [-Generated <dir>] [-Flavor base|retroRewind]
+#   powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 [-Generated <dir>]
 #                                [-Configuration debug|release] [-Install]
+#
+# One app offers both games: the APK carries a kit for the base game, and for Retro Rewind too
+# when -Generated holds a translation that includes the mod.
 #
 # -Generated names the translator output for the disc you own: the directory
 # holding data_sections_init.cpp, RuntimeConfig.h and build_shards/shards.cmake.
@@ -17,7 +20,6 @@ param(
     [string]$Generated = '',
     [string]$Dependencies = '',
     [string]$CMakeDir = '',
-    [ValidateSet('base', 'retroRewind')] [string]$Flavor = 'base',
     [ValidateSet('debug', 'release')] [string]$Configuration = 'debug',
     [switch]$Install
 )
@@ -71,7 +73,7 @@ if (-not $Dependencies) {
 }
 
 $variant = (Get-Culture).TextInfo.ToTitleCase($Configuration)
-$task = "app:assemble$((Get-Culture).TextInfo.ToTitleCase($Flavor))$variant"
+$task = "app:assemble$variant"
 $gradleArgs = @(
     '--project-dir', $root,
     "-PmkwGeneratedDir=$Generated"
@@ -82,13 +84,13 @@ Write-Host "gradlew $($gradleArgs -join ' ')"
 & (Join-Path $root 'gradlew.bat') @gradleArgs
 if ($LASTEXITCODE -ne 0) { throw "Gradle failed ($LASTEXITCODE)" }
 
-$apkDir = Join-Path $root "app\build\outputs\apk\$Flavor\$Configuration"
+$apkDir = Join-Path $root "app\build\outputs\apk\$Configuration"
 $apk = Get-ChildItem -Path $apkDir -Filter '*.apk' | Select-Object -First 1
 if (-not $apk) { throw "No APK under $apkDir" }
 Write-Host "APK: $($apk.FullName)"
 
-# Every APK must be distributable: no translated game inside, only the game kit. The toolchain
-# that builds one on the headset travels in the base APK only.
+# The APK must be distributable: no translated game inside, only the game kit and the toolchain
+# that builds one on the headset.
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::OpenRead($apk.FullName)
 try {
@@ -98,16 +100,11 @@ try {
 } finally { $archive.Dispose() }
 if ($gameLibraries.Count -gt 0) { throw "The APK contains a translated game library: $($gameLibraries.FullName -join ', ')" }
 if (-not $hasKit) { throw 'The APK has no game kit (assets/game_kit/kit.json)' }
-if ($Flavor -eq 'base' -and -not $hasToolchain) { throw 'The APK has no build toolchain (assets/quest_toolchain/files.zip)' }
-if ($Flavor -ne 'base' -and $hasToolchain) { throw 'Only the base APK carries the on-headset build toolchain' }
+if (-not $hasToolchain) { throw 'The APK has no build toolchain (assets/quest_toolchain/files.zip)' }
 
 if ($Install) {
     $adb = Join-Path $sdkRoot 'platform-tools\adb.exe'
     & $adb install -r $apk.FullName
     if ($LASTEXITCODE -ne 0) { throw "adb install failed ($LASTEXITCODE)" }
-    if ($Flavor -eq 'base') {
-        Write-Host 'Installed. Build the game with Build on this Quest in the launcher, or on this PC with android/Build-QuestGame.ps1 -Install.'
-    } else {
-        Write-Host "Installed. Build its game on this PC with android/Build-QuestGame.ps1 -Flavor $Flavor -Install."
-    }
+    Write-Host 'Installed. Build a game with Build on this Quest in the launcher, or on this PC with android/Build-QuestGame.ps1 -Install.'
 }
