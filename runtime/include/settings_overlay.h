@@ -16,4 +16,6 @@ void AdvancePresentedFrame() noexcept;
 // converted with the world scale currently in effect, so switching the
 // first-person camera on or off has to repeat it.
 void RefreshVrHudVirtualScreen() noexcept;
+// Put host controllers back to a neutral state before the process ends.
+void ReleaseControllers() noexcept;
 } // namespace settings_overlay

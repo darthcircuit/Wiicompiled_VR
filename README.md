@@ -1,5 +1,18 @@
+<img width="4190" height="1232" alt="wiicomplogofinalfinalfinalev2MADEBY_INKWRECK_plzcredit" src="https://github.com/user-attachments/assets/df7a3f2e-5336-479a-b4c0-968dd578726d" />
 
 # WiiCompiled OpenXR VR
+
+<p align="center">
+  <a href="https://github.com/patchzyy/Wiicompiled/releases"><img alt="Windows 10 / 11, x64" src="https://img.shields.io/badge/Windows-10%20%2F%2011%20%C2%B7%20x64-0078D4"></a>
+  <a href="https://github.com/patchzyy/Wiicompiled/releases"><img alt="Linux, x64 / ARM64" src="https://img.shields.io/badge/Linux-x64%20%2F%20ARM64-FCC624?logo=linux&amp;logoColor=white"></a>
+  <a href="https://github.com/patchzyy/Wiicompiled/releases"><img alt="macOS 14+, Apple Silicon" src="https://img.shields.io/badge/macOS-14%2B%20%C2%B7%20Apple%20Silicon-0A84FF?logo=apple&amp;logoColor=white"></a>
+</p>
+<p align="center">
+  <a href="#building-from-source"><img alt="PowerPC static recompilation" src="https://img.shields.io/badge/PowerPC-static%20recompilation-FF9F0A"></a>
+  <a href="#retro-rewind"><img alt="Retro Rewind supported" src="https://img.shields.io/badge/Retro%20Rewind-supported-FF375F"></a>
+  <a href="https://github.com/TeamWheelWizard/WheelWizard/releases"><img alt="Install with Wheel Wizard" src="https://img.shields.io/badge/install%20with-Wheel%20Wizard-8B5CF6"></a>
+  <a href="LICENSE"><img alt="License: GPLv3" src="https://img.shields.io/badge/license-GPLv3-2EA44F?logo=gnu&amp;logoColor=white"></a>
+</p>
 
 A native PC port of Mario Kart Wii, made with static recompilation.
 
@@ -59,12 +72,6 @@ Press **F10** while the game window has focus:
 - Volume, instant mute, and the music ducking toggle
 
 Everything you change is saved to `Config.toml` on the spot and restored next launch.
-
-**Real controller support.** 
-Controllers are fed to the game as a GameCube controller.
-Mappings are positional (`south`, `east`, `west`, `north`) rather than Xbox-labelled, so the
-same config makes sense on Xbox, PlayStation, Nintendo and generic SDL pads alike, and extra
-inputs like paddles, touchpads and share buttons show up when the hardware reports them.
 
 **Dolphin-compatible input expressions.** 
 Each GameCube control can carry an expression in Dolphin's input syntax, with the same operators
@@ -218,7 +225,7 @@ AI coding tools were used during development of this project.
 All translated output is verified against real hardware behavior and most importantly, physics accuracy is proven synced across Wii, Dolphin, and WiiCompiled (see FAQ). 
 
 ## Credits
-
+- **inkwreck** - making the logo
 - **[aurora](https://github.com/encounter/aurora)** - the GX rendering/windowing backend this
   project's whole graphics layer sits on. MIT licensed.
 - **[Dawn](https://dawn.googlesource.com/dawn)** - Google's WebGPU implementation, powering
