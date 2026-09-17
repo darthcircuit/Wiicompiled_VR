@@ -38,6 +38,7 @@ class SettingsPage(
     private val gameRunning: () -> Boolean,
     private val selectDiscImage: () -> Unit,
     private val importGame: () -> Unit,
+    private val buildGame: () -> Unit,
 ) {
 
     enum class Tab(val label: Int) {
@@ -281,6 +282,12 @@ class SettingsPage(
                 GameLibrary.Status.Missing -> activity.getString(R.string.about_game_missing)
             }
             info(R.string.about_game, gameText, stacked = true)
+            action(
+                R.string.home_build, R.string.about_build_helper, R.string.home_build,
+                enabled = !GameSetup.isRunning && GameStorage.discStatus(activity) == GameStorage.DiscStatus.Ready,
+            ) {
+                buildGame()
+            }
             action(R.string.home_import, R.string.about_import_helper, R.string.home_import, enabled = !GameSetup.isRunning) {
                 importGame()
             }

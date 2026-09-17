@@ -229,8 +229,52 @@ abstract class ExportQuestGameKit : DefaultTask() {
     }
 }
 
+/**
+ * The toolchain for building the game on the headset (android/Prepare-QuestToolchain.ps1): the
+ * translator for Android, clang/lld, and the pin of the NDK files the headset downloads. Packaged
+ * into the base variants' assets as quest_toolchain/.
+ */
+abstract class PrepareQuestToolchain : DefaultTask() {
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val sources: ConfigurableFileCollection
+
+    @get:Internal
+    abstract val script: RegularFileProperty
+
+    @get:Internal
+    abstract val ndkLlvm: DirectoryProperty
+
+    @get:Inject
+    abstract val execOperations: ExecOperations
+
+    @TaskAction
+    fun prepare() {
+        execOperations.exec {
+            commandLine(
+                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.get().asFile.path,
+                "-OutputDir", File(outputDir.get().asFile, "quest_toolchain").path, "-NdkLlvm", ndkLlvm.get().asFile.path,
+            )
+        }
+    }
+}
+
 androidComponents {
     onVariants(selector().withFlavor("profile" to "base")) { variant ->
+        val prepareToolchain = tasks.register<PrepareQuestToolchain>(
+            "prepare${variant.name.replaceFirstChar { it.uppercase() }}QuestToolchain"
+        ) {
+            script.set(rootProject.layout.projectDirectory.file("Prepare-QuestToolchain.ps1"))
+            sources.from(script, rootProject.layout.projectDirectory.dir("toolchain"))
+            sources.from(fileTree(File(mkwRepoRoot, "translator/src")) { exclude("**/bin/**", "**/obj/**") })
+            sources.from(fileTree(File(mkwRepoRoot, "Launcher/WiiCompiled.Setup.Common")) { exclude("**/bin/**", "**/obj/**") })
+            val host = if (System.getProperty("os.name").startsWith("Windows")) "windows-x86_64" else "linux-x86_64"
+            ndkLlvm.set(sdkComponents.ndkDirectory.map { it.dir("toolchains/llvm/prebuilt/$host") })
+        }
+        variant.sources.assets?.addGeneratedSourceDirectory(prepareToolchain, PrepareQuestToolchain::outputDir)
         val capitalized = variant.name.replaceFirstChar { it.uppercase() }
         // AGP packages every library in the CMake output directory, so a game library left over
         // from a build that still linked the game would otherwise ship in the APK.

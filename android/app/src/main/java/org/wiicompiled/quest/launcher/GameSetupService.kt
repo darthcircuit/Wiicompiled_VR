@@ -17,8 +17,8 @@ import org.wiicompiled.quest.R
 
 /**
  * Runs a [GameSetup] task as a foreground service. Extracting a disc or importing a game takes
- * minutes, and a panel app's process is otherwise fair game once the panel is closed; taking the
- * headset off also sleeps the CPU, hence the partial wake lock.
+ * minutes and building one half an hour, and a panel app's process is otherwise fair game once the
+ * panel is closed; taking the headset off also sleeps the CPU, hence the partial wake lock.
  */
 class GameSetupService : Service() {
 
@@ -41,7 +41,7 @@ class GameSetupService : Service() {
             ?: GameSetup.Task.ExtractDisc
         startForeground(NOTIFICATION_ID, notification(GameSetup.State.Checking(task)), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         val uri = intent?.data
-        if (uri == null || !GameSetup.begin(task)) {
+        if ((uri == null && task != GameSetup.Task.BuildGame) || !GameSetup.begin(task)) {
             // A task already going keeps the service, and ends it itself.
             if (!GameSetup.isRunning) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -50,16 +50,16 @@ class GameSetupService : Service() {
             return START_NOT_STICKY
         }
         GameSetup.addListener(listener)
-        val deleteSource = intent.getBooleanExtra(EXTRA_DELETE_SOURCE, false)
+        val deleteSource = intent?.getBooleanExtra(EXTRA_DELETE_SOURCE, false) ?: false
 
         val wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WiiCompiled:GameSetup")
-        wakeLock.acquire(WAKE_LOCK_TIMEOUT_MS)
+        wakeLock.acquire(if (task == GameSetup.Task.BuildGame) BUILD_WAKE_LOCK_TIMEOUT_MS else WAKE_LOCK_TIMEOUT_MS)
         thread(name = "GameSetup") {
             try {
                 GameSetup.run(applicationContext, task, uri, deleteSource)
             } finally {
-                releaseReadPermission(uri)
+                uri?.let(::releaseReadPermission)
                 if (wakeLock.isHeld) wakeLock.release()
                 mainExecutor.execute {
                     GameSetup.removeListener(listener)
@@ -88,17 +88,23 @@ class GameSetupService : Service() {
     }
 
     private fun notification(state: GameSetup.State): Notification {
+        val building = state is GameSetup.State.Checking && state.task == GameSetup.Task.BuildGame ||
+            state is GameSetup.State.Working && state.task == GameSetup.Task.BuildGame
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_wheel)
-            .setContentTitle(getString(R.string.disc_setup_notification_title))
+            .setContentTitle(getString(if (building) R.string.build_notification_title else R.string.disc_setup_notification_title))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
         if (state is GameSetup.State.Working) {
             val percent = if (state.total > 0) (state.done * 100 / state.total).toInt() else 0
-            val text = if (state.task == GameSetup.Task.ImportPackage) R.string.disc_setup_importing else R.string.disc_setup_extracting
+            val text = when (state.task) {
+                GameSetup.Task.ImportPackage -> R.string.disc_setup_importing
+                GameSetup.Task.BuildGame -> R.string.disc_setup_building
+                GameSetup.Task.ExtractDisc -> R.string.disc_setup_extracting
+            }
             builder.setContentText(getString(text, percent)).setProgress(100, percent, false)
         } else {
-            builder.setContentText(getString(R.string.disc_setup_checking)).setProgress(0, 0, true)
+            builder.setContentText(getString(if (building) R.string.build_preparing else R.string.disc_setup_checking)).setProgress(0, 0, true)
         }
         return builder.build()
     }
@@ -112,11 +118,18 @@ class GameSetupService : Service() {
         private const val EXTRA_DELETE_SOURCE = "deleteSource"
         // Longer than any real task; only a hung run would reach it.
         private const val WAKE_LOCK_TIMEOUT_MS = 60L * 60 * 1000
+        private const val BUILD_WAKE_LOCK_TIMEOUT_MS = 3L * 60 * 60 * 1000
 
         /**
          * Starts [task] on [uri]: a document the player picked, or a file in the Import folder,
          * which [deleteSource] removes once it has been imported.
          */
+        /** Builds the game from DATA on this headset ([GameBuild]). */
+        fun startBuild(context: Context) {
+            val intent = Intent(context, GameSetupService::class.java).putExtra(EXTRA_TASK, GameSetup.Task.BuildGame.name)
+            context.startForegroundService(intent)
+        }
+
         fun start(context: Context, task: GameSetup.Task, uri: Uri, deleteSource: Boolean = false) {
             if (uri.scheme == "content") {
                 try {

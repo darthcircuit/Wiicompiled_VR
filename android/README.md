@@ -4,7 +4,8 @@ Standalone Android/OpenXR build of the Mario Kart Wii recompilation for Quest 2,
 Quest 3, Quest 3S and Quest Pro. The full design, build walkthrough and current
 status live in [docs/quest-port.md](../docs/quest-port.md); this directory only
 holds the Gradle project, its helper scripts, the game kit tooling
-(`QuestGameKit.psm1`, `Build-QuestGame.ps1`) and `nod-jni`.
+(`QuestGameKit.psm1`, `Build-QuestGame.ps1`), the on-headset build toolchain
+(`Prepare-QuestToolchain.ps1`, `toolchain/`) and `nod-jni`.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File android/Prepare-QuestDependencies.ps1          # stages the SDL3 3.4.4 AAR once
@@ -16,7 +17,8 @@ The translated game (the translator's `generated/` tree for **your own**
 PAL `RMCP01` disc) is passed with `-Generated <dir>`; it defaults to the
 installer workspace next to this checkout. No game data is ever part of the
 APK, and neither is any translated game code: the base APK carries a game kit,
-and your `libmain.so` is built from your own disc and imported
+and your `libmain.so` is built from your own disc, either on the headset
+(**Build on this Quest**, about half an hour) or on a PC and imported
 (`Build-QuestGame.ps1 -Install`, or **Import from computer** with its `.wcgame`).
 Copy your disc image to the headset (for example `adb push MarioKart.iso
 /sdcard/Download/`) and press **Select disc image** in the launcher, which checks

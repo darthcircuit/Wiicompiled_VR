@@ -154,6 +154,28 @@ Unicode-3.0, BSL-1.0 or Unlicense licensed.
 | bzip2 (via bzip2-sys) | 1.0.8 | bzip2 license (BSD-style) | <https://sourceware.org/bzip2/> |
 | jni-rs | 0.21.1 | MIT OR Apache-2.0 | <https://github.com/jni-rs/jni-rs> |
 
+For building the game on the headset, the APK also carries a toolchain
+(`android/Prepare-QuestToolchain.ps1`): the translator published with the .NET 10 runtime for
+`linux-bionic-arm64`, and Termux's Android builds of clang and lld with the libraries they load,
+redistributed unmodified from the Termux package repository (pins and license names in the script
+and in the toolchain's `llvm/licenses/`).
+
+| Component (Quest APK toolchain) | Version | License | Upstream |
+| --- | --- | --- | --- |
+| .NET runtime (Mono, linux-bionic-arm64) | 10.0 | MIT | <https://github.com/dotnet/runtime> |
+| YamlDotNet | 15.1.2 | MIT | <https://github.com/aaubry/YamlDotNet> |
+| LLVM clang, lld, libLLVM, libc++ (Termux clang/lld/libllvm 21.1.8-3, libc++ 29) | 21.1.8 | Apache-2.0 WITH LLVM-exception | <https://github.com/termux/termux-packages> |
+| libffi | 3.8.0 | MIT | <https://github.com/libffi/libffi> |
+| libxml2 | 2.15.4 | MIT | <https://gitlab.gnome.org/GNOME/libxml2> |
+| GNU libiconv | 1.19 | LGPL-2.1-or-later | <https://www.gnu.org/software/libiconv/> |
+| zlib | 1.3.2 | Zlib | <https://zlib.net/> |
+| Zstandard | 1.5.7 | BSD-3-Clause | <https://github.com/facebook/zstd> |
+| OpenSSL | 3.6.3 | Apache-2.0 | <https://www.openssl.org/> |
+
+libiconv is LGPL-licensed and ships as the unmodified shared library `libiconv.so`, which can be
+replaced; its complete corresponding source is available from the Termux package repository and
+from GNU, and this project will supply it on request for the version shipped.
+
 ### Dual-licensed components - elections made by this project
 
 - **FreeType** is offered under the FreeType License (FTL) or GPL-2.0. **This project elects the
@@ -192,6 +214,7 @@ unmodified, with their license texts, in the installer's `licenses/` folder.
 | Component | License | Upstream |
 | --- | --- | --- |
 | Android NDK r29 for Windows (clang, lld, sysroot), fetched by `--build-quest` from Google with a pinned SHA-1 | Android Software Development Kit License Agreement | <https://developer.android.com/studio/terms> |
+| Android NDK r29 aarch64 sysroot, compiler-rt builtins, libunwind and libatomic, fetched by the Quest app's Build on this Quest from Google's Linux NDK zip with pinned SHA-256s | Android Software Development Kit License Agreement | <https://developer.android.com/studio/terms> |
 
 ---
 

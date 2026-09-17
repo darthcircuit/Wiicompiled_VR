@@ -281,13 +281,70 @@ if the game files pass the same checks as an extraction. A package built for ano
 is refused, and an installed game whose kit fingerprint no longer matches the APK shows as stale
 on Home.
 
-Home's main button is always the next step: **Import from computer** until a game is installed
-(with **Select disc image** beside it while there are no game files), **Select disc image** when
-only the game files are missing, and **Play** once both are present. Building the game on the
-headset itself is the next step of this work. The translator (a self-contained
-`linux-bionic-arm64` .NET build, which needs heap pointer tagging disabled) and Termux's clang
-21.1.8 both ran on a Quest 3. A base translation took 6.7 minutes with a 3.1 GB memory peak, and
-the heaviest shard compiled in 65 seconds with a 480 MB peak.
+Home's main button is always the next step: **Select disc image** while there are no game files,
+**Build on this Quest** once they are there and no game is installed (or the installed one is
+stale), and **Play** once both are present. **Import from computer** sits beside the first two.
+
+### Building the game on the headset
+
+**Build on this Quest** (`GameBuild`, a `GameSetup` task in `GameSetupService`) does on the
+headset what `Build-QuestGame.ps1` does on a PC, from `DATA`, in about 28 minutes on a Quest 3:
+
+1. It unpacks `assets/quest_toolchain` and `assets/game_kit` into `files/build/`.
+2. It downloads the NDK files a build needs (below) into `files/build/ndk`.
+3. It translates the disc: `translate-recursive`, `generate-data-init --target-os android` and
+   `emit-build-shards`, in a workspace made of the kit's `translation/` copy of `recomp.yml`,
+   `MAP.txt` and `runtime/src`, plus `main.dol` and `StaticR.rel` from `DATA`. A translation of the
+   same kit, toolchain and disc is reused.
+4. It compiles the generated sources with the kit's flags, up to four at a time (fewer when the
+   available memory allows less than 700 MB each). The blob assembly is compiled as plain
+   `-x assembler`: preprocessing a `.S` makes clang start itself, which the linker trick below
+   cannot do. Finished objects survive a cancelled or failed run.
+5. It links with `kit.json`'s `link.lld` and installs `libmain.so` and `game.json` through the same
+   staging swap as an import. `builtBy` says the headset built it. A successful build deletes
+   `files/build`.
+
+The log goes to `Logs/build_<stamp>.log` next to `DATA`.
+
+The toolchain (`android/Prepare-QuestToolchain.ps1`, run by the `prepareBase*QuestToolchain`
+Gradle tasks) is 249 MB unpacked. It travels as one deflated 80 MB `files.zip`, because asset
+packaging never compresses `.so` files, next to `toolchain.json`, which lists every file. It holds:
+
+- the translator published for `linux-bionic-arm64` from a copy of the sources retargeted to
+  net10.0, which is the first .NET with those runtime packs. That runtime is Mono.
+- `translator_host` (`android/toolchain/translator_host.c`).
+- Termux's clang/lld 21.1.8 and the ten shared libraries they and the translator load, pinned by
+  package SHA-256 and stored under the names their users load. OpenSSL is stored as `libssl.so`,
+  the name .NET's shim opens on Android; Android's own BoringSSL lacks symbols it needs.
+- `ndk.json`: the pin of the NDK files.
+
+Android facts this design rests on, all measured on a Quest 3:
+
+- An app cannot `exec` files in its private storage, but `/system/bin/linker64 <absolute path>`
+  runs them (`PrivateCodeExecutionTest`). Every tool starts that way (`ToolProcess`), with
+  `LD_LIBRARY_PATH` at the toolchain's `llvm/lib`.
+- Under the linker, the .NET apphost reads `/proc/self/exe`, gets the linker, and cannot find the
+  app. `translator_host` hands hostfxr the app directory instead. It also turns off bionic's heap
+  pointer tagging, which crashes the runtime at startup.
+- Termux's clang driver compiles with the same `cc1` arguments as the NDK's. Its link line is
+  patched for Termux (`-rpath`, `-L/system/lib64`), and clang could not start lld anyway. So the kit
+  export expands the link with the NDK's own driver (`clang++ -###`) into `link.lld`, a raw lld
+  command with `{kit}`, `{ndk}`, `{output}` and `{game:*}` placeholders, and the headset runs
+  `ld.lld` directly. The compile uses Termux's clang resource headers, which match that compiler.
+- The NDK files come from Google's `android-ndk-r29-linux.zip`, not from the APK. `RemoteZip`
+  reads the zip's central directory and then only the 3,499 wanted entries, with HTTP range
+  requests: the aarch64 sysroot, `libc++_shared.so`, the API 29 stubs and CRT objects,
+  compiler-rt builtins, `libunwind.a` and `libatomic.a`. That is about 8 MB compressed of 784 MB.
+  Each file must match the SHA-256 in `ndk.json`, and the list must match the digest pinned in the
+  script. The requests say `Accept-Encoding: identity`: Android's HTTP stack asks for gzip by
+  default, and Google's server then serves a gzip-encoded zip whose byte ranges are not the file's
+  (HTTP 416). The Linux zip is used because its sysroot holds headers whose names differ only in case
+  (`xt_TCPMSS.h`, `xt_tcpmss.h`), which a Windows copy of the NDK loses.
+- Translation peaks at 3.1 GB with Mono's default heap and 2.1 GB with
+  `MONO_GC_PARAMS=soft-heap-limit=1200m` and four threads, for byte-identical output. The builder
+  uses the latter.
+
+`BuildRecipeTest` and `RemoteZipTest` cover the command lines and the zip reader.
 
 ### Build system
 
@@ -318,13 +375,14 @@ the heaviest shard compiled in 65 seconds with a 480 MB peak.
 
 Prerequisites on the Windows host (all already present on the machine this
 was developed on): JDK 17, Android SDK with platform 34+, NDK `29.0.14206865`,
-SDK CMake `3.22.1`, `adb`, Rust 1.85+ with `rustup target add aarch64-linux-android`;
-a translated graph for your own disc (the installer's `BuildWorkspace/generated`,
-produced by the normal Windows pipeline).
+SDK CMake `3.22.1`, `adb`, Rust 1.85+ with `rustup target add aarch64-linux-android`,
+the .NET 10 SDK (for the headset's translator; the base APK build downloads ~70 MB of Termux
+packages into `android/.dependencies` the first time); a translated graph for your own disc (the
+installer's `BuildWorkspace/generated`, produced by the normal Windows pipeline).
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File android/Prepare-QuestDependencies.ps1        # SDL3 3.4.4 AAR into android/app/libs
-powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Install             # the app and its game kit, debug-signed
+powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Install             # the app, its game kit and toolchain, debug-signed
 powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Install         # your game, against that kit, into Import (or WheelWizard VR's Build for Quest)
 powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Flavor retroRewind  # Retro Rewind (needs translate-mod output)
 adb push MarioKart.iso /sdcard/Download/                                               # then Select disc image in the launcher
@@ -379,6 +437,15 @@ What has been verified on the development machine (September 2026):
   all 189 perspective draws replayed per eye, the first projection layer is
   submitted, and the menus return to the virtual screen. No WebGPU or OpenXR
   errors over a 90 second session.
+- **Device, 2026-09-17: the headset built its own game.** Build on this Quest ran inside the app
+  in 27.8 minutes on a Quest 3: unpacking the toolchain, 43 MB of NDK files downloaded from Google
+  and checked in about 6 seconds, translation in 646 s (2.1 GB peak), 92 sources compiled four at a
+  time in 16 minutes (about 250 MB each, 3 GB still available), `ld.lld` in under a second, then
+  the install and the cleanup of everything it unpacked. The game ran from the result: session
+  `FOCUSED`, past 1,000 frames, the intro movie on the virtual screen. That `libmain.so` is
+  byte-identical to one the same toolchain built from a shell, and against the PC-built library it
+  has the same soname, `NEEDED` list, 785 undefined symbols and 29,995 translated functions
+  (61,974 defined against 61,975: the PC's older clang keeps one inline helper out of line).
 
 Bring-up fixes that only a device could reveal:
 
@@ -437,6 +504,13 @@ From a cold start, five `a` presses about 5 s apart, starting once the title
 screen is up, reach Grand Prix character select. A value left over from an
 earlier run is ignored on the first read. Presses only land while the XR
 session is `FOCUSED`.
+
+A debug APK also builds the game on the headset without a press, once `DATA` is there; the
+build log is the newest `Logs/build_*.log`:
+
+```powershell
+adb shell am start -n org.wiicompiled.quest/.launcher.LauncherActivity --ez org.wiicompiled.quest.debug.BUILD_GAME true
+```
 
 Performance, measured 2026-09-16 on a 50cc Luigi Circuit start with the player
 idle, over 40 s, with an optimized build (`-O3`, translated code `-O2`,

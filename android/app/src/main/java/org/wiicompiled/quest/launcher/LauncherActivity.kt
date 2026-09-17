@@ -27,8 +27,8 @@ import org.wiicompiled.quest.R
  *
  * The APK carries no game code. Playing needs two things the player owns: the game files (DATA,
  * extracted from their disc image here or on a PC) and the game itself (libmain.so, built from
- * their disc on a PC and brought over with Import from computer). Home's main button is always
- * the next of those steps, and Play once both are there.
+ * their disc on this headset, or on a PC and brought over with Import from computer). Home's main
+ * button is always the next of those steps, and Play once both are there.
  *
  * The game runs as [QuestActivity], an immersive activity in its own `:game` process. SDL and the
  * runtime cannot start twice in one process, so that process ends with every game session, and
@@ -39,7 +39,7 @@ class LauncherActivity : Activity() {
     private enum class Page { Home, Settings }
 
     /** What Home's main and secondary buttons do. */
-    private enum class Action { Play, Resume, SelectDisc, ImportGame }
+    private enum class Action { Play, Resume, SelectDisc, ImportGame, BuildGame }
 
     private lateinit var navHome: View
     private lateinit var navSettings: View
@@ -111,6 +111,7 @@ class LauncherActivity : Activity() {
             gameRunning = ::isGameRunning,
             selectDiscImage = ::selectDiscImage,
             importGame = ::importGame,
+            buildGame = ::buildGame,
         )
         savedInstanceState?.getString(KEY_TAB)?.let { name ->
             SettingsPage.Tab.entries.firstOrNull { it.name == name }?.let(settings::select)
@@ -124,6 +125,14 @@ class LauncherActivity : Activity() {
 
         val restored = savedInstanceState?.getString(KEY_PAGE)?.let { name -> Page.entries.firstOrNull { it.name == name } }
         showPage(restored ?: Page.Home)
+
+        // Unattended headset tests (docs/quest-port.md): debug builds start a build from adb.
+        if (BuildConfig.DEBUG && savedInstanceState == null && intent.getBooleanExtra(EXTRA_DEBUG_BUILD_GAME, false) &&
+            !GameSetup.isRunning && GameStorage.discStatus(this) == GameStorage.DiscStatus.Ready
+        ) {
+            Log.i(TAG, "Starting a game build requested over adb")
+            GameSetupService.startBuild(this)
+        }
     }
 
     override fun onResume() {
@@ -193,27 +202,42 @@ class LauncherActivity : Activity() {
         val running = isGameRunning()
         val setup = GameSetup.state
         val settingUp = GameSetup.isRunning
-        val importing = setupTask(setup) == GameSetup.Task.ImportPackage
+        val task = setupTask(setup)
+        val importing = task == GameSetup.Task.ImportPackage
+        val building = task == GameSetup.Task.BuildGame
 
+        // Without anything yet, a player with only a headset starts from their disc image, and
+        // builds the game once its files are there; a PC-built game can always be imported instead.
         mainAction = when {
             running -> Action.Resume
-            gameStatus != GameLibrary.Status.Ready -> Action.ImportGame
             discStatus != GameStorage.DiscStatus.Ready -> Action.SelectDisc
+            gameStatus != GameLibrary.Status.Ready -> Action.BuildGame
             else -> Action.Play
         }
-        // Without anything yet, a player with only a headset starts from their disc image.
         secondaryAction = when {
             settingUp || running -> null
-            mainAction == Action.ImportGame && discStatus != GameStorage.DiscStatus.Ready -> Action.SelectDisc
-            mainAction == Action.SelectDisc -> Action.ImportGame
+            gameStatus != GameLibrary.Status.Ready || mainAction == Action.SelectDisc -> Action.ImportGame
             else -> null
         }
 
         playButton.isEnabled = !settingUp
         playIcon.setImageResource(if (!settingUp && (mainAction == Action.Play || mainAction == Action.Resume)) R.drawable.ic_play else R.drawable.ic_disc)
         playText.text = when {
-            setup is GameSetup.State.Checking -> getString(if (importing) R.string.home_checking_package else R.string.home_checking)
-            setup is GameSetup.State.Working -> getString(if (importing) R.string.home_importing else R.string.home_extracting, percent(setup))
+            setup is GameSetup.State.Checking -> getString(
+                when {
+                    building -> R.string.home_build_preparing
+                    importing -> R.string.home_checking_package
+                    else -> R.string.home_checking
+                },
+            )
+            setup is GameSetup.State.Working -> getString(
+                when {
+                    building -> R.string.home_building
+                    importing -> R.string.home_importing
+                    else -> R.string.home_extracting
+                },
+                percent(setup),
+            )
             setup is GameSetup.State.Finishing -> getString(R.string.home_finishing)
             else -> getString(label(mainAction))
         }
@@ -228,22 +252,31 @@ class LauncherActivity : Activity() {
         cancel.visibility = if (settingUp && setup !is GameSetup.State.Finishing) View.VISIBLE else View.GONE
 
         homeStatus.text = when {
+            setup is GameSetup.State.Working && building -> buildStatus(setup)
             setup is GameSetup.State.Working -> getString(
                 R.string.home_extract_progress,
                 Formatter.formatShortFileSize(this, setup.done),
                 Formatter.formatShortFileSize(this, setup.total),
             )
-            setup is GameSetup.State.Checking -> getString(if (importing) R.string.home_checking_package_status else R.string.home_checking_status)
+            setup is GameSetup.State.Checking -> getString(
+                when {
+                    building -> R.string.build_step_prepare
+                    importing -> R.string.home_checking_package_status
+                    else -> R.string.home_checking_status
+                },
+            )
             settingUp || setup is GameSetup.State.Failed -> ""
-            setup is GameSetup.State.Cancelled -> getString(R.string.home_setup_cancelled)
+            setup is GameSetup.State.Cancelled -> getString(if (building) R.string.home_build_cancelled else R.string.home_setup_cancelled)
             running -> getString(R.string.home_running)
-            mainAction == Action.Play && setup is GameSetup.State.Done -> getString(R.string.home_setup_done)
+            mainAction == Action.Play && setup is GameSetup.State.Done -> getString(if (building) R.string.home_build_done else R.string.home_setup_done)
             mainAction == Action.Play -> getString(R.string.home_put_on_headset)
             else -> ""
         }
 
         when {
+            settingUp && building -> showBanner(getString(R.string.home_build_running), warning = false)
             settingUp -> showBanner(null)
+            setup is GameSetup.State.Failed && building -> showBanner(getString(R.string.home_build_failed, setup.message), warning = true)
             setup is GameSetup.State.Failed -> showBanner(getString(R.string.home_setup_failed, setup.message), warning = true)
             discStatus == GameStorage.DiscStatus.Incomplete -> showBanner(getString(R.string.home_data_incomplete, disc), warning = true)
             gameStatus == GameLibrary.Status.Stale -> showBanner(getString(R.string.home_game_stale), warning = true)
@@ -265,6 +298,7 @@ class LauncherActivity : Activity() {
         Action.Resume -> R.string.home_resume
         Action.SelectDisc -> R.string.home_select_disc
         Action.ImportGame -> R.string.home_import
+        Action.BuildGame -> R.string.home_build
     }
 
     private fun perform(action: Action) {
@@ -273,6 +307,26 @@ class LauncherActivity : Activity() {
             Action.Play, Action.Resume -> play()
             Action.SelectDisc -> selectDiscImage()
             Action.ImportGame -> importGame()
+            Action.BuildGame -> buildGame()
+        }
+    }
+
+    private fun buildStatus(state: GameSetup.State.Working): String = when (state.step) {
+        GameBuild.Step.Download -> getString(R.string.build_step_download, state.stepDone, state.stepTotal)
+        GameBuild.Step.Translate -> getString(R.string.build_step_translate, state.stepDone, state.stepTotal)
+        GameBuild.Step.Compile -> getString(R.string.build_step_compile, state.stepDone, state.stepTotal)
+        GameBuild.Step.Link -> getString(R.string.build_step_link)
+        GameBuild.Step.Install -> getString(R.string.build_step_install)
+        GameBuild.Step.Prepare, null -> getString(R.string.build_step_prepare)
+    }
+
+    /** Builds the game on this headset from DATA, after saying what that takes. */
+    private fun buildGame() {
+        if (GameSetup.isRunning || GameStorage.discStatus(this) != GameStorage.DiscStatus.Ready) return
+        val message = if (GameLibrary.status(this) == GameLibrary.Status.Ready) R.string.home_build_replace_message else R.string.home_build_message
+        confirm(R.string.home_build_title, message, R.string.home_build) {
+            GameSetupService.startBuild(this)
+            showPage(Page.Home)
         }
     }
 
@@ -403,5 +457,6 @@ class LauncherActivity : Activity() {
         const val REQUEST_GAME_PACKAGE = 2
         const val PREFERENCES = "launcher"
         const val KEY_LAST_DROPPED_IMPORT = "lastDroppedImport"
+        const val EXTRA_DEBUG_BUILD_GAME = "org.wiicompiled.quest.debug.BUILD_GAME"
     }
 }

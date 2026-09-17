@@ -21,9 +21,25 @@
     <string name="home_put_on_headset">The game opens in the headset.</string>
     <string name="home_data_missing">The game is ready, but its game files (DATA) are missing. Select your own PAL (RMCP01) disc image to extract them, or import a game file from your computer that includes them.\n\nThe game files go to:\n%1$s</string>
     <string name="home_import">Import from computer</string>
-    <string name="home_setup_intro">Nothing from Mario Kart Wii comes with this app: the game is built from your own PAL (RMCP01) disc.\n\nWith a computer: in the WiiCompiled VR launcher, use Build for Quest with your disc image, copy the .wcgame file it makes to this headset, then press Import from computer.\n\nOn this headset: copy your disc image (ISO, WBFS, RVZ…) here, for example into Download, and press Select disc image.</string>
-    <string name="home_game_missing">The game files are ready. The game itself is built from your disc: in the WiiCompiled VR launcher on your computer, use Build for Quest, copy the .wcgame file to this headset, then press Import from computer.</string>
-    <string name="home_game_stale">This app was updated, so the game must be built again for it: use Build for Quest in the WiiCompiled VR launcher again, then Import from computer.</string>
+    <string name="home_setup_intro">Nothing from Mario Kart Wii comes with this app: the game is built from your own PAL (RMCP01) disc.\n\nOn this headset: copy your disc image (ISO, WBFS, RVZ…) here, for example into Download, press Select disc image, then Build on this Quest.\n\nWith a computer: in the WiiCompiled VR launcher, use Build for Quest with your disc image, copy the .wcgame file it makes to this headset, then press Import from computer.</string>
+    <string name="home_game_missing">The game files are ready. Now build the game from them: Build on this Quest takes about 30–40 minutes on a Quest 3. With a computer, use Build for Quest in the WiiCompiled VR launcher instead, copy the .wcgame file to this headset and press Import from computer.</string>
+    <string name="home_game_stale">This app was updated, so the game must be built again for it: press Build on this Quest, or use Build for Quest in the WiiCompiled VR launcher again and Import from computer.</string>
+    <string name="home_build">Build on this Quest</string>
+    <string name="home_build_preparing">Preparing…</string>
+    <string name="home_building">Building %1$d%%</string>
+    <string name="home_build_title">Build the game on this Quest?</string>
+    <string name="home_build_message">The game is built on this headset from your own disc files. It takes about 30–40 minutes on a Quest 3 and uses most of its memory, so close other apps and keep the headset on its charger.\n\nThe first build downloads about 10 MB of Android build files from Google.</string>
+    <string name="home_build_replace_message">The installed game stays until the new build has finished.\n\nBuilding takes about 30–40 minutes on a Quest 3 and uses most of its memory, so close other apps and keep the headset on its charger.</string>
+    <string name="home_build_running">Building the game from your disc files: about 30–40 minutes on a Quest 3. Keep the headset on its charger. The build carries on if you close this panel.</string>
+    <string name="home_build_done">The game is built.</string>
+    <string name="home_build_cancelled">Build cancelled. Building again picks up where it stopped.</string>
+    <string name="home_build_failed">The game could not be built.\n%1$s</string>
+    <string name="build_step_prepare">Unpacking the build tools</string>
+    <string name="build_step_download">Downloading Android build files (%1$d of %2$d MB)</string>
+    <string name="build_step_translate">Translating the game (step %1$d of %2$d)</string>
+    <string name="build_step_compile">Compiling %1$d of %2$d</string>
+    <string name="build_step_link">Linking the game</string>
+    <string name="build_step_install">Installing the game</string>
     <string name="home_checking_package">Checking game file…</string>
     <string name="home_checking_package_status">Checking the game file was built from your disc for this version of the app.</string>
     <string name="home_importing">Importing %1$d%%</string>
@@ -159,6 +175,7 @@
     <string name="about_game_ready">Built by %1$s on %2$s</string>
     <string name="about_game_missing">Not installed yet</string>
     <string name="about_game_stale">Built for another version of this app; build it again</string>
+    <string name="about_build_helper">Builds the game from DATA on this headset: about 30–40 minutes on a Quest 3.</string>
     <string name="about_import_helper">Installs a .wcgame made by Build for Quest in the WiiCompiled VR launcher on a computer.</string>
     <string name="section_about_diagnostics">Diagnostics</string>
     <string name="about_openxr_logging">OpenXR diagnostic logging</string>
@@ -169,6 +186,9 @@
     <string name="disc_setup_notification_title">Setting up the game files</string>
     <string name="disc_setup_checking">Checking the disc image…</string>
     <string name="disc_setup_extracting">Extracting: %1$d%%</string>
+    <string name="disc_setup_building">Building: %1$d%%</string>
+    <string name="build_notification_title">Building the game</string>
+    <string name="build_preparing">Preparing the build…</string>
     <string name="disc_setup_importing">Importing: %1$d%%</string>
     <string name="game_not_installed">The game is not installed. Open WiiCompiled VR and set it up from Home.</string>
 </resources>

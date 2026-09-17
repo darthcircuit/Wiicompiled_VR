@@ -81,11 +81,20 @@ function Get-StringSha256Hex([string]$Text) {
 # Identity of a runtime/include tree. Translated code compiles against these headers, so a game is
 # only built from a translation whose runtime headers are the kit's own.
 function Get-RuntimeIncludeFingerprint([string]$Directory) {
-    $root = (Resolve-Path $Directory).Path.TrimEnd('\', '/')
-    $lines = Get-ChildItem -Recurse -File $root | Sort-Object FullName | ForEach-Object {
-        $_.FullName.Substring($root.Length + 1).Replace('\', '/') + ' ' + (Get-Sha256Hex $_.FullName)
+    $lines = Get-RelativeFiles $Directory | Sort-Object FullName | ForEach-Object {
+        $_.Relative + ' ' + (Get-Sha256Hex $_.FullName)
     }
     return Get-StringSha256Hex ($lines -join "`n")
+}
+
+# The files below a directory with their paths relative to it. .NET enumeration keeps the root
+# exactly as given; Resolve-Path and Get-ChildItem can disagree about an 8.3 short name (TEMP),
+# which would shift every relative path.
+function Get-RelativeFiles([string]$Directory) {
+    $root = [IO.Path]::GetFullPath($Directory).TrimEnd('\', '/')
+    foreach ($path in [IO.Directory]::EnumerateFiles($root, '*', [IO.SearchOption]::AllDirectories)) {
+        [pscustomobject]@{ FullName = $path; Relative = $path.Substring($root.Length + 1).Replace('\', '/') }
+    }
 }
 
 # compile_commands.json as {file, command} objects. Windows PowerShell's ConvertFrom-Json refuses
@@ -131,6 +140,91 @@ function ConvertTo-KitCompileFlags {
         }
     }
     return ,$flags.ToArray()
+}
+
+# The arguments of a `clang -###` command line: double-quoted, with backslash escapes.
+function Split-DriverCommand([string]$Line) {
+    $arguments = New-Object System.Collections.Generic.List[string]
+    $current = New-Object System.Text.StringBuilder
+    $inQuotes = $false
+    for ($i = 0; $i -lt $Line.Length; $i++) {
+        $c = $Line[$i]
+        if ($inQuotes) {
+            if ($c -eq '\' -and $i + 1 -lt $Line.Length) { [void]$current.Append($Line[++$i]) }
+            elseif ($c -eq '"') { $arguments.Add($current.ToString()); [void]$current.Clear(); $inQuotes = $false }
+            else { [void]$current.Append($c) }
+        } elseif ($c -eq '"') { $inQuotes = $true }
+    }
+    return , $arguments.ToArray()
+}
+
+# The kit's link as a raw ld.lld command, for the headset. Android lets the app start its tools
+# only through the system linker, so clang there cannot start lld itself and the builder runs lld
+# directly. The NDK's own driver expands the link here, with the kit and marker objects standing in
+# as real files. Placeholders: {kit}, {ndk} (the NDK's prebuilt toolchain directory, which holds
+# sysroot/ and lib/clang/), {output}, and {game:runtime}, {game:product}, {game:translated}, each
+# replaced by its object files (the translated ones already sit inside --start-lib/--end-lib).
+function Get-KitLldArguments {
+    param([string]$ClangCxx, [string]$KitDir, [string[]]$Flags, [string[]]$Inputs)
+    $kit = ConvertTo-ForwardPath $KitDir
+    $ndk = ConvertTo-ForwardPath (Join-Path (Split-Path -Parent $ClangCxx) '..')
+    # Forward slashes throughout: clang reads response files with GNU quoting, where '\' escapes.
+    $probe = ConvertTo-ForwardPath (Join-Path ([IO.Path]::GetTempPath()) ('mkw-kit-link-' + [Guid]::NewGuid().ToString('N')))
+    New-Item -ItemType Directory $probe | Out-Null
+    try {
+        $markers = [ordered]@{}
+        foreach ($slot in 'runtime', 'product', 'translated') {
+            $markers[$slot] = ConvertTo-ForwardPath (Join-Path $probe "game_$slot.o")
+            [IO.File]::WriteAllBytes($markers[$slot], [byte[]]@())
+        }
+        $real = { param([string]$s) $s.Replace('{kit}', $kit).Replace('{sysroot}', "$ndk/sysroot") }
+        $arguments = New-Object System.Collections.Generic.List[string]
+        foreach ($flag in $Flags) { $arguments.Add((& $real $flag)) }
+        $arguments.Add('-o'); $arguments.Add("$probe/libmain.so")
+        foreach ($linkInput in $Inputs) {
+            switch ($linkInput) {
+                '{game:runtime}' { $arguments.Add($markers.runtime) }
+                '{game:product}' { $arguments.Add($markers.product) }
+                '{game:translated}' { $arguments.Add('-Wl,--start-lib'); $arguments.Add($markers.translated); $arguments.Add('-Wl,--end-lib') }
+                default { $arguments.Add((& $real $linkInput)) }
+            }
+        }
+        $rsp = Join-Path $probe 'link.rsp'
+        [IO.File]::WriteAllText($rsp, (($arguments | ForEach-Object { ConvertTo-QuotedArgument $_ }) -join "`n"), (New-Object Text.UTF8Encoding $false))
+
+        # -### prints the command on stderr; Windows PowerShell turns redirected native stderr into errors.
+        $start = New-Object Diagnostics.ProcessStartInfo $ClangCxx, "-### `"@$rsp`""
+        $start.UseShellExecute = $false
+        $start.RedirectStandardError = $true
+        $start.RedirectStandardOutput = $true
+        $process = [Diagnostics.Process]::Start($start)
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        [void]$stdout.Result
+        if ($process.ExitCode -ne 0) { throw "clang++ -### failed for the kit link:`n$stderr" }
+        $line = @($stderr -split "`r?`n" | Where-Object { $_ -match '^\s*"[^"]*ld(\.lld)?(\.exe)?"' }) | Select-Object -Last 1
+        if (-not $line) { throw "clang++ -### printed no linker command:`n$stderr" }
+
+        $lld = New-Object System.Collections.Generic.List[string]
+        $driverArguments = Split-DriverCommand $line
+        for ($i = 1; $i -lt $driverArguments.Length; $i++) {
+            $argument = $driverArguments[$i].Replace('\', '/')
+            if ($argument -eq "$probe/libmain.so") { $lld.Add('{output}'); continue }
+            $slot = @($markers.Keys | Where-Object { $markers[$_] -eq $argument })
+            if ($slot.Count -eq 1) { $lld.Add("{game:$($slot[0])}"); continue }
+            $argument = [regex]::Replace($argument, [regex]::Escape($kit), '{kit}', 'IgnoreCase')
+            $argument = [regex]::Replace($argument, [regex]::Escape($ndk), '{ndk}', 'IgnoreCase')
+            if ($argument -match '[A-Za-z]:/') { throw "The kit link names a path outside the kit and the NDK: $argument" }
+            $lld.Add($argument)
+        }
+        foreach ($required in '{output}', '{game:runtime}', '{game:product}', '{game:translated}') {
+            if (-not $lld.Contains($required)) { throw "The expanded kit link lacks $required" }
+        }
+        return , $lld.ToArray()
+    } finally {
+        Remove-Item -Recurse -Force $probe
+    }
 }
 
 function Export-QuestGameKit {
@@ -239,6 +333,16 @@ function Export-QuestGameKit {
         }
     }
     $linkFlags.Add('-Wl,-soname,libmain.so')
+    $lld = Get-KitLldArguments -ClangCxx (Join-Path (Split-Path -Parent $LlvmStrip) 'clang++.exe') -KitDir $OutputDir `
+        -Flags $linkFlags.ToArray() -Inputs $inputs.ToArray()
+
+    # What the headset's translator needs besides the disc: the game manifest and symbol map, and
+    # the runtime sources it indexes for native registrations, which must be the ones compiled into
+    # this kit.
+    $translation = Join-Path $OutputDir 'translation'
+    New-Item -ItemType Directory -Force (Join-Path $translation 'projects/mkwii'), (Join-Path $translation 'runtime') | Out-Null
+    Copy-Item (Join-Path $RepoRoot 'projects/mkwii/recomp.yml'), (Join-Path $RepoRoot 'projects/mkwii/MAP.txt') (Join-Path $translation 'projects/mkwii')
+    Copy-Item -Recurse (Join-Path $RepoRoot 'runtime/src') (Join-Path $translation 'runtime/src')
 
     $recipe = [ordered]@{
         schema = $script:KitSchema
@@ -247,12 +351,11 @@ function Export-QuestGameKit {
         target = $target
         runtimeIncludeFingerprint = Get-RuntimeIncludeFingerprint (Join-Path $OutputDir 'include')
         compile = $compile
-        link = [ordered]@{ flags = $linkFlags.ToArray(); inputs = $inputs.ToArray() }
+        link = [ordered]@{ flags = $linkFlags.ToArray(); inputs = $inputs.ToArray(); lld = $lld }
     }
     $recipeJson = $recipe | ConvertTo-Json -Depth 8 -Compress
-    $files = Get-ChildItem -Recurse -File $OutputDir | Sort-Object FullName | ForEach-Object {
-        $relative = $_.FullName.Substring((Resolve-Path $OutputDir).Path.Length).Replace('\', '/')
-        "$relative $(Get-Sha256Hex $_.FullName)"
+    $files = Get-RelativeFiles $OutputDir | Sort-Object FullName | ForEach-Object {
+        "/$($_.Relative) $(Get-Sha256Hex $_.FullName)"
     }
     $recipe.fingerprint = Get-StringSha256Hex ($recipeJson + "`n" + ($files -join "`n"))
     [IO.File]::WriteAllText((Join-Path $OutputDir 'kit.json'), ($recipe | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false))
@@ -404,6 +507,7 @@ function New-QuestGamePackage {
     }
     Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
     if (Test-Path $OutputPath) { Remove-Item -Force $OutputPath }
+    New-Item -ItemType Directory -Force (Split-Path -Parent ([IO.Path]::GetFullPath($OutputPath))) | Out-Null
     $zip = [IO.Compression.ZipFile]::Open($OutputPath, 'Create')
     try {
         $entry = $zip.CreateEntry('game.json')
@@ -411,10 +515,8 @@ function New-QuestGamePackage {
         try { $writer.Write(($game | ConvertTo-Json)) } finally { $writer.Dispose() }
         [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $Library, $recipe.output, 'Optimal')
         if ($DataDir) {
-            $dataRoot = (Resolve-Path $DataDir).Path.TrimEnd('\', '/')
-            foreach ($file in Get-ChildItem -Recurse -File $dataRoot) {
-                $name = 'DATA/' + $file.FullName.Substring($dataRoot.Length + 1).Replace('\', '/')
-                [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $file.FullName, $name, 'NoCompression')
+            foreach ($file in Get-RelativeFiles $DataDir) {
+                [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $file.FullName, "DATA/$($file.Relative)", 'NoCompression')
             }
         }
     } finally { $zip.Dispose() }

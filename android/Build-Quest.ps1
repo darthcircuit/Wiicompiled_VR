@@ -94,14 +94,16 @@ if ($Flavor -eq 'base') {
     try {
         $gameLibraries = @($archive.Entries | Where-Object { $_.FullName -match '^lib/[^/]+/libmain[^/]*\.so$' })
         $hasKit = @($archive.Entries | Where-Object { $_.FullName -eq 'assets/game_kit/kit.json' }).Count -gt 0
+        $hasToolchain = @($archive.Entries | Where-Object { $_.FullName -eq 'assets/quest_toolchain/files.zip' }).Count -gt 0
     } finally { $archive.Dispose() }
     if ($gameLibraries.Count -gt 0) { throw "The APK contains a translated game library: $($gameLibraries.FullName -join ', ')" }
     if (-not $hasKit) { throw 'The APK has no game kit (assets/game_kit/kit.json)' }
+    if (-not $hasToolchain) { throw 'The APK has no build toolchain (assets/quest_toolchain/files.zip)' }
 }
 
 if ($Install) {
     $adb = Join-Path $sdkRoot 'platform-tools\adb.exe'
     & $adb install -r $apk.FullName
     if ($LASTEXITCODE -ne 0) { throw "adb install failed ($LASTEXITCODE)" }
-    Write-Host 'Installed. Build and push the game with android/Build-QuestGame.ps1 -Install.'
+    Write-Host 'Installed. Build the game with Build on this Quest in the launcher, or on this PC with android/Build-QuestGame.ps1 -Install.'
 }

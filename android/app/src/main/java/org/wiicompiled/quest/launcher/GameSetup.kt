@@ -15,18 +15,27 @@ import java.io.InterruptedIOException
  *  - [Task.ExtractDisc]: the player's disc image becomes DATA ([DiscExtraction]).
  *  - [Task.ImportPackage]: a .wcgame built on a PC becomes the game library, and DATA too when
  *    the package carries it ([GamePackageImport]).
+ *  - [Task.BuildGame]: the game library is built on the headset from DATA ([GameBuild]).
  *
  * Every task stages its output next to the destination and swaps it in only after it has been
  * checked, so a failed, cancelled or killed run never costs working files.
  */
 object GameSetup {
 
-    enum class Task { ExtractDisc, ImportPackage }
+    enum class Task { ExtractDisc, ImportPackage, BuildGame }
 
     sealed interface State {
         data object Idle : State
         data class Checking(val task: Task) : State
-        data class Working(val task: Task, val done: Long, val total: Long) : State
+        /** A build also reports its [step] and how many of that step's items are [stepDone]. */
+        data class Working(
+            val task: Task,
+            val done: Long,
+            val total: Long,
+            val step: GameBuild.Step? = null,
+            val stepDone: Int = 0,
+            val stepTotal: Int = 0,
+        ) : State
         data class Finishing(val task: Task) : State
         data class Done(val task: Task) : State
         data class Failed(val task: Task, val message: String) : State
@@ -77,25 +86,33 @@ object GameSetup {
         }
     }
 
-    /** The whole task, on a worker thread. Always ends in Done, Failed or Cancelled. */
-    fun run(context: Context, task: Task, uri: Uri, deleteSource: Boolean) {
+    /** The whole task, on a worker thread. Always ends in Done, Failed or Cancelled. [uri] is null only for a build. */
+    fun run(context: Context, task: Task, uri: Uri?, deleteSource: Boolean) {
         val progress = Progress { done, total ->
             publish(State.Working(task, done, total))
             !cancelRequested
         }
         val finishing = { publish(State.Finishing(task)) }
         try {
-            val failure = context.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
-                when (task) {
-                    Task.ExtractDisc -> DiscExtraction.run(context, descriptor.fd, displayName(context, uri), progress, finishing)
-                    Task.ImportPackage -> GamePackageImport.run(context, descriptor, progress, finishing)
+            val failure = if (task == Task.BuildGame) {
+                val reporter = GameBuild.Reporter { permille, step, done, total ->
+                    publish(State.Working(task, permille.toLong(), 1000, step, done, total))
+                    !cancelRequested
                 }
-            } ?: "The selected file could not be opened."
+                GameBuild.run(context, reporter, cancelled = { cancelRequested }, finishing)
+            } else {
+                uri?.let { context.contentResolver.openFileDescriptor(it, "r") }?.use { descriptor ->
+                    when (task) {
+                        Task.ExtractDisc -> DiscExtraction.run(context, descriptor.fd, displayName(context, uri), progress, finishing)
+                        else -> GamePackageImport.run(context, descriptor, progress, finishing)
+                    }
+                } ?: "The selected file could not be opened."
+            }
             if (failure != null) {
                 publish(State.Failed(task, failure))
                 return
             }
-            if (deleteSource && uri.scheme == "file") {
+            if (deleteSource && uri?.scheme == "file") {
                 uri.path?.let { File(it).delete() }
             }
             publish(State.Done(task))
