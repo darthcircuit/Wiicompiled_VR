@@ -130,6 +130,8 @@ android {
             // The APK carries the game kit, not the game: the player's libmain.so is built from
             // their own disc and loaded from private storage (see android/QuestGameKit.psm1).
             buildConfigField("boolean", "EXTERNAL_GAME", "true")
+            // And it carries the toolchain that builds it on the headset (Prepare-QuestToolchain.ps1).
+            buildConfigField("boolean", "ON_DEVICE_BUILD", "true")
             externalNativeBuild { cmake { targets += "mkw_quest_kit_probe" } }
         }
         create("retroRewind") {
@@ -138,10 +140,11 @@ android {
             versionNameSuffix = "-retro-rewind"
             buildConfigField("String", "MAIN_LIBRARY", "\"main_retro_rewind\"")
             buildConfigField("String", "PROFILE", "\"retro_rewind\"")
-            // Not moved to the game kit yet: this flavour still bundles its translated library,
-            // so a Retro Rewind APK is for local use only.
-            buildConfigField("boolean", "EXTERNAL_GAME", "false")
-            externalNativeBuild { cmake { targets += "RetroRewind" } }
+            buildConfigField("boolean", "EXTERNAL_GAME", "true")
+            // Retro Rewind is built on a PC and imported: building it on the headset would also
+            // need the mod's Code.pul and its content there, which the launcher cannot fetch yet.
+            buildConfigField("boolean", "ON_DEVICE_BUILD", "false")
+            externalNativeBuild { cmake { targets += "mkw_quest_kit_probe_retro" } }
         }
     }
 
@@ -170,8 +173,8 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = false
-            // Built only to produce the game kit; its objects travel as assets/game_kit.
-            excludes += "**/libmkw_quest_kit_probe.so"
+            // Built only to produce each flavour's game kit; their objects travel as assets/game_kit.
+            excludes += "**/libmkw_quest_kit_probe*.so"
         }
     }
     lint {
@@ -201,6 +204,10 @@ abstract class ExportQuestGameKit : DefaultTask() {
     @get:Internal
     abstract val llvmStrip: RegularFileProperty
 
+    /** "base" or "retro_rewind": which product's kit this flavour carries. */
+    @get:Internal
+    abstract val product: Property<String>
+
     @get:Inject
     abstract val execOperations: ExecOperations
 
@@ -212,10 +219,11 @@ abstract class ExportQuestGameKit : DefaultTask() {
     @TaskAction
     fun export() {
         val app = appDir.get().asFile
+        val library = if (product.get() == "base") "libmkw_quest_kit_probe.so" else "libmkw_quest_kit_probe_retro.so"
         val probe = File(app, "build/intermediates/cxx").walkTopDown()
-            .filter { it.name == "libmkw_quest_kit_probe.so" && it.parentFile.name == "arm64-v8a" }
+            .filter { it.name == library && it.parentFile.name == "arm64-v8a" }
             .maxByOrNull { it.lastModified() }
-            ?: throw GradleException("No libmkw_quest_kit_probe.so; the native build did not produce the game kit probe")
+            ?: throw GradleException("No $library; the native build did not produce the game kit probe")
         val configuration = probe.parentFile.parentFile.parentFile // <BuildType>/<hash>
         val binaryDir = File(app, ".cxx/${configuration.parentFile.name}/${configuration.name}/arm64-v8a")
         if (!File(binaryDir, "build.ninja").isFile) throw GradleException("No CMake tree at $binaryDir")
@@ -224,6 +232,7 @@ abstract class ExportQuestGameKit : DefaultTask() {
             commandLine(
                 "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.get().asFile.path,
                 "-CMakeBinaryDir", binaryDir.path, "-OutputDir", kitDir.path, "-LlvmStrip", llvmStrip.get().asFile.path,
+                "-Product", product.get(),
             )
         }
     }
@@ -263,32 +272,36 @@ abstract class PrepareQuestToolchain : DefaultTask() {
 }
 
 androidComponents {
-    onVariants(selector().withFlavor("profile" to "base")) { variant ->
-        val prepareToolchain = tasks.register<PrepareQuestToolchain>(
-            "prepare${variant.name.replaceFirstChar { it.uppercase() }}QuestToolchain"
-        ) {
-            script.set(rootProject.layout.projectDirectory.file("Prepare-QuestToolchain.ps1"))
-            sources.from(script, rootProject.layout.projectDirectory.dir("toolchain"))
-            sources.from(fileTree(File(mkwRepoRoot, "translator/src")) { exclude("**/bin/**", "**/obj/**") })
-            sources.from(fileTree(File(mkwRepoRoot, "Launcher/WiiCompiled.Setup.Common")) { exclude("**/bin/**", "**/obj/**") })
-            val host = if (System.getProperty("os.name").startsWith("Windows")) "windows-x86_64" else "linux-x86_64"
-            ndkLlvm.set(sdkComponents.ndkDirectory.map { it.dir("toolchains/llvm/prebuilt/$host") })
-        }
-        variant.sources.assets?.addGeneratedSourceDirectory(prepareToolchain, PrepareQuestToolchain::outputDir)
+    onVariants { variant ->
+        val host = if (System.getProperty("os.name").startsWith("Windows")) "windows-x86_64" else "linux-x86_64"
         val capitalized = variant.name.replaceFirstChar { it.uppercase() }
-        // AGP packages every library in the CMake output directory, so a game library left over
-        // from a build that still linked the game would otherwise ship in the APK.
+        // Both flavours ship a kit instead of the game. AGP packages every library in the CMake
+        // output directory, so a game library left over from an earlier build would otherwise
+        // travel in the APK.
         variant.packaging.jniLibs.excludes.add("**/libmain*.so")
         val export = tasks.register<ExportQuestGameKit>("export${capitalized}QuestGameKit") {
             dependsOn("merge${capitalized}NativeLibs")
             appDir.set(layout.projectDirectory)
             script.set(rootProject.layout.projectDirectory.file("Export-QuestGameKit.ps1"))
-            val host = if (System.getProperty("os.name").startsWith("Windows")) "windows-x86_64" else "linux-x86_64"
+            product.set(if (variant.flavorName == "retroRewind") "retro_rewind" else "base")
             llvmStrip.set(sdkComponents.ndkDirectory.map {
                 it.file("toolchains/llvm/prebuilt/$host/bin/llvm-strip" + if (host.startsWith("windows")) ".exe" else "")
             })
         }
         variant.sources.assets?.addGeneratedSourceDirectory(export, ExportQuestGameKit::outputDir)
+
+        // Only the base flavour builds the game on the headset, so only it carries the toolchain:
+        // Retro Rewind also needs the mod's own content and translation, which is a PC build for now.
+        if (variant.flavorName != "retroRewind") {
+            val prepareToolchain = tasks.register<PrepareQuestToolchain>("prepare${capitalized}QuestToolchain") {
+                script.set(rootProject.layout.projectDirectory.file("Prepare-QuestToolchain.ps1"))
+                sources.from(script, rootProject.layout.projectDirectory.dir("toolchain"))
+                sources.from(fileTree(File(mkwRepoRoot, "translator/src")) { exclude("**/bin/**", "**/obj/**") })
+                sources.from(fileTree(File(mkwRepoRoot, "Launcher/WiiCompiled.Setup.Common")) { exclude("**/bin/**", "**/obj/**") })
+                ndkLlvm.set(sdkComponents.ndkDirectory.map { it.dir("toolchains/llvm/prebuilt/$host") })
+            }
+            variant.sources.assets?.addGeneratedSourceDirectory(prepareToolchain, PrepareQuestToolchain::outputDir)
+        }
     }
 }
 

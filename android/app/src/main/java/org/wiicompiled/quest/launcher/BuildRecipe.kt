@@ -9,10 +9,6 @@ import java.security.MessageDigest
  */
 object BuildRecipe {
 
-    /** The translated source lists emit-build-shards writes into shards.cmake, in link order. */
-    val TRANSLATED_LISTS = listOf("MKW_BASE_COMMON_SHARDS", "MKW_BASE_PORTABLE_SENSITIVE_SHARDS")
-    const val REGISTRATION_LIST = "MKW_BASE_REGISTRATION_SOURCES"
-
     /**
      * One argument of a response file for clang or lld on Android, which read them with GNU
      * quoting: a backslash escapes the next character.

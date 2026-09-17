@@ -211,11 +211,12 @@ class LauncherActivity : Activity() {
         mainAction = when {
             running -> Action.Resume
             discStatus != GameStorage.DiscStatus.Ready -> Action.SelectDisc
-            gameStatus != GameLibrary.Status.Ready -> Action.BuildGame
+            gameStatus != GameLibrary.Status.Ready -> if (BuildConfig.ON_DEVICE_BUILD) Action.BuildGame else Action.ImportGame
             else -> Action.Play
         }
         secondaryAction = when {
             settingUp || running -> null
+            mainAction == Action.ImportGame -> null
             gameStatus != GameLibrary.Status.Ready || mainAction == Action.SelectDisc -> Action.ImportGame
             else -> null
         }
@@ -279,10 +280,14 @@ class LauncherActivity : Activity() {
             setup is GameSetup.State.Failed && building -> showBanner(getString(R.string.home_build_failed, setup.message), warning = true)
             setup is GameSetup.State.Failed -> showBanner(getString(R.string.home_setup_failed, setup.message), warning = true)
             discStatus == GameStorage.DiscStatus.Incomplete -> showBanner(getString(R.string.home_data_incomplete, disc), warning = true)
-            gameStatus == GameLibrary.Status.Stale -> showBanner(getString(R.string.home_game_stale), warning = true)
+            !GameStorage.modContentReady(this) ->
+                showBanner(getString(R.string.home_mod_missing, GameStorage.modDirectory(this).absolutePath), warning = true)
+            gameStatus == GameLibrary.Status.Stale ->
+                showBanner(getString(if (BuildConfig.ON_DEVICE_BUILD) R.string.home_game_stale else R.string.home_game_stale_pc), warning = true)
             gameStatus == GameLibrary.Status.Missing && discStatus == GameStorage.DiscStatus.Missing ->
-                showBanner(getString(R.string.home_setup_intro), warning = false)
-            gameStatus == GameLibrary.Status.Missing -> showBanner(getString(R.string.home_game_missing), warning = false)
+                showBanner(getString(if (BuildConfig.ON_DEVICE_BUILD) R.string.home_setup_intro else R.string.home_setup_intro_pc), warning = false)
+            gameStatus == GameLibrary.Status.Missing ->
+                showBanner(getString(if (BuildConfig.ON_DEVICE_BUILD) R.string.home_game_missing else R.string.home_game_missing_pc), warning = false)
             discStatus == GameStorage.DiscStatus.Missing -> showBanner(getString(R.string.home_data_missing, disc), warning = false)
             else -> showBanner(null)
         }
@@ -322,7 +327,7 @@ class LauncherActivity : Activity() {
 
     /** Builds the game on this headset from DATA, after saying what that takes. */
     private fun buildGame() {
-        if (GameSetup.isRunning || GameStorage.discStatus(this) != GameStorage.DiscStatus.Ready) return
+        if (!BuildConfig.ON_DEVICE_BUILD || GameSetup.isRunning || GameStorage.discStatus(this) != GameStorage.DiscStatus.Ready) return
         val message = if (GameLibrary.status(this) == GameLibrary.Status.Ready) R.string.home_build_replace_message else R.string.home_build_message
         confirm(R.string.home_build_title, message, R.string.home_build) {
             GameSetupService.startBuild(this)

@@ -17,6 +17,8 @@ object GameStorage {
     // Must match kApplicationDirectoryName in runtime/include/runtime_config.h.
     const val APP_DIRECTORY = "WiiCompiledOpenXRVR"
     const val DISC_DIRECTORY = "DATA"
+    /** The Retro Rewind pack the modded product reads (`[paths] retro_rewind_root`). */
+    const val MOD_DIRECTORY = "RetroRewind6"
 
     enum class DiscStatus { Missing, Incomplete, Ready }
 
@@ -25,6 +27,12 @@ object GameStorage {
     fun gameRoot(context: Context): File = File(dataRoot(context), APP_DIRECTORY)
 
     fun discDirectory(context: Context): File = File(gameRoot(context), DISC_DIRECTORY)
+
+    fun modDirectory(context: Context): File = File(gameRoot(context), MOD_DIRECTORY)
+
+    /** Whether this app needs the Retro Rewind pack and has it. Always true for the base game. */
+    fun modContentReady(context: Context): Boolean =
+        BuildConfig.PROFILE != "retro_rewind" || File(modDirectory(context), "Binaries/Code.pul").isFile
 
     fun configFile(context: Context): File = File(gameRoot(context), "Config.toml")
 
@@ -60,22 +68,28 @@ object GameStorage {
         importDirectory(context).mkdirs()
         val config = configFile(context)
         if (!config.isFile) {
-            val disc = discDirectory(context).absolutePath
-            config.writeText(
-                """
-                # WiiCompiled Quest configuration. Edit with the launcher, the in-game panel or adb pull/push.
-                [paths]
-                dvd_root = "$disc"
-
-                [video]
-                widescreen = true
-                resolution_multiplier = 1.0
-
-                [vr]
-                enabled = true
-                render_scale = 1.0
-                """.trimIndent() + "\n",
+            // Written line by line: trimIndent runs after interpolation, so an interpolated line
+            // would take the indent off every other one.
+            val lines = mutableListOf(
+                "# WiiCompiled Quest configuration. Edit with the launcher, the in-game panel or adb pull/push.",
+                "[paths]",
+                "dvd_root = \"${discDirectory(context).absolutePath}\"",
             )
+            // The modded product reads its pack from retro_rewind_root, which sits next to DATA here.
+            if (BuildConfig.PROFILE == "retro_rewind") {
+                lines += "retro_rewind_root = \"${modDirectory(context).absolutePath}\""
+            }
+            lines += listOf(
+                "",
+                "[video]",
+                "widescreen = true",
+                "resolution_multiplier = 1.0",
+                "",
+                "[vr]",
+                "enabled = true",
+                "render_scale = 1.0",
+            )
+            config.writeText(lines.joinToString("\n", postfix = "\n"))
         }
         return gameRoot
     }

@@ -53,6 +53,7 @@ object GameBuild {
     }
 
     private const val TAG = "WiiCompiledLauncher"
+    private const val KIT_SCHEMA = 2
     private const val TOOLCHAIN_ASSETS = "quest_toolchain"
     private const val KIT_ASSETS = "game_kit"
     private const val MARKER = ".complete"
@@ -66,6 +67,9 @@ object GameBuild {
 
     /** Null on success, otherwise the message to show. */
     fun run(context: Context, reporter: Reporter, cancelled: () -> Boolean, finishing: () -> Unit): String? {
+        if (!BuildConfig.ON_DEVICE_BUILD) {
+            return "This app cannot build its game on the headset. Build it on a computer and use Import from computer."
+        }
         val disc = GameStorage.discDirectory(context)
         if (GameStorage.discStatus(context) != GameStorage.DiscStatus.Ready) {
             return "The game files (DATA) are needed to build the game. Select your disc image first."
@@ -120,6 +124,9 @@ object GameBuild {
             val kitFingerprint = GameLibrary.kitFingerprint(context) ?: return "This app carries no game kit."
             unpackKit(kitFingerprint)
             val recipe = JSONObject(File(kit, "kit.json").readText())
+            if (recipe.optInt("schema") != KIT_SCHEMA) {
+                return "This app's game kit is version ${recipe.optInt("schema")}, which this builder does not know."
+            }
             report(40, Step.Prepare)
             downloadNdk(JSONObject(context.assets.open("$TOOLCHAIN_ASSETS/${toolchainManifest.getString("ndk")}").reader().use { it.readText() }))
 
@@ -336,21 +343,42 @@ object GameBuild {
                 stamp.writeText(identity)
             }
 
-            val blob = File(generated, "data_sections_init_blobs.S")
-            val elfBlob = File(work, "data_sections_init_blobs_android.S")
-            val blobText = blob.readText()
-            val elfText = BuildRecipe.elfBlobAssembly(blobText)
-            if (!elfBlob.isFile || elfBlob.readText() != elfText) elfBlob.writeText(elfText)
+            // Blob assembly generated on Windows is rewritten for ELF, as PublicProducts.cmake does.
+            fun elfAssembly(source: File): File {
+                val rewritten = File(work, source.nameWithoutExtension + "_android.S")
+                val text = BuildRecipe.elfBlobAssembly(source.readText())
+                if (!rewritten.isFile || rewritten.readText() != text) rewritten.writeText(text)
+                return rewritten
+            }
 
+            // Which sources fill each link slot is the recipe's to say, so this builds either flavour.
             data class Job(val kind: String, val source: File, val slot: String)
             val jobs = ArrayList<Job>()
-            jobs += Job("runtime", File(generated, "data_sections_init.cpp"), "runtime")
-            jobs += Job("runtime", File(generated, "guest_symbol_table.cpp"), "runtime")
-            jobs += Job("asm", elfBlob, "runtime")
-            BuildRecipe.sourceList(shards, BuildRecipe.REGISTRATION_LIST).forEach { jobs += Job("product", File(it), "product") }
-            val translated = BuildRecipe.TRANSLATED_LISTS.flatMap { BuildRecipe.sourceList(shards, it) }
-            if (translated.isEmpty()) throw IOException("The translation produced no game code.")
-            translated.forEach { jobs += Job("translated", File(it), "translated") }
+            val sources = recipe.getJSONObject("sources")
+            for (slot in sources.keys()) {
+                val entries = sources.getJSONArray(slot)
+                val slotSources = ArrayList<File>()
+                for (i in 0 until entries.length()) {
+                    val entry = entries.getString(i)
+                    when {
+                        entry.startsWith("@") -> BuildRecipe.sourceList(shards, entry.substring(1)).forEach { slotSources += File(it) }
+                        else -> slotSources += File(BuildRecipe.expand(entry, mapOf("workspace" to workspace.absolutePath)))
+                    }
+                }
+                if (slotSources.isEmpty()) {
+                    throw IOException("The translation has no $slot sources for a ${recipe.getString("product")} game.")
+                }
+                // Assembly is assembled; a mod shard compiles with the same flags as a translated one.
+                slotSources.forEach { source ->
+                    val assembly = source.name.endsWith(".S")
+                    val kind = when {
+                        assembly -> "asm"
+                        slot == "mod" -> "translated"
+                        else -> slot
+                    }
+                    jobs += Job(kind, if (assembly) elfAssembly(source) else source, slot)
+                }
+            }
             if (jobs.map { BuildRecipe.objectName(it.source.path) }.toSet().size != jobs.size) {
                 throw IOException("Two generated sources share an object name.")
             }
@@ -361,7 +389,7 @@ object GameBuild {
                 "workspace" to workspace.absolutePath,
             )
             val compileFlags = recipe.getJSONObject("compile")
-            for (kind in listOf("runtime", "asm", "product", "translated")) {
+            for (kind in jobs.map { it.kind }.distinct()) {
                 val flags = compileFlags.getJSONArray(kind).let { array -> (0 until array.length()).map { BuildRecipe.expand(array.getString(it), values) } }
                 File(work, "$kind.rsp").writeText(BuildRecipe.responseFile(flags))
             }

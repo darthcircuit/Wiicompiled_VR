@@ -72,8 +72,16 @@ internal sealed class QuestBuildService
         var questRoot = Path.Combine(installation.Root, QuestDirectoryName);
         var kitDirectory = Path.Combine(questRoot, "kit");
         _reporter.Progress(InstallStages.QuestKit, "Reading the game kit from the Quest app...", 2);
-        var kitFingerprint = ExtractKit(apkPath, kitDirectory, cancellationToken);
-        _reporter.Diagnostic($"Quest game kit {kitFingerprint}");
+        var kit = ExtractKit(apkPath, kitDirectory, cancellationToken);
+        _reporter.Diagnostic($"Quest game kit {kit.Fingerprint} ({kit.Product})");
+        // A Retro Rewind app needs this installation's Retro Rewind translation, which only exists
+        // once the mod has been built here at least once.
+        if (kit.Product == "retro_rewind" && !HasRetroRewindShards(generated))
+        {
+            throw new InvalidOperationException(
+                "This Quest app is the Retro Rewind one, and this installation has no Retro Rewind " +
+                "translation. Install or repair Retro Rewind, then build for Quest again.");
+        }
 
         var toolchain = await EnsureToolchainAsync(questRoot, cancellationToken);
 
@@ -116,7 +124,7 @@ internal sealed class QuestBuildService
             TryDelete(temporaryOutput);
             throw;
         }
-        return new Result(outputPath, kitFingerprint, includeGameFiles, new FileInfo(outputPath).Length);
+        return new Result(outputPath, kit.Fingerprint, includeGameFiles, new FileInfo(outputPath).Length);
     }
 
     private void TryDelete(string path)
@@ -147,13 +155,24 @@ internal sealed class QuestBuildService
         }
     }
 
+    /// <summary>Whether emit-build-shards recorded a Retro Rewind translation in this workspace.</summary>
+    private static bool HasRetroRewindShards(string generated)
+    {
+        var shards = Path.Combine(generated, "build_shards", "shards.cmake");
+        return File.Exists(shards) &&
+               File.ReadAllText(shards).Contains("set(MKW_HAVE_RETRO_REWIND_SHARDS ON)", StringComparison.Ordinal);
+    }
+
     private static bool IsGameData(string directory) =>
         Directory.Exists(Path.Combine(directory, "files")) &&
         File.Exists(Path.Combine(directory, "sys", "fst.bin")) &&
         File.Exists(Path.Combine(directory, "sys", "main.dol"));
 
-    /// <summary>Extracts <c>assets/game_kit</c> from the Quest app's APK and returns its fingerprint.</summary>
-    internal static string ExtractKit(string apkPath, string destination, CancellationToken cancellationToken)
+    /// <summary>What the extracted kit says it builds: its fingerprint and product ("base" or "retro_rewind").</summary>
+    internal sealed record Kit(string Fingerprint, string Product);
+
+    /// <summary>Extracts <c>assets/game_kit</c> from the Quest app's APK and reads what it is for.</summary>
+    internal static Kit ExtractKit(string apkPath, string destination, CancellationToken cancellationToken)
     {
         const string prefix = "assets/game_kit/";
         if (Directory.Exists(destination)) Directory.Delete(destination, recursive: true);
@@ -179,10 +198,16 @@ internal sealed class QuestBuildService
             throw new InvalidDataException(
                 "This APK is not a WiiCompiled Quest app with a game kit. Choose the Quest app installed on the headset.");
         using var document = JsonDocument.Parse(File.ReadAllText(kitJson));
-        return document.RootElement.TryGetProperty("fingerprint", out var fingerprint) &&
-               fingerprint.ValueKind == JsonValueKind.String
-            ? fingerprint.GetString()!
-            : throw new InvalidDataException("The Quest app's game kit has no fingerprint.");
+        if (!document.RootElement.TryGetProperty("fingerprint", out var fingerprint) ||
+            fingerprint.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidDataException("The Quest app's game kit has no fingerprint.");
+        }
+        var product = document.RootElement.TryGetProperty("product", out var value) &&
+                      value.ValueKind == JsonValueKind.String
+            ? value.GetString()!
+            : "base";
+        return new Kit(fingerprint.GetString()!, product);
     }
 
     private async Task<Toolchain> EnsureToolchainAsync(string questRoot, CancellationToken cancellationToken)

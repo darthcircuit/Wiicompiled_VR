@@ -8,12 +8,14 @@
 # exported from CMake's own build graph so its flags and link order cannot drift from a normal
 # build:
 #
-#  * the link line of mkw_quest_kit_probe (runtime/cmake/PublicProducts.cmake), which is
-#    WiiCompiled without the game, becomes kit.json's link inputs, with {game:*} markers where
-#    the game's objects sat in WiiCompiled's own link;
+#  * the link line of the flavour's probe (runtime/cmake/PublicProducts.cmake), which is that
+#    product without any translated code, becomes kit.json's link inputs, with {game:*} markers
+#    where the game's objects sat in the product's own link;
 #  * the compile commands CMake recorded for one source of each generated kind (translated shard,
 #    registration shard, disc-generated runtime source, blob assembly) become kit.json's
-#    compile flags, with include paths reduced to the kit's copy of runtime/include.
+#    compile flags, with include paths reduced to the kit's copy of runtime/include;
+#  * kit.json's "sources" says which of the translator's build_shards lists fill each slot, so a
+#    builder never has to know which flavour it is building.
 #
 # Placeholders in kit.json: {kit} the extracted kit, {sysroot} the NDK sysroot the compiler
 # uses, {workspace} the directory holding the translator's generated/ tree.
@@ -22,8 +24,41 @@
 
 Set-StrictMode -Version Latest
 
-$script:KitSchema = 1
+$script:KitSchema = 2
 $script:GameSchema = 1
+
+# What each app flavour's kit is made of. Slots name the game's objects in the probe's link line,
+# and Sources says which of the translator's build_shards lists ("@NAME") or generated files fill
+# each of them, in link order. Retro Rewind adds a slot: the mod's own shards and the
+# profile-sensitive base shards it replaces the base flavour's with, linked as objects rather
+# than through the base archive.
+$script:KitProfiles = @{
+    base = @{
+        Probe = 'libmkw_quest_kit_probe'
+        ProductObjectPattern = '/base_product\.cpp\.o$'
+        RegistrationPattern = '/build_shards/base_registration/[^/]+\.cpp$'
+        Slots = @('runtime', 'product', 'translated')
+        Sources = [ordered]@{
+            runtime = @('{workspace}/generated/data_sections_init.cpp', '{workspace}/generated/guest_symbol_table.cpp',
+                '{workspace}/generated/data_sections_init_blobs.S')
+            product = @('@MKW_BASE_REGISTRATION_SOURCES')
+            translated = @('@MKW_BASE_COMMON_SHARDS', '@MKW_BASE_PORTABLE_SENSITIVE_SHARDS')
+        }
+    }
+    retro_rewind = @{
+        Probe = 'libmkw_quest_kit_probe_retro'
+        ProductObjectPattern = '/retro_rewind_product\.cpp\.o$'
+        RegistrationPattern = '/build_shards/retro_rewind_registration/[^/]+\.cpp$'
+        Slots = @('runtime', 'product', 'mod', 'translated')
+        Sources = [ordered]@{
+            runtime = @('{workspace}/generated/data_sections_init.cpp', '{workspace}/generated/guest_symbol_table.cpp',
+                '{workspace}/generated/data_sections_init_blobs.S')
+            product = @('@MKW_RETRO_REGISTRATION_SOURCES')
+            mod = @('@MKW_RETRO_PORTABLE_SENSITIVE_SHARDS', '@MKW_RETRO_MOD_SHARDS', '@MKW_RETRO_EXTRA_SOURCES')
+            translated = @('@MKW_BASE_COMMON_SHARDS')
+        }
+    }
+}
 
 function ConvertTo-ForwardPath([string]$Path) {
     return [IO.Path]::GetFullPath($Path).Replace('\', '/').TrimEnd('/')
@@ -165,7 +200,7 @@ function Split-DriverCommand([string]$Line) {
 # sysroot/ and lib/clang/), {output}, and {game:runtime}, {game:product}, {game:translated}, each
 # replaced by its object files (the translated ones already sit inside --start-lib/--end-lib).
 function Get-KitLldArguments {
-    param([string]$ClangCxx, [string]$KitDir, [string[]]$Flags, [string[]]$Inputs)
+    param([string]$ClangCxx, [string]$KitDir, [string[]]$Flags, [string[]]$Inputs, [string[]]$Slots)
     $kit = ConvertTo-ForwardPath $KitDir
     $ndk = ConvertTo-ForwardPath (Join-Path (Split-Path -Parent $ClangCxx) '..')
     # Forward slashes throughout: clang reads response files with GNU quoting, where '\' escapes.
@@ -173,7 +208,7 @@ function Get-KitLldArguments {
     New-Item -ItemType Directory $probe | Out-Null
     try {
         $markers = [ordered]@{}
-        foreach ($slot in 'runtime', 'product', 'translated') {
+        foreach ($slot in $Slots) {
             $markers[$slot] = ConvertTo-ForwardPath (Join-Path $probe "game_$slot.o")
             [IO.File]::WriteAllBytes($markers[$slot], [byte[]]@())
         }
@@ -182,12 +217,12 @@ function Get-KitLldArguments {
         foreach ($flag in $Flags) { $arguments.Add((& $real $flag)) }
         $arguments.Add('-o'); $arguments.Add("$probe/libmain.so")
         foreach ($linkInput in $Inputs) {
-            switch ($linkInput) {
-                '{game:runtime}' { $arguments.Add($markers.runtime) }
-                '{game:product}' { $arguments.Add($markers.product) }
-                '{game:translated}' { $arguments.Add('-Wl,--start-lib'); $arguments.Add($markers.translated); $arguments.Add('-Wl,--end-lib') }
-                default { $arguments.Add((& $real $linkInput)) }
-            }
+            $slot = [regex]::Match($linkInput, '^\{game:(\w+)\}$').Groups[1].Value
+            if (-not $slot) { $arguments.Add((& $real $linkInput)); continue }
+            # Only the base archive's slot keeps archive semantics; the rest are plain objects.
+            if ($slot -eq 'translated') { $arguments.Add('-Wl,--start-lib') }
+            $arguments.Add($markers[$slot])
+            if ($slot -eq 'translated') { $arguments.Add('-Wl,--end-lib') }
         }
         $rsp = Join-Path $probe 'link.rsp'
         [IO.File]::WriteAllText($rsp, (($arguments | ForEach-Object { ConvertTo-QuotedArgument $_ }) -join "`n"), (New-Object Text.UTF8Encoding $false))
@@ -218,7 +253,7 @@ function Get-KitLldArguments {
             if ($argument -match '[A-Za-z]:/') { throw "The kit link names a path outside the kit and the NDK: $argument" }
             $lld.Add($argument)
         }
-        foreach ($required in '{output}', '{game:runtime}', '{game:product}', '{game:translated}') {
+        foreach ($required in @('{output}') + @($Slots | ForEach-Object { "{game:$_}" })) {
             if (-not $lld.Contains($required)) { throw "The expanded kit link lacks $required" }
         }
         return , $lld.ToArray()
@@ -233,16 +268,18 @@ function Export-QuestGameKit {
         [Parameter(Mandatory)] [string]$CMakeBinaryDir,
         [Parameter(Mandatory)] [string]$OutputDir,
         [Parameter(Mandatory)] [string]$RepoRoot,
-        [Parameter(Mandatory)] [string]$LlvmStrip
+        [Parameter(Mandatory)] [string]$LlvmStrip,
+        [ValidateSet('base', 'retro_rewind')] [string]$Product = 'base'
     )
     $ErrorActionPreference = 'Stop'
     $binary = ConvertTo-ForwardPath $CMakeBinaryDir
     $runtimeInclude = ConvertTo-ForwardPath (Join-Path $RepoRoot 'runtime/include')
+    $kitProfile = $script:KitProfiles[$Product]
 
     # The probe's link edge: explicit inputs are the objects, LINK_LIBRARIES the archives.
     $ninja = [IO.File]::ReadAllText("$binary/build.ninja")
-    $edge = [regex]::Match($ninja, '(?m)^build (\S*libmkw_quest_kit_probe\.so): (\S+) ([^\r\n]*)\r?\n((?:  [^\r\n]*\r?\n)+)')
-    if (-not $edge.Success) { throw "No mkw_quest_kit_probe link edge in $binary/build.ninja" }
+    $edge = [regex]::Match($ninja, "(?m)^build (\S*$([regex]::Escape($kitProfile.Probe))\.so): (\S+) ([^\r\n]*)\r?\n((?:  [^\r\n]*\r?\n)+)")
+    if (-not $edge.Success) { throw "No $($kitProfile.Probe) link edge in $binary/build.ninja" }
     $explicit = ($edge.Groups[3].Value.Replace('$ ', '<ninja-space>') -split ' \|')[0]
     $objects = @($explicit -split ' ' | Where-Object { $_ } | ForEach-Object { ConvertFrom-NinjaPath $_.Replace('<ninja-space>', '$ ') })
     $vars = @{}
@@ -272,7 +309,7 @@ function Export-QuestGameKit {
     }
     $compile = [ordered]@{
         translated = & $flagsFor $translatedEntry
-        product = & $flagsFor (Find-Command '/build_shards/base_registration/[^/]+\.cpp$')
+        product = & $flagsFor (Find-Command $kitProfile.RegistrationPattern)
         runtime = & $flagsFor (Find-Command '/generated/data_sections_init\.cpp$')
         asm = & $flagsFor (Find-Command 'data_sections_init_blobs[^/]*\.S$')
     }
@@ -306,11 +343,17 @@ function Export-QuestGameKit {
     }
     for ($i = 0; $i -lt $objects.Count; $i++) {
         $inputs.Add((& $copy $objects[$i] 'objects'))
-        if ($i -eq $lastRuntime) { $inputs.Add('{game:runtime}') }
-        if ($objects[$i] -match '/base_product\.cpp\.o$') { $inputs.Add('{game:product}') }
+        if ($objects[$i] -match $kitProfile.ProductObjectPattern) { $inputs.Add('{game:product}') }
+        if ($i -eq $lastRuntime) {
+            $inputs.Add('{game:runtime}')
+            # Retro Rewind links the mod's own objects after the runtime's, as its CMake target does.
+            if ($kitProfile.Slots -contains 'mod') { $inputs.Add('{game:mod}') }
+        }
     }
-    if (-not $inputs.Contains('{game:runtime}') -or -not $inputs.Contains('{game:product}')) {
-        throw 'The probe link line lacks the runtime or product objects the game slots follow'
+    foreach ($slot in $kitProfile.Slots) {
+        if ($slot -ne 'translated' -and -not $inputs.Contains("{game:$slot}")) {
+            throw "The probe link line lacks the objects the {game:$slot} slot follows"
+        }
     }
     foreach ($token in ((ConvertFrom-NinjaPath $vars['LINK_LIBRARIES']) -split ' ' | Where-Object { $_ })) {
         if ($token.StartsWith('-')) { $inputs.Add($token); continue }
@@ -334,7 +377,7 @@ function Export-QuestGameKit {
     }
     $linkFlags.Add('-Wl,-soname,libmain.so')
     $lld = Get-KitLldArguments -ClangCxx (Join-Path (Split-Path -Parent $LlvmStrip) 'clang++.exe') -KitDir $OutputDir `
-        -Flags $linkFlags.ToArray() -Inputs $inputs.ToArray()
+        -Flags $linkFlags.ToArray() -Inputs $inputs.ToArray() -Slots $kitProfile.Slots
 
     # What the headset's translator needs besides the disc: the game manifest and symbol map, and
     # the runtime sources it indexes for native registrations, which must be the ones compiled into
@@ -346,11 +389,12 @@ function Export-QuestGameKit {
 
     $recipe = [ordered]@{
         schema = $script:KitSchema
-        product = 'base'
+        product = $Product
         output = 'libmain.so'
         target = $target
         runtimeIncludeFingerprint = Get-RuntimeIncludeFingerprint (Join-Path $OutputDir 'include')
         compile = $compile
+        sources = $kitProfile.Sources
         link = [ordered]@{ flags = $linkFlags.ToArray(); inputs = $inputs.ToArray(); lld = $lld }
     }
     $recipeJson = $recipe | ConvertTo-Json -Depth 8 -Compress
@@ -409,21 +453,37 @@ function Invoke-QuestGameBuild {
     $linkLines = @($recipe.link.flags | ForEach-Object { ConvertTo-QuotedArgument (& $expand $_) })
     [IO.File]::WriteAllText("$build/link.rsp", ($linkLines -join "`n"), (New-Object Text.UTF8Encoding $false))
 
-    # The Windows installer generates the blob assembly for PE/COFF; rewrite it for ELF exactly
-    # as runtime/cmake/PublicProducts.cmake does.
-    $blob = [IO.File]::ReadAllText("$generated/data_sections_init_blobs.S")
-    $elf = $blob.Replace('.section .rdata,"dr"', '.section .rodata,"a",@progbits')
-    if ($elf -ne $blob) { $elf += "`n.section .note.GNU-stack,`"`",@progbits`n" }
-    [IO.File]::WriteAllText("$build/data_sections_init_blobs_android.S", $elf, (New-Object Text.UTF8Encoding $false))
+    # The Windows installer generates blob assembly for PE/COFF; every one of them is rewritten for
+    # ELF exactly as runtime/cmake/PublicProducts.cmake does, into the build directory.
+    $toElf = {
+        param([string]$Source)
+        $text = [IO.File]::ReadAllText($Source)
+        $elf = $text.Replace('.section .rdata,"dr"', '.section .rodata,"a",@progbits')
+        if ($elf -ne $text) { $elf += "`n.section .note.GNU-stack,`"`",@progbits`n" }
+        $rewritten = "$build/$([IO.Path]::GetFileNameWithoutExtension($Source))_android.S"
+        [IO.File]::WriteAllText($rewritten, $elf, (New-Object Text.UTF8Encoding $false))
+        return $rewritten
+    }
 
+    # Each slot's sources, as the recipe names them: a build_shards list ("@NAME") or one generated
+    # file.
     $shards = "$generated/build_shards/shards.cmake"
-    $sources = [ordered]@{
-        runtime = @("$generated/data_sections_init.cpp", "$generated/guest_symbol_table.cpp")
-        runtimeAsm = @("$build/data_sections_init_blobs_android.S")
-        product = @(Read-ShardList $shards 'MKW_BASE_REGISTRATION_SOURCES')
-        translated = @((Read-ShardList $shards 'MKW_BASE_COMMON_SHARDS') + (Read-ShardList $shards 'MKW_BASE_PORTABLE_SENSITIVE_SHARDS'))
+    $sources = [ordered]@{}
+    foreach ($slot in $recipe.sources.PSObject.Properties.Name) {
+        $slotSources = New-Object System.Collections.Generic.List[string]
+        foreach ($entry in $recipe.sources.$slot) {
+            if ($entry.StartsWith('@')) {
+                Read-ShardList $shards $entry.Substring(1) | ForEach-Object { $slotSources.Add($_) }
+            } else {
+                $slotSources.Add((& $expand $entry))
+            }
+        }
+        $sources[$slot] = @($slotSources | ForEach-Object { if ($_.EndsWith('.S')) { & $toElf $_ } else { $_ } })
     }
     if ($sources.translated.Count -eq 0) { throw "No translated shards in $shards" }
+    foreach ($slot in $sources.Keys) {
+        if ($sources[$slot].Count -eq 0) { throw "The $slot sources of a $($recipe.product) game are missing from $shards" }
+    }
 
     $ninjaText = New-Object System.Text.StringBuilder
     $escape = { param([string]$p) $p.Replace('$', '$$').Replace(':', '$:').Replace(' ', '$ ') }
@@ -432,37 +492,36 @@ function Invoke-QuestGameBuild {
     [void]$ninjaText.AppendLine("rule cxx`n  command = $(ConvertTo-QuotedArgument $ClangCxx) @`$flags -c `$in -o `$out`n  description = Compiling `$in")
     [void]$ninjaText.AppendLine("rule asm`n  command = $(ConvertTo-QuotedArgument $ClangC) @`$flags -c `$in -o `$out`n  description = Assembling `$in")
     [void]$ninjaText.AppendLine("rule link`n  command = $(ConvertTo-QuotedArgument $ClangCxx) @`$flags -o `$out @`$out.rsp`n  rspfile = `$out.rsp`n  rspfile_content = `$inputs`n  description = Linking `$out")
-    $objectsOf = @{ runtime = @(); product = @(); translated = @() }
+    $objectsOf = @{}
     $seen = @{}
-    foreach ($kind in 'runtime', 'runtimeAsm', 'product', 'translated') {
-        foreach ($source in $sources[$kind]) {
+    foreach ($slot in $sources.Keys) {
+        $objectsOf[$slot] = @()
+        foreach ($source in $sources[$slot]) {
             $stem = [IO.Path]::GetFileNameWithoutExtension($source)
             $object = "obj/$stem.o"
             if ($seen.ContainsKey($object)) { throw "Two generated sources share the object name $object" }
             $seen[$object] = $true
-            $rule = if ($kind -eq 'runtimeAsm') { 'asm' } else { 'cxx' }
-            $flags = switch ($kind) { 'runtimeAsm' { 'asm.rsp' } default { "$kind.rsp" } }
+            # Assembly is assembled; a mod shard compiles with the same flags as a translated one.
+            $assembly = $source.EndsWith('.S')
+            $rule = if ($assembly) { 'asm' } else { 'cxx' }
+            $flags = if ($assembly) { 'asm.rsp' } elseif ($slot -eq 'mod') { 'translated.rsp' } else { "$slot.rsp" }
             [void]$ninjaText.AppendLine("build $(& $escape $object): $rule $(& $escape $source)`n  flags = $(& $escape "$build/$flags")")
-            if ($kind -eq 'translated') { [void]$ninjaText.AppendLine('  pool = translated') }
-            $slot = if ($kind -eq 'runtimeAsm') { 'runtime' } else { $kind }
+            if ($slot -eq 'translated' -or $slot -eq 'mod') { [void]$ninjaText.AppendLine('  pool = translated') }
             $objectsOf[$slot] += "$build/$object"
         }
     }
     $linkInputs = New-Object System.Collections.Generic.List[string]
     foreach ($linkInput in $recipe.link.inputs) {
-        switch ($linkInput) {
-            '{game:runtime}' { $objectsOf.runtime | ForEach-Object { $linkInputs.Add($_) } }
-            '{game:product}' { $objectsOf.product | ForEach-Object { $linkInputs.Add($_) } }
-            '{game:translated}' {
-                # Archive semantics, as libmkw_base_shared.a has in a CMake build.
-                $linkInputs.Add('-Wl,--start-lib')
-                $objectsOf.translated | ForEach-Object { $linkInputs.Add($_) }
-                $linkInputs.Add('-Wl,--end-lib')
-            }
-            default { $linkInputs.Add((& $expand $linkInput)) }
-        }
+        $slot = [regex]::Match($linkInput, '^\{game:(\w+)\}$').Groups[1].Value
+        if (-not $slot) { $linkInputs.Add((& $expand $linkInput)); continue }
+        if (-not $objectsOf.ContainsKey($slot)) { throw "The kit recipe links a {game:$slot} slot it names no sources for" }
+        # The base shards keep the archive semantics libmkw_base_shared.a has in a CMake build;
+        # every other slot is linked as plain objects, as the product's own CMake target does.
+        if ($slot -eq 'translated') { $linkInputs.Add('-Wl,--start-lib') }
+        $objectsOf[$slot] | ForEach-Object { $linkInputs.Add($_) }
+        if ($slot -eq 'translated') { $linkInputs.Add('-Wl,--end-lib') }
     }
-    $allObjects = @($objectsOf.runtime + $objectsOf.product + $objectsOf.translated | ForEach-Object { & $escape $_.Substring($build.Length + 1) })
+    $allObjects = @($sources.Keys | ForEach-Object { $objectsOf[$_] } | ForEach-Object { & $escape $_.Substring($build.Length + 1) })
     $rspInputs = ($linkInputs | ForEach-Object { ConvertTo-QuotedArgument $_ }) -join ' '
     [void]$ninjaText.AppendLine("build libmain.so: link $($allObjects -join ' ')`n  flags = $(& $escape "$build/link.rsp")`n  inputs = $($rspInputs.Replace('$', '$$'))")
     [IO.File]::WriteAllText("$build/build.ninja", $ninjaText.ToString(), (New-Object Text.UTF8Encoding $false))

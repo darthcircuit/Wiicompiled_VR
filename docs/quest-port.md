@@ -234,11 +234,23 @@ The kit is exported from CMake's own build graph, so its flags cannot drift from
   this way had the same 61,975 defined and 785 undefined dynamic symbols, 29,995 translated
   functions, `NEEDED` list and soname as the CMake-built one, in 2.4 minutes.
 
-`Build-Quest.ps1` refuses a base APK that contains any `libmain*.so` or lacks the kit, and the
-base variant excludes `**/libmain*.so` from packaging, since AGP packages every library left in
-the CMake output directory. The `func_8…` symbols the kit's runtime objects define are
+`Build-Quest.ps1` refuses an APK that contains any `libmain*.so` or lacks the kit, and every
+variant excludes `**/libmain*.so` and the probes from packaging, since AGP packages every library
+left in the CMake output directory. The `func_8…` symbols the kit's runtime objects define are
 hand-written HLE overrides (`PPC_NATIVE_OVERRIDE_*` in `hle_stubs.h`), not translated code.
-The Retro Rewind flavour has not moved to the kit yet and still bundles its library.
+
+**Retro Rewind has its own kit** (`mkw_quest_kit_probe_retro`, RetroRewind without any translated
+code), so that APK ships no game either. It needs one more link slot than the base flavour, because
+the modded product links more kinds of translated code: `{game:runtime}` (the disc-generated
+sources), `{game:product}` (the mod's registration and dispatch shards), `{game:mod}` (the mod's own
+shards, the profile-sensitive base shards it replaces, and the mod's data patches) and
+`{game:translated}` (the shared base shards, with the archive semantics `libmkw_base_shared.a` has).
+Rather than teach each builder which flavour it is building, `kit.json` now carries a `sources`
+map naming the `shards.cmake` list behind each slot, and the builders just follow it (kit schema 2).
+Its game is built on a PC for now: building it on the headset would also need the mod's `Code.pul`
+and its 2 GB pack there, so only the base APK carries the on-device toolchain
+(`BuildConfig.ON_DEVICE_BUILD`). The Retro Rewind app writes `[paths] retro_rewind_root` into its
+first `Config.toml` and Home says so when that pack is missing.
 
 ### Game packages (.wcgame) and Import from computer
 
@@ -365,7 +377,8 @@ Android facts this design rests on, all measured on a Quest 3:
   another host.
 - `android/`: the Gradle project. `app/src/main/cpp/CMakeLists.txt` adds the
   repository's `runtime/` as a subdirectory with those Android choices;
-  flavours `base` and `retroRewind` pick the product target and library name.
+  flavours `base` and `retroRewind` each build their own game kit probe, and only `base` carries
+  the on-headset toolchain.
 - `android/nod-jni`: Gradle's `buildNodJni` task runs `cargo build --release
   --locked --target aarch64-linux-android` with the NDK's clang as linker and C
   compiler. `stageNodJni` puts `libnod_jni.so` into the APK's `arm64-v8a`
@@ -384,7 +397,8 @@ installer's `BuildWorkspace/generated`, produced by the normal Windows pipeline)
 powershell -ExecutionPolicy Bypass -File android/Prepare-QuestDependencies.ps1        # SDL3 3.4.4 AAR into android/app/libs
 powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Install             # the app, its game kit and toolchain, debug-signed
 powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Install         # your game, against that kit, into Import (or WheelWizard VR's Build for Quest)
-powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Flavor retroRewind  # Retro Rewind (needs translate-mod output)
+powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Flavor retroRewind  # Retro Rewind app and its kit (needs translate-mod output)
+powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Flavor retroRewind -Data <dir> -Install  # its game, with the disc files
 adb push MarioKart.iso /sdcard/Download/                                               # then Select disc image in the launcher
 ```
 
@@ -446,6 +460,14 @@ What has been verified on the development machine (September 2026):
   byte-identical to one the same toolchain built from a shell, and against the PC-built library it
   has the same soname, `NEEDED` list, 785 undefined symbols and 29,995 translated functions
   (61,974 defined against 61,975: the PC's older clang keeps one inline helper out of line).
+- **Device, 2026-09-17: Retro Rewind from its own kit.** The Retro Rewind APK carries a kit and no
+  game (66 MB). Its game built from that kit on the PC in 2.9 minutes (166 generated sources:
+  72 base shards, 24 profile-sensitive, 48 mod shards, the mod's data patches, 17 registration
+  shards and the 3 disc-generated sources), linked to a 157.6 MB `libmain.so` with the same import
+  list as the base one, 67,872 defined symbols against the base library's 61,975, and 5,905 symbols
+  the base library does not have. Packaged with the disc files (2.55 GB), imported on the Quest 3 in
+  under two minutes, and the mod runs: its own title screen, "Press the A Button", and the licence
+  menu, with the pack read from `retro_rewind_root`.
 
 Bring-up fixes that only a device could reveal:
 
@@ -556,7 +578,10 @@ or `EndAccess` errors); a black mirror too points at Aurora itself.
 - **Input.** D-pad (trick inputs) is not bound; remap in `Config.toml` or bind
   the thumbstick directions in a follow-up. Haptics are wired but nothing calls
   them yet.
-- **Retro Rewind on device** needs the mod's translation and its extracted
-  content pushed next to `DATA`, exactly like the desktop product.
+- **Retro Rewind on the headset** runs from a kit-built library (below), but its game must be built
+  on a PC and its pack copied next to `DATA` by hand. `adb push` cannot create directories inside
+  an app's external files directory (`secure_mkdirs failed`), so push the pack to `Download` and
+  copy it over on the device, then `chmod -R a+rX` it. The launcher does not fetch or update the
+  pack, and cannot build the mod on the headset.
 - **Release signing and store packaging** are out of scope; `Build-Quest.ps1`
   produces debug-signed APKs for sideloading.

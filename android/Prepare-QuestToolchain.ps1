@@ -271,6 +271,11 @@ function Publish-Translator([string]$Destination, [string]$Work) {
         & (Join-Path $env:SystemRoot 'System32\robocopy.exe') (Join-Path $repo $tree) (Join-Path $stage $tree) /E /XD bin obj /NFL /NDL /NJH /NJS /NP | Out-Null
         if ($LASTEXITCODE -ge 8) { throw "Staging $tree failed (robocopy $LASTEXITCODE)" }
     }
+    # Build output the checkout may hold for another target framework would be picked up here and
+    # make the retargeted publish resolve the wrong references.
+    Get-ChildItem -Recurse -Directory $stage |
+        Where-Object { $_.Name -eq 'bin' -or $_.Name -eq 'obj' } |
+        ForEach-Object { if (Test-Path $_.FullName) { Remove-Item -Recurse -Force $_.FullName } }
     foreach ($project in Get-ChildItem -Recurse -Filter *.csproj $stage) {
         $text = [IO.File]::ReadAllText($project.FullName)
         $retargeted = $text.Replace('<TargetFramework>net8.0</TargetFramework>', '<TargetFramework>net10.0</TargetFramework>')

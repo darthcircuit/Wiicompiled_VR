@@ -87,23 +87,27 @@ $apk = Get-ChildItem -Path $apkDir -Filter '*.apk' | Select-Object -First 1
 if (-not $apk) { throw "No APK under $apkDir" }
 Write-Host "APK: $($apk.FullName)"
 
-# The base APK must be distributable: no translated game inside, only the game kit.
-if ($Flavor -eq 'base') {
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archive = [IO.Compression.ZipFile]::OpenRead($apk.FullName)
-    try {
-        $gameLibraries = @($archive.Entries | Where-Object { $_.FullName -match '^lib/[^/]+/libmain[^/]*\.so$' })
-        $hasKit = @($archive.Entries | Where-Object { $_.FullName -eq 'assets/game_kit/kit.json' }).Count -gt 0
-        $hasToolchain = @($archive.Entries | Where-Object { $_.FullName -eq 'assets/quest_toolchain/files.zip' }).Count -gt 0
-    } finally { $archive.Dispose() }
-    if ($gameLibraries.Count -gt 0) { throw "The APK contains a translated game library: $($gameLibraries.FullName -join ', ')" }
-    if (-not $hasKit) { throw 'The APK has no game kit (assets/game_kit/kit.json)' }
-    if (-not $hasToolchain) { throw 'The APK has no build toolchain (assets/quest_toolchain/files.zip)' }
-}
+# Every APK must be distributable: no translated game inside, only the game kit. The toolchain
+# that builds one on the headset travels in the base APK only.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [IO.Compression.ZipFile]::OpenRead($apk.FullName)
+try {
+    $gameLibraries = @($archive.Entries | Where-Object { $_.FullName -match '^lib/[^/]+/libmain[^/]*\.so$' })
+    $hasKit = @($archive.Entries | Where-Object { $_.FullName -eq 'assets/game_kit/kit.json' }).Count -gt 0
+    $hasToolchain = @($archive.Entries | Where-Object { $_.FullName -eq 'assets/quest_toolchain/files.zip' }).Count -gt 0
+} finally { $archive.Dispose() }
+if ($gameLibraries.Count -gt 0) { throw "The APK contains a translated game library: $($gameLibraries.FullName -join ', ')" }
+if (-not $hasKit) { throw 'The APK has no game kit (assets/game_kit/kit.json)' }
+if ($Flavor -eq 'base' -and -not $hasToolchain) { throw 'The APK has no build toolchain (assets/quest_toolchain/files.zip)' }
+if ($Flavor -ne 'base' -and $hasToolchain) { throw 'Only the base APK carries the on-headset build toolchain' }
 
 if ($Install) {
     $adb = Join-Path $sdkRoot 'platform-tools\adb.exe'
     & $adb install -r $apk.FullName
     if ($LASTEXITCODE -ne 0) { throw "adb install failed ($LASTEXITCODE)" }
-    Write-Host 'Installed. Build the game with Build on this Quest in the launcher, or on this PC with android/Build-QuestGame.ps1 -Install.'
+    if ($Flavor -eq 'base') {
+        Write-Host 'Installed. Build the game with Build on this Quest in the launcher, or on this PC with android/Build-QuestGame.ps1 -Install.'
+    } else {
+        Write-Host "Installed. Build its game on this PC with android/Build-QuestGame.ps1 -Flavor $Flavor -Install."
+    }
 }

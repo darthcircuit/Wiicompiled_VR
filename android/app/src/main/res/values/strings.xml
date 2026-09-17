@@ -24,6 +24,9 @@
     <string name="home_setup_intro">Nothing from Mario Kart Wii comes with this app: the game is built from your own PAL (RMCP01) disc.\n\nOn this headset: copy your disc image (ISO, WBFS, RVZ…) here, for example into Download, press Select disc image, then Build on this Quest.\n\nWith a computer: in the WiiCompiled VR launcher, use Build for Quest with your disc image, copy the .wcgame file it makes to this headset, then press Import from computer.</string>
     <string name="home_game_missing">The game files are ready. Now build the game from them: Build on this Quest takes about 30–40 minutes on a Quest 3. With a computer, use Build for Quest in the WiiCompiled VR launcher instead, copy the .wcgame file to this headset and press Import from computer.</string>
     <string name="home_game_stale">This app was updated, so the game must be built again for it: press Build on this Quest, or use Build for Quest in the WiiCompiled VR launcher again and Import from computer.</string>
+    <string name="home_setup_intro_pc">Nothing from Mario Kart Wii or Retro Rewind comes with this app: the game is built from your own PAL (RMCP01) disc.\n\nCopy your disc image (ISO, WBFS, RVZ…) here, for example into Download, and press Select disc image. Then, on a computer, use Build for Quest in the WiiCompiled VR launcher with this app’s APK, copy the .wcgame file it makes to this headset and press Import from computer.</string>
+    <string name="home_game_missing_pc">The game files are ready. The game itself is built on a computer: in the WiiCompiled VR launcher, use Build for Quest with this app’s APK, copy the .wcgame file to this headset, then press Import from computer.</string>
+    <string name="home_game_stale_pc">This app was updated, so the game must be built again for it: use Build for Quest in the WiiCompiled VR launcher again, then Import from computer.</string>
     <string name="home_build">Build on this Quest</string>
     <string name="home_build_preparing">Preparing…</string>
     <string name="home_building">Building %1$d%%</string>
@@ -46,6 +49,7 @@
     <string name="home_replace_game_title">Replace the game?</string>
     <string name="home_replace_game_message">The game installed now stays until the new game file has been checked and completely imported.</string>
     <string name="home_data_incomplete">DATA is there but incomplete or unreadable. Select your disc image to extract it again, or copy the whole extracted partition (sys/ and files/, not just files/) to:\n%1$s</string>
+    <string name="home_mod_missing">The Retro Rewind pack is missing, so the game cannot start. Copy the RetroRewind6 folder (the one with Binaries, Tracks and Assets in it) to:\n%1$s</string>
     <string name="home_checking">Checking disc…</string>
     <string name="home_extracting">Extracting %1$d%%</string>
     <string name="home_finishing">Finishing…</string>

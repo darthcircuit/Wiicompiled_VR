@@ -51,7 +51,7 @@ add_subdirectory("${MKW_REPO_ROOT}/runtime" wiicompiled-runtime)
 
 # App-owned JNI glue lives in each product library SDLActivity loads, and in the game kit
 # probe (runtime/cmake/PublicProducts.cmake) whose objects the player's game is linked with.
-foreach(product IN ITEMS WiiCompiled RetroRewind mkw_quest_kit_probe)
+foreach(product IN ITEMS WiiCompiled RetroRewind mkw_quest_kit_probe mkw_quest_kit_probe_retro)
     if(TARGET ${product})
         target_sources(${product} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/quest_surface_jni.cpp")
         target_include_directories(${product} PRIVATE "${MKW_REPO_ROOT}/aurora-main/include")

@@ -369,14 +369,15 @@ internal static class SelfTests
                     using var writer = new StreamWriter(zip.CreateEntry(name).Open());
                     writer.Write(text);
                 }
-                Add("assets/game_kit/kit.json", "{\"schema\":1,\"fingerprint\":\"abc123\"}");
+                Add("assets/game_kit/kit.json", "{\"schema\":2,\"product\":\"retro_rewind\",\"fingerprint\":\"abc123\"}");
                 Add("assets/game_kit/include/memory.h", "#pragma once");
                 Add("assets/runtime_resources/dsp_coef.bin", "not the kit");
                 Add("lib/arm64-v8a/libSDL3.so", "not the kit");
             }
             var kit = Path.Combine(temp, "kit");
-            if (QuestBuildService.ExtractKit(apk, kit, CancellationToken.None) != "abc123")
-                throw new Exception("The kit fingerprint was not read.");
+            var extracted = QuestBuildService.ExtractKit(apk, kit, CancellationToken.None);
+            if (extracted.Fingerprint != "abc123" || extracted.Product != "retro_rewind")
+                throw new Exception("The kit fingerprint or product was not read.");
             if (!File.Exists(Path.Combine(kit, "include", "memory.h")) ||
                 Directory.GetFiles(kit, "*", SearchOption.AllDirectories).Length != 2)
                 throw new Exception("The kit extraction took the wrong files.");

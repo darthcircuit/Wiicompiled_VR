@@ -23,6 +23,17 @@ class BuildRecipeTest {
     }
 
     @Test
+    fun expandsAnyLinkSlotTheRecipeNames() {
+        // Retro Rewind adds a mod slot; a builder only has to expand what the recipe lists.
+        val arguments = BuildRecipe.linkArguments(
+            listOf("{game:product}", "{game:mod}", "--start-lib", "{game:translated}", "--end-lib"),
+            emptyMap(),
+            mapOf("product" to listOf("/o/reg.o"), "mod" to listOf("/o/m1.o", "/o/m2.o"), "translated" to listOf("/o/base.o")),
+        )
+        assertEquals(listOf("/o/reg.o", "/o/m1.o", "/o/m2.o", "--start-lib", "/o/base.o", "--end-lib"), arguments)
+    }
+
+    @Test
     fun expandsTheLinkSlotsInPlace() {
         val template = listOf("-o", "{output}", "{kit}/objects/001_a.o", "{game:runtime}", "--start-lib", "{game:translated}", "--end-lib", "-lm")
         val arguments = BuildRecipe.linkArguments(
@@ -59,7 +70,10 @@ class BuildRecipeTest {
         )
         assertEquals(emptyList<String>(), BuildRecipe.sourceList(shards, "MKW_BASE_PORTABLE_SENSITIVE_SHARDS"))
         assertEquals(emptyList<String>(), BuildRecipe.sourceList(shards, "MKW_RETRO_MOD_SHARDS"))
-        assertEquals(listOf("C:/w/generated/build_shards/base_registration/registration_00.cpp"), BuildRecipe.sourceList(shards, BuildRecipe.REGISTRATION_LIST))
+        assertEquals(
+            listOf("C:/w/generated/build_shards/base_registration/registration_00.cpp"),
+            BuildRecipe.sourceList(shards, "MKW_BASE_REGISTRATION_SOURCES"),
+        )
     }
 
     @Test

@@ -415,6 +415,14 @@ if(MKW_HAVE_RETRO_REWIND)
     if(MKW_RETRO_BLOB_OBJECTS)
         target_sources(RetroRewind PRIVATE ${MKW_RETRO_BLOB_OBJECTS})
     endif()
+    if(MKW_PLATFORM_ANDROID)
+        # Retro Rewind's game kit, the same idea as the base probe above: RetroRewind without any
+        # translated code, so the APK carries neither the game nor the mod.
+        add_library(mkw_quest_kit_probe_retro SHARED "${MKW_RETRO_REWIND_PRODUCT_SOURCE}")
+        mkw_configure_product(mkw_quest_kit_probe_retro WITHOUT_GAME)
+        target_precompile_headers(mkw_quest_kit_probe_retro REUSE_FROM WiiCompiled)
+        target_link_options(mkw_quest_kit_probe_retro PRIVATE "-Wl,--unresolved-symbols=ignore-all")
+    endif()
     add_custom_target(mkw_release DEPENDS WiiCompiled RetroRewind)
 else()
     add_custom_target(mkw_release DEPENDS WiiCompiled)
@@ -440,7 +448,7 @@ endif()
 
 set(MKW_ALL_BUILD_TARGETS
     mkw_runtime_common mkw_base_shared mkw_base_sensitive mkw_retro_sensitive
-    mkw_retro_rewind_functions WiiCompiled RetroRewind mkw_quest_kit_probe)
+    mkw_retro_rewind_functions WiiCompiled RetroRewind mkw_quest_kit_probe mkw_quest_kit_probe_retro)
 foreach(target IN LISTS MKW_ALL_BUILD_TARGETS)
     if(TARGET ${target} AND MKW_BASELINE_ARCH_FLAG)
         target_compile_options(${target} PRIVATE ${MKW_BASELINE_ARCH_FLAG})
