@@ -418,9 +418,25 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 add_test(NAME mkw_vr_policy_tests COMMAND mkw_vr_policy_tests)
 
+# F10 > Diagnostics: the OpenXR frame-diagnostics collector is free of OpenXR
+# and guest state, so its window accounting runs on a synthetic clock here.
+add_executable(mkw_openxr_diagnostics_tests tests/openxr_diagnostics_tests.cpp src/vr/openxr_diagnostics.cpp)
+target_include_directories(mkw_openxr_diagnostics_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
+target_link_libraries(mkw_openxr_diagnostics_tests PRIVATE mkw::toml11)
+target_compile_features(mkw_openxr_diagnostics_tests PRIVATE cxx_std_20)
+set_target_properties(mkw_openxr_diagnostics_tests PROPERTIES UNITY_BUILD OFF)
+add_test(NAME mkw_openxr_diagnostics_tests COMMAND mkw_openxr_diagnostics_tests)
+
+# F10 > Diagnostics > Export Logs, against temporary folders.
+add_executable(mkw_log_export_tests tests/log_export_tests.cpp src/log_export.cpp)
+target_include_directories(mkw_log_export_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
+target_compile_features(mkw_log_export_tests PRIVATE cxx_std_20)
+set_target_properties(mkw_log_export_tests PROPERTIES UNITY_BUILD OFF)
+add_test(NAME mkw_log_export_tests COMMAND mkw_log_export_tests)
+
 if(MKW_ENABLE_OPENXR AND MKW_PLATFORM_WINDOWS)
     add_executable(mkw_openxr_replay_tests
-        tests/openxr_d3d12_replay_tests.cpp src/vr/openxr_d3d12.cpp)
+        tests/openxr_d3d12_replay_tests.cpp src/vr/openxr_d3d12.cpp src/vr/openxr_diagnostics.cpp)
     target_include_directories(mkw_openxr_replay_tests PRIVATE
         "${CMAKE_CURRENT_LIST_DIR}/include"
         "${CMAKE_CURRENT_LIST_DIR}/../aurora-main/include"

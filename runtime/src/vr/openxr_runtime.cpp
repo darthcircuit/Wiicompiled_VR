@@ -6,6 +6,7 @@
 #if defined(MKW_ENABLE_OPENXR)
 
 #include "vr/openxr_runtime.h"
+#include "vr/openxr_diagnostics.h"
 
 #include <algorithm>
 #include <chrono>
@@ -53,6 +54,19 @@ uint32_t ScaledDimension(uint32_t recommended, uint32_t maximum, float scale) {
     const double clamped = std::clamp(
         scaled, 1.0, static_cast<double>(std::max(maximum, 1u)));
     return static_cast<uint32_t>(clamped);
+}
+
+const char* ReferenceSpaceName(XrReferenceSpaceType type) {
+    switch (type) {
+    case XR_REFERENCE_SPACE_TYPE_VIEW:
+        return "VIEW";
+    case XR_REFERENCE_SPACE_TYPE_LOCAL:
+        return "LOCAL";
+    case XR_REFERENCE_SPACE_TYPE_STAGE:
+        return "STAGE";
+    default:
+        return "OTHER";
+    }
 }
 
 const char* SessionStateName(XrSessionState state) {
@@ -520,6 +534,11 @@ OpenXREventStatus OpenXRRuntime::PollEvents() {
         case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING: {
             const auto& space_event =
                 *reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&event);
+            if (space_event.session == m_session) {
+                diagnostics::OnReferenceSpaceChange(ReferenceSpaceName(space_event.referenceSpaceType),
+                                                    space_event.poseValid == XR_TRUE,
+                                                    space_event.changeTime);
+            }
             // This slot is consumed to invalidate transforms located in the
             // application space. Events for VIEW or another supported type
             // must not overwrite a pending LOCAL/STAGE change.
@@ -647,9 +666,11 @@ OpenXRFrameStatus OpenXRRuntime::WaitFrame(OpenXRFrame& frame) {
 
     XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState state{XR_TYPE_FRAME_STATE};
+    const diagnostics::Stopwatch wait_timer;
     if (!Check(xrWaitFrame(m_session, &wait_info, &state), "xrWaitFrame")) {
         return OpenXRFrameStatus::Error;
     }
+    diagnostics::OnWaitFrame(wait_timer, state.predictedDisplayTime, state.predictedDisplayPeriod);
 
     frame = {};
     frame.serial = m_next_frame_serial++;
@@ -678,6 +699,7 @@ bool OpenXRRuntime::BeginFrame(const OpenXRFrame& frame) {
         return Check(result, "xrBeginFrame");
     }
     m_frame_phase = FramePhase::Begun;
+    diagnostics::OnBeginFrame();
     return true;
 }
 
@@ -744,7 +766,9 @@ bool OpenXRRuntime::EndFrame(
     end_info.environmentBlendMode = m_blend_mode;
     end_info.layerCount = layer_count;
     end_info.layers = layers;
+    const diagnostics::Stopwatch end_timer;
     const XrResult result = xrEndFrame(m_session, &end_info);
+    diagnostics::OnEndFrame(end_timer);
     m_frame_phase = FramePhase::Idle;
     m_active_frame_serial = 0;
     m_active_frame_display_time = 0;

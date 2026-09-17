@@ -317,6 +317,71 @@ Kart Wii's minimap are treated as game art and remain eligible for the screen. A
 uses the full eye viewport and scissor because its recorded rectangle no longer describes where it
 ended up; its original viewport is folded into the projection instead.
 
+## Diagnostics
+
+**F10 > Diagnostics** holds two bug-report aids.
+
+**OpenXR diagnostic logging** is off by default. When it is off, each hook on the pacing thread is
+one atomic test. It applies immediately and is remembered as:
+
+```toml
+[diagnostics]
+openxr_logging = false
+```
+
+When it is on, `console.log` receives lines tagged `[runtime] [xr-diag]`
+(`runtime/src/vr/openxr_diagnostics.cpp`). They cover both the D3D12 and the Vulkan backend.
+
+- **Session description.** Written when logging starts and again for every new OpenXR session. It
+  gives the runtime and system names and versions, vendor id, tracking support, backend, reference
+  space, blend mode, enabled extensions, recommended and maximum eye sizes, `render_scale`, swapchain
+  sizes, display period, and the VR frame interpolation setting.
+- **View geometry.** Written on the first located views and again whenever they change by more
+  than 0.5° or 0.5 mm. It gives per-eye FOV half-angles, the eye cant (the angle between the two
+  eyes' forward axes: 0 for parallel displays, non-zero for canted ones such as Pimax without
+  parallel projections), and the IPD.
+- **A one-second summary.** Timings are `median/worst` in milliseconds; for `end-margin`, worst is
+  the minimum.
+
+| Field | Meaning |
+| --- | --- |
+| `Hz`, `cycles` | Display rate from the predicted display period; compositor cycles (xrWaitFrame/xrEndFrame pairs, repeats included). |
+| `skipped-slots` | Display slots the predicted display time jumped over: the runtime throttled or dropped frames. |
+| `late` | Frames whose xrEndFrame came after their predicted display time (needs `XR_KHR_win32_convert_performance_counter_time` or `XR_KHR_convert_timespec_time`). |
+| `layers new/repeat/empty` | Cycles ending with a newly rendered layer, the retained layer again, or no layer at all (black). |
+| `discarded`, `layer-rejected` | Retained layers dropped by a session or reference-space change; rendered layers not submitted (invalid pose or views, failed release). |
+| `wait-frame`, `open`, `end-call` | Time blocked in xrWaitFrame, from xrBeginFrame to xrEndFrame, and inside xrEndFrame. |
+| `end-margin`, `end-gap` | Predicted display time minus the xrEndFrame time; interval between xrEndFrame calls. |
+| `pickup`, `render` | Stereo packet published until Aurora's frame worker takes it (without interpolation this includes waiting for the next 60 Hz game frame); taken until the eye copy is submitted. |
+| `acquire`, `release` | Swapchain image acquire+wait and release. |
+| `keepalive` | Retained-layer repeats while Aurora was still encoding past the 50 ms keep-alive. |
+| `packet-unused`, `packet-rejected`, `submit-failed` | Packets no game frame took within 50 ms; packets Aurora took but rendered mono (content tag or transform check); failed stereo copies. |
+| `interp-skip` | Cycles the VR interpolation rate cap chose not to render. |
+| `frames immersive/screen` | Cycles per presentation mode; `not-rendered` counts cycles without views to render. |
+| `no-orientation`, `no-position` | Cycles whose head orientation or position was not valid. |
+| `suppressed` | Event lines dropped by the rate limit. |
+
+- **Event lines.** At most 8 per second; the rest are counted in `suppressed`. They report late
+  frames, skipped display slots, stalls (more than 2.5 display periods, and at least 25 ms, between
+  xrEndFrame calls), empty frames and their reason, discarded retained layers, rejected layers,
+  withdrawn or rejected packets, failed submissions, and head-tracking loss and recovery.
+  Reference-space change events are never rate-limited.
+- **Presentation changes.** While logging is on, every `[mkw-vr] presentation=` transition is
+  logged, not just the first 16.
+
+**Export Logs** opens the system folder picker. It then creates a
+`WiiCompiled-logs-YYYYMMDD-HHMMSS` folder at the chosen location, containing:
+
+- `Logs/`: every retained run folder, the current session included. The runtime prunes run
+  folders after four days.
+- `Config.toml`.
+- `export-info.txt`: the export time, the exporting process id (whose run folder ends in `_pid<id>`),
+  and the OpenXR state.
+
+The current `console.log` is copied through a shared-read stream while it is still being written.
+The copy runs on SDL's dialog thread (`runtime/src/log_export.cpp`), and the outcome is shown under
+the button. `mkw_openxr_diagnostics_tests` and `mkw_log_export_tests` cover both without a headset.
+
 ## Backend status
 
 | Backend | Status |

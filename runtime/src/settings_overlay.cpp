@@ -4,16 +4,20 @@
 #include "controller_mapping_wizard.h"
 #include "input_bindings.h"
 #include "game_graphics_options.h"
+#include "log_export.h"
 #include "music_attenuation.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "vr/mkw_vr_first_person.h"
 #include "vr/mkw_vr_policy.h"
+#include "vr/openxr_diagnostics.h"
 #include "vr/openxr_integration.h"
 #include "vr/openxr_wii_remote.h"
 #include "wii_remote_input.h"
 
 #include <imgui.h>
+#include <SDL3/SDL_dialog.h>
+#include <SDL3/SDL_error.h>
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_keyboard.h>
@@ -27,8 +31,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <iostream>
+#include <mutex>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -37,6 +44,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <shellapi.h>
+#else
+#include <unistd.h>
 #endif
 
 #include <dolphin/pad.h>
@@ -126,6 +135,7 @@ int g_vrFrameInterpolationMode = [] {
                             kVrInterpolationFps.begin());
 }();
 int g_vrFirstPersonHiddenModel = RuntimeConfigFile::VrFirstPersonHiddenModel();
+bool g_openxrDiagnosticsLogging = RuntimeConfigFile::DiagnosticsOpenXRLogging(false);
 // Config spellings and menu labels for the desktop mirror, index-matched to
 // AuroraStereoMirrorView so the combo selection converts to either directly.
 constexpr std::array<const char*, 5> kVrMirrorViewNames{"normal", "both", "left", "right", "none"};
@@ -1196,6 +1206,147 @@ void DrawVrSettings() {
     }
 }
 
+// Export Logs. SDL shows the folder picker without blocking the game and calls
+// back on a thread of its choosing (its own dialog thread on Windows), where the
+// copy then runs; the menu only reads the outcome through this state.
+struct LogExportState {
+    std::mutex mutex;
+    std::string note;
+    std::string message;
+    bool failed = false;
+};
+LogExportState g_logExport;
+std::atomic_bool g_logExportInProgress{false};
+
+void SetLogExportMessage(std::string message, bool failed) {
+    std::lock_guard lock(g_logExport.mutex);
+    g_logExport.message = std::move(message);
+    g_logExport.failed = failed;
+}
+
+// Captured on the click, so the export describes the moment the player asked.
+std::string BuildLogExportNote() {
+#if defined(_WIN32)
+    const unsigned long pid = ::GetCurrentProcessId();
+#else
+    const auto pid = static_cast<unsigned long>(::getpid());
+#endif
+    std::ostringstream note;
+    note << "Exported by process " << pid << "; its run folder under Logs ends in _pid" << pid << ".\n"
+         << "OpenXR diagnostic logging: " << (g_openxrDiagnosticsLogging ? "on" : "off") << '\n'
+         << "OpenXR running: " << (mkw::vr::OpenXRIsRunning() ? "yes" : "no") << '\n';
+    if (const auto xrError = mkw::vr::OpenXRLastError(); !xrError.empty()) {
+        note << "OpenXR last error: " << xrError << '\n';
+    }
+    return note.str();
+}
+
+void SDLCALL OnLogExportFolderChosen(void*, const char* const* filelist, int) {
+    // SDL's C caller must never see an exception.
+    try {
+        if (filelist == nullptr) {
+            SetLogExportMessage(std::string("Could not open the folder picker: ") + SDL_GetError(), true);
+        } else if (filelist[0] == nullptr) {
+            SetLogExportMessage("Export canceled.", false);
+        } else {
+            std::string note;
+            {
+                std::lock_guard lock(g_logExport.mutex);
+                note = g_logExport.note;
+            }
+            SetLogExportMessage("Exporting...", false);
+            const auto result = log_export::ExportLogs(
+                RuntimeConfigFile::ApplicationDataDirectory() / "Logs", RuntimeConfigFile::ResolveConfigPath(),
+                RuntimeConfigFile::PathFromUtf8(filelist[0]), note, std::chrono::system_clock::now());
+            const std::string destination = RuntimeConfigFile::PathToUtf8(result.destination);
+            if (result.Succeeded()) {
+                SetLogExportMessage("Exported " + std::to_string(result.files_copied) + " files to " + destination,
+                                    false);
+            } else if (!result.destination.empty()) {
+                SetLogExportMessage("Exported " + std::to_string(result.files_copied) + " files to " + destination +
+                                        ", but " + std::to_string(result.files_failed) +
+                                        " could not be copied: " + result.error,
+                                    true);
+            } else {
+                SetLogExportMessage("Export failed: " + result.error, true);
+            }
+            RT_LOG(RT_TAG_RUNTIME) << "Log export to " << destination << ": " << result.files_copied
+                                   << " file(s) copied, " << result.files_failed << " failed"
+                                   << (result.error.empty() ? "" : " (" + result.error + ")") << std::endl;
+        }
+    } catch (const std::exception& exception) {
+        SetLogExportMessage(std::string("Export failed: ") + exception.what(), true);
+    } catch (...) {
+        SetLogExportMessage("Export failed.", true);
+    }
+    g_logExportInProgress.store(false, std::memory_order_release);
+}
+
+void StartLogExport() {
+    bool expected = false;
+    if (!g_logExportInProgress.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return;
+    }
+    {
+        std::lock_guard lock(g_logExport.mutex);
+        g_logExport.note = BuildLogExportNote();
+    }
+    SetLogExportMessage("Choose the folder to export the logs into.", false);
+    // Parented to the game window so the picker opens in front of it. SDL may
+    // call back before returning if the dialog cannot be shown at all.
+    SDL_ShowOpenFolderDialog(&OnLogExportFolderChosen, nullptr, SDL_GetKeyboardFocus(), nullptr, false);
+}
+
+void DrawDiagnosticsSettings() {
+    if (ImGui::Checkbox("OpenXR diagnostic logging", &g_openxrDiagnosticsLogging)) {
+        mkw::vr::diagnostics::SetEnabled(g_openxrDiagnosticsLogging);
+        RuntimeConfigFile::SetDiagnosticsOpenXRLogging(g_openxrDiagnosticsLogging);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Writes VR frame timing to console.log once per second: late, skipped, repeated and\n"
+            "empty (black) frames, how long each frame waited for the game and for rendering,\n"
+            "head-tracking loss, reference-space changes, and the headset's view layout.\n"
+            "Turn it on to report stutter or black frames in VR, and off again afterwards.\n"
+            "Off by default. Applies immediately and is remembered.");
+    }
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
+    if (g_openxrDiagnosticsLogging && !mkw::vr::OpenXRIsRunning()) {
+        ImGui::TextDisabled("OpenXR is not running, so nothing is logged until a VR session starts.");
+    }
+    ImGui::PopTextWrapPos();
+
+    ImGui::Separator();
+    const bool exporting = g_logExportInProgress.load(std::memory_order_acquire);
+    ImGui::BeginDisabled(exporting);
+    if (ImGui::Button("Export Logs")) {
+        StartLogExport();
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(
+            "Choose a folder, and the logs of recent sessions (the last four days, this one\n"
+            "included) are copied into a new WiiCompiled-logs folder there, together with\n"
+            "Config.toml. Zip that folder to attach it to a bug report.");
+    }
+    std::string message;
+    bool failed = false;
+    {
+        std::lock_guard lock(g_logExport.mutex);
+        message = g_logExport.message;
+        failed = g_logExport.failed;
+    }
+    if (!message.empty()) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
+        if (failed) {
+            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%s", message.c_str());
+        } else {
+            ImGui::TextDisabled("%s", message.c_str());
+        }
+        ImGui::PopTextWrapPos();
+    }
+}
+
 void DrawFpsOverlay() {
     AuroraPresentTiming presentTiming{};
     aurora_get_present_timing(&presentTiming);
@@ -1346,6 +1497,11 @@ void DrawTopBar() {
         ImGui::EndMenu();
     }
 
+    if (ImGui::BeginMenu("Diagnostics")) {
+        DrawDiagnosticsSettings();
+        ImGui::EndMenu();
+    }
+
     const float hideWidth = ImGui::CalcTextSize("Hide (F10)").x + ImGui::GetStyle().FramePadding.x * 2.0f;
     ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowWidth() - hideWidth - 8.0f));
     if (ImGui::MenuItem("Hide (F10)")) {
@@ -1446,6 +1602,7 @@ void InitializeRuntimeSettings() noexcept {
     ApplyVrHudVirtualScreen();
     aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
     mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+    mkw::vr::diagnostics::SetEnabled(g_openxrDiagnosticsLogging);
     g_strapInputAccepted.store(false, std::memory_order_relaxed);
     g_startupDismissFrame.store(UINT64_MAX, std::memory_order_relaxed);
     PADBlockInput(false);

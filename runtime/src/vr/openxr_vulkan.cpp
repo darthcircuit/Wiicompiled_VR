@@ -8,6 +8,7 @@
 #define XR_USE_PLATFORM_ANDROID
 
 #include "vr/openxr_vulkan.h"
+#include "vr/openxr_diagnostics.h"
 
 #include <aurora/vulkan_interop.h>
 
@@ -360,6 +361,7 @@ public:
             frame.render_height[1] = frame.render_height[0];
         }
 
+        const diagnostics::Stopwatch acquire_timer;
         for (uint32_t eye = 0; eye < target_count; ++eye) {
             if (!AcquireSwapchain(eye_swapchains_[eye])) {
                 ReleaseAcquiredSwapchains();
@@ -367,6 +369,7 @@ public:
                 return OpenXRBeginStatus::Error;
             }
         }
+        diagnostics::OnSwapchainAcquire(acquire_timer);
 
         std::array<AuroraVulkanStereoTarget, kOpenXREyeCount> targets{};
         const uint32_t slot = next_slot_;
@@ -475,7 +478,11 @@ public:
             AbandonAcquiredSwapchains();
             Fail("Aurora's stereo submission failed after GPU work may have been queued");
         }
+        const diagnostics::Stopwatch release_timer;
         bool release_ok = ReleaseAcquiredSwapchains();
+        if (frame.xr_frame.should_render && frame.xr_frame.views_valid) {
+            diagnostics::OnSwapchainRelease(release_timer);
+        }
         const bool position_valid =
             (frame.xr_frame.view_state_flags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0;
         const bool composition_pose_valid =
@@ -483,6 +490,10 @@ public:
         const bool can_submit = submit_layer && release_ok && frame.xr_frame.should_render &&
                                 frame.xr_frame.views_valid && frame.expects_gpu_submission &&
                                 composition_pose_valid;
+        if (submit_layer && !can_submit) {
+            diagnostics::OnLayerRejected(diagnostics::ClassifyRejectedLayer(
+                release_ok, frame.xr_frame.should_render, frame.xr_frame.views_valid));
+        }
         if (can_submit) {
             // xrEndFrame references the most recently released image of a
             // swapchain, so keep the displayed pair separate from the pair
@@ -493,7 +504,7 @@ public:
             retained_space_serial_ = render_space_serial_;
             have_retained_frame_ = true;
         }
-        const bool end_ok = EndRetainedFrame();
+        const bool end_ok = EndRetainedFrame(can_submit);
 
         frame_active_ = false;
         active_frame_serial_ = 0;
@@ -514,7 +525,7 @@ public:
             frame.xr_frame.serial != active_frame_serial_) {
             return Fail("RepeatFrame received a stale or inactive render token");
         }
-        const bool end_ok = EndRetainedFrame();
+        const bool end_ok = EndRetainedFrame(false);
         frame_active_ = false;
         if (!end_ok) {
             return Fail("OpenXR could not resubmit the retained frame");
@@ -531,17 +542,26 @@ public:
         return true;
     }
 
-    bool EndRetainedFrame() {
+    // fresh: the retained layer was completed for this call rather than repeated.
+    bool EndRetainedFrame(bool fresh) {
         if (!runtime_->IsSessionRunning()) {
             return true;
         }
-        if (retained_session_serial_ != runtime_->SessionRunSerial() ||
-            retained_space_serial_ != runtime_->LastReferenceSpaceChange().serial) {
+        const bool session_changed = retained_session_serial_ != runtime_->SessionRunSerial();
+        if (session_changed || retained_space_serial_ != runtime_->LastReferenceSpaceChange().serial) {
+            if (have_retained_frame_) {
+                diagnostics::OnRetainedLayerDiscarded(session_changed
+                                                          ? diagnostics::DiscardReason::SessionRestarted
+                                                          : diagnostics::DiscardReason::ReferenceSpaceChanged);
+            }
             have_retained_frame_ = false;
         }
         if (!have_retained_frame_ || !active_frame_.should_render) {
+            diagnostics::OnEmptyFrame(!active_frame_.should_render ? diagnostics::EmptyFrameReason::ShouldRenderOff
+                                                                    : diagnostics::EmptyFrameReason::NoRetainedLayer);
             return runtime_->EndFrameWithoutLayers(active_frame_);
         }
+        diagnostics::OnLayer(fresh);
         const auto& frame = retained_frame_;
         if (frame.presentation.mode == OpenXRFrameMode::VirtualScreen) {
             XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};

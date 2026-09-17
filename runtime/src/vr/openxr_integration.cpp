@@ -11,6 +11,7 @@
 #include "vr/mkw_vr_first_person.h"
 #include "vr/mkw_vr_policy.h"
 #include "vr/mkw_vr_instrumentation.h"
+#include "vr/openxr_diagnostics.h"
 #include <aurora/gfx.h>
 
 #include <algorithm>
@@ -23,6 +24,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -254,6 +256,64 @@ void ViewFromBase(const XrPosef& eye_pose, const std::array<float, 3>& base_posi
     output[11] = translation[2] * units_per_meter;
 }
 
+// Distinct names from openxr_runtime.cpp's helpers: both files can share a
+// unity-build translation unit and the same anonymous namespace.
+const char* DiagnosticSpaceName(XrReferenceSpaceType type) noexcept {
+    switch (type) {
+    case XR_REFERENCE_SPACE_TYPE_VIEW:
+        return "VIEW";
+    case XR_REFERENCE_SPACE_TYPE_LOCAL:
+        return "LOCAL";
+    case XR_REFERENCE_SPACE_TYPE_STAGE:
+        return "STAGE";
+    default:
+        return "OTHER";
+    }
+}
+
+const char* DiagnosticBlendModeName(XrEnvironmentBlendMode mode) noexcept {
+    switch (mode) {
+    case XR_ENVIRONMENT_BLEND_MODE_OPAQUE:
+        return "OPAQUE";
+    case XR_ENVIRONMENT_BLEND_MODE_ADDITIVE:
+        return "ADDITIVE";
+    case XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND:
+        return "ALPHA_BLEND";
+    default:
+        return "OTHER";
+    }
+}
+
+// What the runtime reported about the eyes this frame. The cant is the angle
+// between the two eyes' forward axes: zero for parallel displays, and the
+// headset's display tilt on canted ones (Pimax) unless the runtime is asked for
+// parallel projections.
+diagnostics::ViewGeometry DiagnosticViewGeometry(const OpenXRBackendFrame& frame) noexcept {
+    constexpr float kRadiansToDegrees = 57.29577951f;
+    diagnostics::ViewGeometry geometry{};
+    std::array<std::array<float, 3>, kOpenXREyeCount> forward{};
+    for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+        const XrView& view = frame.xr_frame.views[eye];
+        geometry.fov_degrees[eye] = {view.fov.angleLeft * kRadiansToDegrees, view.fov.angleRight * kRadiansToDegrees,
+                                     view.fov.angleUp * kRadiansToDegrees, view.fov.angleDown * kRadiansToDegrees};
+        const auto& q = view.pose.orientation;
+        forward[eye] = Rotate(Normalize({q.x, q.y, q.z, q.w}), {0.0f, 0.0f, -1.0f});
+        geometry.width[eye] = frame.render_width[eye];
+        geometry.height[eye] = frame.render_height[eye];
+    }
+    const float dot = forward[0][0] * forward[1][0] + forward[0][1] * forward[1][1] + forward[0][2] * forward[1][2];
+    geometry.cant_degrees = std::acos(std::clamp(dot, -1.0f, 1.0f)) * kRadiansToDegrees;
+    if ((frame.xr_frame.view_state_flags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0) {
+        const auto& left = frame.xr_frame.views[0].pose.position;
+        const auto& right = frame.xr_frame.views[1].pose.position;
+        const float dx = right.x - left.x;
+        const float dy = right.y - left.y;
+        const float dz = right.z - left.z;
+        geometry.ipd_millimeters = std::sqrt(dx * dx + dy * dy + dz * dz) * 1000.0f;
+    }
+    return geometry;
+}
+
 class OpenXRIntegration final {
 public:
     static OpenXRIntegration& Get() {
@@ -272,6 +332,11 @@ public:
                      kGraphicsBackendName + " submission");
             return OpenXRStartupResult::Unavailable;
         }
+        // The pacing thread is not running here (Shutdown above joined it), so
+        // the sink may be replaced.
+        diagnostics::SetLogSink(
+            [](std::string_view line) { RT_LOG(RT_TAG_RUNTIME) << line << std::endl; });
+        diagnostics::SetEnabled(RuntimeConfigFile::DiagnosticsOpenXRLogging(false));
         requested_ = RuntimeConfigFile::VrEnabled(kVrEnabledDefault);
         ConfigurePolicy(requested_);
         if (!requested_) {
@@ -381,6 +446,10 @@ public:
         WithdrawPublishedFrame();
         aurora_set_stereo_frame_provider(&OpenXRIntegration::ProvideStereoFrame, this);
         provider_registered_ = true;
+        if (convert_display_time_ != nullptr) {
+            diagnostics::SetDisplayTimeConverter(
+                [this](int64_t xr_time) { return static_cast<int64_t>(DisplayTimeNanos(xr_time)); });
+        }
         running_.store(true, std::memory_order_release);
         try {
             pacing_thread_ = std::thread([this] { PacingThread(); });
@@ -431,6 +500,8 @@ public:
         }
         running_.store(false, std::memory_order_release);
         MkwVRPolicySetSessionActive(false);
+        // The converter reads runtime_; the pacing thread has stopped using it.
+        diagnostics::SetDisplayTimeConverter({});
         backend_.reset();
         runtime_.reset();
         prepared_ = false;
@@ -513,6 +584,7 @@ private:
     }
 
     void ResetPreparedObjects() {
+        diagnostics::SetDisplayTimeConverter({});
         ShutdownOrRetainGraphicsObjects();
         input_.reset();
         backend_.reset();
@@ -556,6 +628,7 @@ private:
         if (frame == nullptr) {
             return false;
         }
+        diagnostics::NotePacketConsumed();
         *output = frame->frame;
         return true;
     }
@@ -579,6 +652,7 @@ private:
             if (session_run_serial != applied_session_run_serial_) {
                 applied_session_run_serial_ = session_run_serial;
                 ResetTrackingOrigin();
+                diagnostics::OnSessionStarted();
             }
             if (session_active != session_was_active_) {
                 session_was_active_ = session_active;
@@ -606,8 +680,10 @@ private:
             }
 
             const MkwVRPolicySnapshot policy = MkwVRPolicyGetSnapshot();
+            // Diagnostics lift the cap: a presentation flickering between the
+            // race and the virtual screen is exactly what a report needs to show.
             if ((!presentation_logged || policy.presentation != logged_presentation) &&
-                presentation_log_count < 16) {
+                (presentation_log_count < 16 || diagnostics::Enabled())) {
                 presentation_logged = true;
                 logged_presentation = policy.presentation;
                 ++presentation_log_count;
@@ -655,6 +731,9 @@ private:
             }
 
             UpdateFrameTiming(frame.xr_frame);
+            if (diagnostics::Enabled()) {
+                NoteFrameDiagnostics(frame, immersive);
+            }
             // Both of these read this frame's located head pose and must run
             // before FinishFrame submits a layer built from it.
             ServiceRecenterRequest();
@@ -675,6 +754,7 @@ private:
 
             if (aurora_get_stereo_frame_interpolation() &&
                 !interpolation_pacing_.ShouldRender(frame.xr_frame.predicted_display_time, interpolation_target)) {
+                diagnostics::OnInterpolationSkip();
                 if (!backend_->TryCancelPendingFrame(frame) || !backend_->FinishFrame(frame, false)) {
                     SetError(backend_->LastError());
                     fatal = true;
@@ -690,6 +770,7 @@ private:
                 // the camera's own switch is not observable.
                 BuildPublishedFrame(frame, immersive, policy.EffectiveUnitsPerMeter(),
                                     policy.content_tag);
+                diagnostics::OnPacketPublished();
                 published_.store(&published_frame_, std::memory_order_release);
             }
             aurora_notify_stereo_frame();
@@ -711,9 +792,11 @@ private:
                         WithdrawPublishedFrame();
                         canceled_before_encode = backend_->TryCancelPendingFrame(frame);
                         if (canceled_before_encode) {
+                            diagnostics::OnPacketCanceled();
                             break;
                         }
                     }
+                    diagnostics::OnKeepaliveRepeat();
                     if (!backend_->RepeatFrame(frame)) {
                         SetError(backend_->LastError());
                         fatal = true;
@@ -739,6 +822,7 @@ private:
                 break;
             }
             const bool submit = submission == OpenXRSubmissionStatus::Success;
+            diagnostics::OnSubmission(submit);
             if (!backend_->FinishFrame(frame, submit)) {
                 SetError(backend_->LastError());
                 fatal = true;
@@ -963,6 +1047,72 @@ private:
             timing_start_ = now;
             timing_submissions_ = 0;
         }
+    }
+
+    // Pacing thread, only while diagnostics are on.
+    void NoteFrameDiagnostics(const OpenXRBackendFrame& frame, bool immersive) {
+        const XrViewStateFlags flags = frame.xr_frame.view_state_flags;
+        diagnostics::OnFrameBegun(immersive, frame.xr_frame.should_render, frame.xr_frame.views_valid,
+                                  (flags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0,
+                                  (flags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0);
+        if (diagnostics::ConsumeSessionInfoRequest()) {
+            LogDiagnosticSession(frame);
+        }
+        if (frame.xr_frame.should_render && frame.xr_frame.views_valid) {
+            diagnostics::OnViewGeometry(DiagnosticViewGeometry(frame));
+        }
+    }
+
+    // Everything about the headset and runtime that a pacing report is read
+    // against. Written when logging starts and again for every new session.
+    void LogDiagnosticSession(const OpenXRBackendFrame& frame) const {
+        const auto& info = runtime_->RuntimeInfo();
+        std::ostringstream line;
+        line << "session: runtime '" << info.runtime_name << "' " << XR_VERSION_MAJOR(info.runtime_version) << '.'
+             << XR_VERSION_MINOR(info.runtime_version) << '.' << XR_VERSION_PATCH(info.runtime_version)
+             << ", system '" << info.system_name << "', vendor 0x" << std::hex << info.vendor_id << std::dec
+             << ", orientation tracking " << info.supports_orientation_tracking << ", position tracking "
+             << info.supports_position_tracking << ", max layers " << info.max_layer_count;
+        diagnostics::Info(line.str());
+
+        line.str({});
+        line << "session: " << kGraphicsBackendName << " backend, reference space "
+             << DiagnosticSpaceName(runtime_->AppSpaceType()) << ", blend mode "
+             << DiagnosticBlendModeName(runtime_->EnvironmentBlendMode()) << ", extensions";
+        for (const std::string& extension : runtime_->EnabledExtensions()) {
+            line << ' ' << extension;
+        }
+        diagnostics::Info(line.str());
+
+        line.str({});
+        const auto& views = runtime_->ViewConfiguration();
+        line << "session: recommended eye size " << views[0].properties.recommendedImageRectWidth << 'x'
+             << views[0].properties.recommendedImageRectHeight << " / "
+             << views[1].properties.recommendedImageRectWidth << 'x'
+             << views[1].properties.recommendedImageRectHeight << ", max "
+             << views[0].properties.maxImageRectWidth << 'x' << views[0].properties.maxImageRectHeight
+             << ", render_scale " << runtime_->Config().resolution_scale << ", swapchains "
+             << views[0].render_width << 'x' << views[0].render_height << " / " << views[1].render_width << 'x'
+             << views[1].render_height;
+        diagnostics::Info(line.str());
+
+        line.str({});
+        const uint32_t interpolation = frame_interpolation_fps_.load(std::memory_order_relaxed);
+        line << "session: display period ";
+        if (frame.xr_frame.predicted_display_period > 0) {
+            const double period_ms = static_cast<double>(frame.xr_frame.predicted_display_period) / 1.0e6;
+            line << period_ms << " ms (" << 1000.0 / period_ms << " Hz)";
+        } else {
+            line << "unknown";
+        }
+        line << ", refresh-rate extension " << (get_display_refresh_rate_ != nullptr ? "yes" : "no")
+             << ", display-time conversion " << (convert_display_time_ != nullptr ? "yes" : "no")
+             << ", VR frame interpolation "
+             << (interpolation == 0 ? std::string("off")
+                 : interpolation == 1 ? std::string("auto")
+                                      : std::to_string(interpolation))
+             << (FrameInterpolationAvailable() ? "" : " (unavailable)");
+        diagnostics::Info(line.str());
     }
 
     // Converts the compositor's predicted display time onto the runtime's

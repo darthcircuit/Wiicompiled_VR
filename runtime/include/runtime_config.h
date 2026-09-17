@@ -70,6 +70,9 @@ struct RuntimeUserConfig {
     std::optional<std::string> vrFirstPersonRotation;
     std::optional<std::string> vrRecenterKey;
     std::optional<float> vrLeanBackDegrees;
+    // F10 > Diagnostics: OpenXR pacing and presentation logging in console.log.
+    // Off unless set; it is a bug-report aid, not something to leave running.
+    std::optional<bool> diagnosticsOpenXRLogging;
     std::optional<float> audioVolume;
     std::optional<float> audioMusicVolume;
     std::optional<float> audioSoundEffectsVolume;
@@ -684,6 +687,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
         value && *value >= -1 && *value <= 31) {
         config.vrFirstPersonHiddenModel = static_cast<int32_t>(*value);
     }
+    config.diagnosticsOpenXRLogging = FindConfigValue<bool>(document, "diagnostics", "openxr_logging");
 
     auto readVolume = [&](std::string_view key) -> std::optional<float> {
         auto value = FindConfigFloat(document, "audio", key);
@@ -1336,6 +1340,15 @@ inline std::string VrControllerMode(std::string fallback = kVrControllerModeDefa
 
 inline uint32_t VrFrameInterpolationFps() {
     return mkw::vr::NormalizeFrameInterpolationFps(Get().vrFrameInterpolationFps.value_or(0));
+}
+
+inline bool DiagnosticsOpenXRLogging(bool fallback = false) {
+    return Get().diagnosticsOpenXRLogging.value_or(fallback);
+}
+
+inline bool SetDiagnosticsOpenXRLogging(bool value) {
+    Mutable().diagnosticsOpenXRLogging = value;
+    return WriteSetting("diagnostics", "openxr_logging", value ? "true" : "false");
 }
 
 inline std::string VrFirstPersonRotation(std::string fallback = kVrFirstPersonRotationDefault) {
