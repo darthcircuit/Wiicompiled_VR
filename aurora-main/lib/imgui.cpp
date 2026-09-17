@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cmath>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,10 @@ static bool g_frameDataBuilt = false;
 
 static std::vector<SDL_Texture*> g_sdlTextures;
 static std::vector<wgpu::Texture> g_wgpuTextures;
+
+// Set by the producer, latched by the seal.
+static std::mutex g_stereoOverlayMutex;
+static StereoOverlay g_stereoOverlay;
 
 void remove_legacy_ini_file(const char* basePath) noexcept {
   if (basePath == nullptr || *basePath == '\0') {
@@ -200,6 +205,23 @@ void render(const wgpu::RenderPassEncoder& pass) noexcept {
   }
 }
 
+StereoOverlay latch_stereo_overlay() noexcept {
+  std::lock_guard lock(g_stereoOverlayMutex);
+  return g_stereoOverlay;
+}
+
+bool render_draw_data(const wgpu::RenderPassEncoder& pass, ImDrawData* data) noexcept {
+  ZoneScoped;
+  // The SDL renderer fallback has no render passes to draw into.
+  if (g_useSdlRenderer || data == nullptr || ImGui::GetCurrentContext() == nullptr) {
+    return false;
+  }
+  pass.PushDebugGroup("Aurora: Dear Imgui headset panel");
+  ImGui_ImplWGPU_RenderDrawData(data, pass.Get());
+  pass.PopDebugGroup();
+  return true;
+}
+
 ImTextureID add_texture(uint32_t width, uint32_t height, const uint8_t* data) noexcept {
   if (SDL_Renderer* renderer = window::get_sdl_renderer()) {
     SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, width, height);
@@ -250,5 +272,13 @@ ImTextureID add_texture(uint32_t width, uint32_t height, const uint8_t* data) no
 extern "C" {
 ImTextureID aurora_imgui_add_texture(uint32_t width, uint32_t height, const void* rgba8) {
   return aurora::imgui::add_texture(width, height, static_cast<const uint8_t*>(rgba8));
+}
+
+void aurora_imgui_set_stereo_overlay(ImDrawData* drawData, float widthFraction) {
+  std::lock_guard lock(aurora::imgui::g_stereoOverlayMutex);
+  aurora::imgui::g_stereoOverlay = {
+      .drawData = drawData,
+      .widthFraction = drawData != nullptr ? widthFraction : 0.f,
+  };
 }
 }

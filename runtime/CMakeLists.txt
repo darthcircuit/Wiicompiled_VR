@@ -404,6 +404,14 @@ target_include_directories(mkw_vr_wii_remote_tests PRIVATE "${CMAKE_CURRENT_LIST
 target_compile_features(mkw_vr_wii_remote_tests PRIVATE cxx_std_17)
 add_test(NAME mkw_vr_wii_remote_tests COMMAND mkw_vr_wii_remote_tests)
 
+# The in-headset settings panel's controller chord, release latch, selection,
+# scrolling and canvas mapping, plus the thread bridge they publish through.
+add_executable(mkw_vr_settings_panel_tests tests/vr_settings_panel_tests.cpp src/vr/openxr_settings_panel.cpp)
+target_include_directories(mkw_vr_settings_panel_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
+target_compile_features(mkw_vr_settings_panel_tests PRIVATE cxx_std_17)
+set_target_properties(mkw_vr_settings_panel_tests PROPERTIES UNITY_BUILD OFF)
+add_test(NAME mkw_vr_settings_panel_tests COMMAND mkw_vr_settings_panel_tests)
+
 # Resolve the real local-kart pointer walk against synthetic offline/online rosters.
 add_executable(mkw_vr_player_tests "${CMAKE_CURRENT_LIST_DIR}/tests/vr_player_tests.cpp")
 target_include_directories(mkw_vr_player_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")

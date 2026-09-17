@@ -256,7 +256,7 @@ the app:
 | --- | --- |
 | `debug.wiicompiled.vtxpad 0` | Turns the stride padding off, to re-check a driver update |
 | `debug.wiicompiled.validation 1` | Keeps WebGPU validation and robustness on in release builds |
-| `debug.wiicompiled.inject <n>:<button>` | Presses `a`, `b`, `x`, `y`, `start`, `up`, `down`, `left` or `right` for 12 XR frames each time `<n>` changes. As a Wii Remote, `x`/`y`/`start` are 1/2/+, the directions push the Nunchuk stick, and `home`, `c` and `z` also exist |
+| `debug.wiicompiled.inject <n>:<button>` | Presses `a`, `b`, `x`, `y`, `start`, `up`, `down`, `left` or `right` for 12 XR frames each time `<n>` changes. As a Wii Remote, `x`/`y`/`start` are 1/2/+, the directions push the Nunchuk stick, and `home`, `c` and `z` also exist. `panel` clicks both thumbsticks, opening or closing the settings panel (see `OPENXR.md`) |
 | `debug.wiicompiled.fpslog 1` | Logs the game's rendered frame rate every 5 s. The compositor's `VrApi` log line gives headset FPS, `GPU%`, `CPU%` and app GPU time (`App=`) |
 
 The injector makes headset tests possible with nobody wearing the headset.

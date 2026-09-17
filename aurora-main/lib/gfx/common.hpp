@@ -400,6 +400,8 @@ bool get_stereo_skip_copy_clears() noexcept;
 // the game's presented aspect ratio. Also live.
 void set_stereo_hud_screen(bool enabled, float width, float distance) noexcept;
 bool get_stereo_hud_screen_enabled() noexcept;
+// The screen's width and distance in world units, kept while the 2D layer is off it.
+void get_stereo_hud_screen_size(float& width, float& distance) noexcept;
 
 // What the desktop window presents while a stereo provider is feeding a
 // headset. Live, and read once per presentation group by the frame worker.

@@ -245,6 +245,70 @@ TEST(StereoReplayTest, HudScreenParksRasterDepthAtMidrangeUnderHeadMotion) {
   }
 }
 
+TEST(StereoReplayTest, OverlayPanelIsCentredOnTheVirtualScreen) {
+  // Three quarters of a 1200-unit screen, 1000 ahead, with a 4:3 panel.
+  const auto panel = overlay_panel_on_screen(1200.0f, 1000.0f, 0.75f, 4.0f / 3.0f);
+  EXPECT_FLOAT_EQ(panel.halfWidth, 450.0f);
+  EXPECT_FLOAT_EQ(panel.halfHeight, 337.5f);
+  EXPECT_FLOAT_EQ(panel.distance, 1000.0f);
+  EXPECT_TRUE(panel.valid());
+  EXPECT_FALSE(overlay_panel_on_screen(1200.0f, 1000.0f, 0.75f, 0.0f).valid());
+  EXPECT_FALSE(overlay_panel_on_screen(1200.0f, 0.0f, 0.75f, 4.0f / 3.0f).valid());
+}
+
+TEST(StereoReplayTest, OverlayPanelCornersFollowTheEyeChain) {
+  Mat4x4<float> eyeFrustum{};
+  eyeFrustum.m0 = {1.15f, 0.0f, 0.08f, 0.0f};
+  eyeFrustum.m1 = {0.0f, 1.02f, -0.03f, 0.0f};
+  const float angle = 0.3f;
+  const float c = std::cos(angle);
+  const float s = std::sin(angle);
+  Mat3x4<float> viewFromCenter{};
+  viewFromCenter.m0 = {c, 0.0f, s, 15.0f};
+  viewFromCenter.m1 = {0.0f, 1.0f, 0.0f, -4.0f};
+  viewFromCenter.m2 = {-s, 0.0f, c, 7.0f};
+
+  const OverlayPanel panel{.halfWidth = 450.0f, .halfHeight = 337.5f, .distance = 1000.0f};
+  const auto composed = compose_overlay_panel_projection(eyeFrustum, viewFromCenter, panel);
+
+  const std::array<Vec4<float>, 5> corners{{
+      {-1.0f, 1.0f, 0.0f, 1.0f},
+      {1.0f, 1.0f, 0.0f, 1.0f},
+      {-1.0f, -1.0f, 0.0f, 1.0f},
+      {1.0f, -1.0f, 0.0f, 1.0f},
+      {0.0f, 0.0f, 0.0f, 1.0f},
+  }};
+  for (const auto& corner : corners) {
+    // Top left is (-1, +1): the panel's +y is up, like the screen it sits on.
+    const Vec4<float> centerPoint{corner[0] * panel.halfWidth, corner[1] * panel.halfHeight, -panel.distance, 1.0f};
+    const float eyeX = dot4(viewFromCenter.m0, centerPoint);
+    const float eyeY = dot4(viewFromCenter.m1, centerPoint);
+    const float eyeZ = dot4(viewFromCenter.m2, centerPoint);
+    const float w = dot4(composed.m3, corner);
+    EXPECT_NEAR(dot4(composed.m0, corner), eyeFrustum.m0[0] * eyeX + eyeFrustum.m0[2] * eyeZ, 1e-2f);
+    EXPECT_NEAR(dot4(composed.m1, corner), eyeFrustum.m1[1] * eyeY + eyeFrustum.m1[2] * eyeZ, 1e-2f);
+    EXPECT_NEAR(w, -eyeZ, 1e-2f);
+    ASSERT_GT(w, 0.0f);
+    EXPECT_NEAR(dot4(composed.m2, corner) / w, 0.5f, 1e-5f);
+  }
+}
+
+TEST(StereoReplayTest, OverlayPanelOnAFlatEyeKeepsItsAspect) {
+  // A 4:3 panel three quarters across a 2064x2208 eye image.
+  const float imageAspect = 2064.0f / 2208.0f;
+  const auto flat = overlay_panel_flat_projection(0.75f, 4.0f / 3.0f, imageAspect);
+  const Vec4<float> topRight{1.0f, 1.0f, 0.0f, 1.0f};
+  const float ndcX = dot4(flat.m0, topRight) / dot4(flat.m3, topRight);
+  const float ndcY = dot4(flat.m1, topRight) / dot4(flat.m3, topRight);
+  EXPECT_FLOAT_EQ(ndcX, 0.75f);
+  // In pixels: 0.75 * 2064 wide over ndcY * 2208 tall is the panel's 4:3.
+  EXPECT_NEAR((ndcX * 2064.0f) / (ndcY * 2208.0f), 4.0f / 3.0f, 1e-4f);
+  EXPECT_FLOAT_EQ(dot4(flat.m2, topRight), 0.5f);
+  const Vec4<float> centre{0.0f, 0.0f, 0.0f, 1.0f};
+  EXPECT_FLOAT_EQ(dot4(flat.m0, centre), 0.0f);
+  EXPECT_FLOAT_EQ(dot4(flat.m1, centre), 0.0f);
+}
+
 Mat3x4<float> identity3x4() {
   Mat3x4<float> m{};
   m.m0 = {1.0f, 0.0f, 0.0f, 0.0f};

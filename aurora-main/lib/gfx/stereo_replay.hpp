@@ -306,4 +306,62 @@ inline Mat4x4<float> compose_hud_screen_projection(const Mat4x4<float>& eyeFrust
   return out;
 }
 
+// The headset settings panel (aurora_imgui_set_stereo_overlay): a rectangle
+// centred on the virtual screen, in the same world units as the screen.
+struct OverlayPanel {
+  float halfWidth = 0.0f;
+  float halfHeight = 0.0f;
+  float distance = 0.0f;
+
+  [[nodiscard]] bool valid() const noexcept { return halfWidth > 0.0f && halfHeight > 0.0f && distance > 0.0f; }
+};
+
+// `widthFraction` of a virtual screen `screenWidth` across and `screenDistance`
+// ahead, its height following the panel's own aspect.
+inline OverlayPanel overlay_panel_on_screen(float screenWidth, float screenDistance, float widthFraction,
+                                            float panelAspect) noexcept {
+  if (!(panelAspect > 0.0f)) {
+    return {};
+  }
+  const float halfWidth = 0.5f * screenWidth * widthFraction;
+  return {.halfWidth = halfWidth, .halfHeight = halfWidth / panelAspect, .distance = screenDistance};
+}
+
+// Clip position of a point on the panel for one eye of an immersive frame, as a
+// matrix applied to (x, y, 0, 1) with x and y running -1..1 across the panel,
+// +y up. It is the 2D layer's chain with the panel's corners in place of a
+// game draw's NDC, so the panel sits exactly where the race HUD's screen does.
+// The panel is drawn over the finished eye with no depth test, so its depth is
+// simply parked mid-volume.
+inline Mat4x4<float> compose_overlay_panel_projection(const Mat4x4<float>& eyeFrustum,
+                                                      const Mat3x4<float>& viewFromCenter,
+                                                      const OverlayPanel& panel) noexcept {
+  Mat4x4<float> corners{};
+  corners.m0 = {1.0f, 0.0f, 0.0f, 0.0f};
+  corners.m1 = {0.0f, 1.0f, 0.0f, 0.0f};
+  corners.m3 = {0.0f, 0.0f, 0.0f, 1.0f};
+  const HudScreen screen{.halfWidth = panel.halfWidth, .halfHeight = panel.halfHeight, .distance = panel.distance};
+  auto out = compose_hud_screen_projection(eyeFrustum, viewFromCenter, screen, corners);
+  for (size_t i = 0; i < 4; ++i) {
+    out.m2[i] = 0.5f * out.m3[i];
+  }
+  return out;
+}
+
+// The same panel on a virtual-screen eye image, which the runtime shows as a
+// quad layer the screen's width across: a centred rectangle `widthFraction` of
+// the image's width, with the panel's aspect.
+inline Mat4x4<float> overlay_panel_flat_projection(float widthFraction, float panelAspect,
+                                                   float imageAspect) noexcept {
+  Mat4x4<float> out{};
+  if (!(panelAspect > 0.0f) || !(imageAspect > 0.0f)) {
+    return out;
+  }
+  out.m0 = {widthFraction, 0.0f, 0.0f, 0.0f};
+  out.m1 = {0.0f, widthFraction * imageAspect / panelAspect, 0.0f, 0.0f};
+  out.m2 = {0.0f, 0.0f, 0.0f, 0.5f};
+  out.m3 = {0.0f, 0.0f, 0.0f, 1.0f};
+  return out;
+}
+
 } // namespace aurora::gfx::stereo_replay

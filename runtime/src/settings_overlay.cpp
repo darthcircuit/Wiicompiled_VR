@@ -12,9 +12,11 @@
 #include "vr/mkw_vr_policy.h"
 #include "vr/openxr_diagnostics.h"
 #include "vr/openxr_integration.h"
+#include "vr/openxr_settings_panel.h"
 #include "vr/openxr_wii_remote.h"
 #include "wii_remote_input.h"
 
+#include <aurora/imgui.h>
 #include <imgui.h>
 #include <SDL3/SDL_dialog.h>
 #include <SDL3/SDL_error.h>
@@ -28,6 +30,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cfloat>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -79,6 +82,12 @@ const char* GraphicsApiDisplayName() {
     case BACKEND_AUTO: return "Automatic";
     }
     return "Unknown";
+}
+
+// Fixed widths in the menus are written for the desktop bar's 13 px font. The
+// headset's settings panel draws the same menus with a larger one.
+float Scaled(float pixels) {
+    return pixels * ImGui::GetFontSize() / 13.0f;
 }
 
 bool g_topBarVisible = false;
@@ -364,7 +373,7 @@ void DrawWiiRemoteAccelerometer(uint32_t port) {
     // and it falls back to a nominal zero point, leaving a small per-axis bias;
     // measured here with the remote at rest.
     if (WiiRemoteInput::IsAccelCalibrating()) {
-        ImGui::ProgressBar(WiiRemoteInput::AccelCalibrationProgress(), ImVec2(220.0f, 0.0f), "Hold still...");
+        ImGui::ProgressBar(WiiRemoteInput::AccelCalibrationProgress(), ImVec2(Scaled(220.0f), 0.0f), "Hold still...");
     } else if (ImGui::Button("Calibrate (remote lying flat, buttons up)")) {
         WiiRemoteInput::StartAccelCalibration(port);
     }
@@ -492,7 +501,7 @@ int ExpressionResizeCallback(ImGuiInputTextCallbackData* data) {
 
 void DrawExpressionSettings() {
     ImGui::SeparatorText("Expressions (Dolphin syntax)");
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 440.0f);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + Scaled(440.0f));
     ImGui::TextDisabled(
         "Optional. An expression overrides nothing: its result is combined with the "
         "button mapping above. Operators ! & | ^ and functions if, min, max, clamp, "
@@ -538,7 +547,7 @@ void DrawExpressionSettings() {
     for (size_t i = 0; i < InputBindings::kControls.size(); ++i) {
         ImGui::PushID(static_cast<int>(i) + 2000);
         std::string& text = buffers[i];
-        ImGui::SetNextItemWidth(300.0f);
+        ImGui::SetNextItemWidth(Scaled(300.0f));
         if (ImGui::InputText(InputBindings::kControls[i].label, text.data(), text.capacity() + 1,
                              ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackResize,
                              ExpressionResizeCallback, &text)) {
@@ -708,7 +717,7 @@ void DrawControllerSettings() {
 
         const NativeButtonItem& current = NativeButtonForValue(mappingIt->nativeButton);
         ImGui::PushID(static_cast<int>(i));
-        ImGui::SetNextItemWidth(190.0f);
+        ImGui::SetNextItemWidth(Scaled(190.0f));
         if (ImGui::BeginCombo("##primary", current.label)) {
             for (const auto& candidate : kNativeButtons) {
                 const bool selected = candidate.nativeButton == mappingIt->nativeButton;
@@ -741,7 +750,7 @@ void DrawControllerSettings() {
                 ImGui::TextUnformatted("or");
                 ImGui::SameLine();
                 const char* altLabel = altBound ? NativeButtonForValue(altIt->nativeButton).label : "None";
-                ImGui::SetNextItemWidth(190.0f);
+                ImGui::SetNextItemWidth(Scaled(190.0f));
                 if (ImGui::BeginCombo("##alt", altLabel)) {
                     for (const auto& candidate : kNativeButtons) {
                         const bool isNone = candidate.nativeButton == PAD_NATIVE_BUTTON_INVALID;
@@ -772,7 +781,7 @@ void DrawControllerSettings() {
 }
 
 void DrawAudioSettings() {
-    ImGui::SetNextItemWidth(220.0f);
+    ImGui::SetNextItemWidth(Scaled(220.0f));
     if (ImGui::SliderInt("Master", &g_audioVolumePercent, 0, 100, "%d%%")) {
         const float volume = static_cast<float>(g_audioVolumePercent) / 100.0f;
         AudioBackend::Instance().SetMasterVolume(volume);
@@ -918,7 +927,7 @@ void DrawGraphicsSettings() {
             aurora_set_display_mode(AURORA_DISPLAY_MODE_EXCLUSIVE);
         }
     }
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + Scaled(380.0f));
     ImGui::TextDisabled("Frame interpolation is experimental, you might find visual artifacts");
     ImGui::PopTextWrapPos();
     if (ImGui::Checkbox("Disable copy filter", &g_disableCopyFilter)) {
@@ -962,6 +971,19 @@ void DrawVrSettings() {
             "desktop view, the eye choices mirror what you are actually seeing in the headset, "
             "and None leaves the window black. Menus reach the headset as a screen showing this "
             "same desktop image, so the eye choices only differ from Normal during a race.");
+    }
+    ImGui::BeginDisabled(!mkw::vr::OpenXRIsRunning());
+    bool settingsPanelOpen = mkw::vr::OpenXRSettingsPanelOpen();
+    if (ImGui::Checkbox("Show these settings in the headset", &settingsPanelOpen)) {
+        mkw::vr::OpenXRSetSettingsPanelOpen(settingsPanelOpen);
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(
+            "Opens these settings on a panel in front of you, in menus and races alike.\n"
+            "In the headset, clicking both thumbsticks together opens and closes it too.\n"
+            "Aim at it and pull a trigger to change a setting; push a thumbstick to scroll.\n"
+            "While it is open the game does not see the VR controllers.");
     }
     if (ImGui::Combo("VR controllers", &g_vrControllerMode, kVrControllerModeLabels.data(),
                      static_cast<int>(kVrControllerModeLabels.size()))) {
@@ -1035,7 +1057,7 @@ void DrawVrSettings() {
             "Wii's reused EFB for the next frame; an eye attachment is built fresh, so "
             "replaying it only erases the eye.");
     }
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + Scaled(380.0f));
     ImGui::TextDisabled(
         "Both apply on the next frame. Turning either off restores the raw replay and is "
         "expected to black out the eyes.");
@@ -1139,7 +1161,7 @@ void DrawVrSettings() {
         RuntimeConfigFile::SetVrFirstPersonHeadRightMeters(g_vrFirstPersonHeadRight);
         mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
     }
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + Scaled(380.0f));
     ImGui::TextDisabled("Where the head sits in the kart's own frame.");
     ImGui::PopTextWrapPos();
     constexpr std::array<const char*, 3> kRotationLabels{"Yaw only", "Yaw + Pitch", "Full rotation"};
@@ -1310,7 +1332,7 @@ void DrawDiagnosticsSettings() {
             "Turn it on to report stutter or black frames in VR, and off again afterwards.\n"
             "Off by default. Applies immediately and is remembered.");
     }
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + Scaled(380.0f));
     if (g_openxrDiagnosticsLogging && !mkw::vr::OpenXRIsRunning()) {
         ImGui::TextDisabled("OpenXR is not running, so nothing is logged until a VR session starts.");
     }
@@ -1337,7 +1359,7 @@ void DrawDiagnosticsSettings() {
         failed = g_logExport.failed;
     }
     if (!message.empty()) {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + Scaled(380.0f));
         if (failed) {
             ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%s", message.c_str());
         } else {
@@ -1444,13 +1466,7 @@ void DrawStartupScreen() {
     ImGui::PopStyleColor();
 }
 
-void DrawTopBar() {
-    if (!g_topBarVisible || !ImGui::BeginMainMenuBar()) {
-        return;
-    }
-
-    ImGui::TextUnformatted("WiiCompiled");
-    ImGui::Separator();
+void DrawResolutionMenu() {
     const auto resolutionIt = std::find_if(kResolutions.begin(), kResolutions.end(), [](const ResolutionItem& item) {
         return std::fabs(item.scale - g_resolutionScale) < 0.001f;
     });
@@ -1469,6 +1485,16 @@ void DrawTopBar() {
         }
         ImGui::EndMenu();
     }
+}
+
+void DrawTopBar() {
+    if (!g_topBarVisible || !ImGui::BeginMainMenuBar()) {
+        return;
+    }
+
+    ImGui::TextUnformatted("WiiCompiled");
+    ImGui::Separator();
+    DrawResolutionMenu();
 
     if (ImGui::BeginMenu("Graphics")) {
         DrawGraphicsSettings();
@@ -1573,6 +1599,143 @@ void PersistDisplayModeIfChanged() {
     }
     g_displayMode = active;
     RuntimeConfigFile::SetDisplayMode(std::string(kDisplayModeConfigNames[static_cast<size_t>(active)]));
+}
+
+// The headset's settings panel (vr/openxr_settings_panel.h): the same menus as
+// the F10 bar, drawn with an ImGui context of its own at a size fixed in panel
+// pixels, operated by the VR controllers' pointer and handed to Aurora, which
+// lays it over the eyes. The desktop context is untouched, so the F10 bar and
+// the panel can both be open.
+struct VrSettingsPanel {
+    ImGuiContext* context = nullptr;
+    Clock::time_point lastFrame{};
+    bool selectHeld = false;
+};
+VrSettingsPanel g_vrSettingsPanel;
+
+ImGuiContext* CreateVrSettingsPanelContext() {
+    ImGuiContext* const desktop = ImGui::GetCurrentContext();
+    ImGuiContext* const context = ImGui::CreateContext();
+    ImGui::SetCurrentContext(context);
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.LogFilename = nullptr;
+    // No platform backend draws a cursor for it, and nothing else shows where
+    // the controller is aiming.
+    io.MouseDrawCursor = true;
+    // Aurora's WebGPU backend, which renders this context's draw data, honours it.
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
+    // The default font rasterised at the panel's scale rather than magnified,
+    // with an atlas of its own so the desktop font texture is left alone.
+    ImFontConfig font;
+    font.SizePixels = 13.0f * mkw::vr::kSettingsPanelUiScale;
+    io.Fonts->AddFontDefault(&font);
+    unsigned char* pixels = nullptr;
+    int width = 0;
+    int height = 0;
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    io.Fonts->SetTexID(aurora_imgui_add_texture(static_cast<uint32_t>(width), static_cast<uint32_t>(height), pixels));
+    io.Fonts->ClearTexData();
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.ScaleAllSizes(mkw::vr::kSettingsPanelUiScale);
+    // Nothing behind the panel is meant to be read through it.
+    style.Colors[ImGuiCol_WindowBg].w = 0.97f;
+    style.Colors[ImGuiCol_PopupBg].w = 0.98f;
+    ImGui::SetCurrentContext(desktop);
+    return context;
+}
+
+void DrawVrSettingsPanelWindow() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->Pos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(viewport->Size, ImGuiCond_Always);
+    constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
+    if (ImGui::Begin("WiiCompiled settings", nullptr, kFlags)) {
+        ImGui::TextUnformatted("WiiCompiled settings");
+        const ImGuiStyle& style = ImGui::GetStyle();
+        const float recenterWidth = ImGui::CalcTextSize("Recenter view").x + style.FramePadding.x * 2.0f;
+        const float closeWidth = ImGui::CalcTextSize("Close").x + style.FramePadding.x * 2.0f;
+        ImGui::SameLine(ImGui::GetContentRegionMax().x - recenterWidth - closeWidth - style.ItemSpacing.x);
+        if (ImGui::Button("Recenter view")) {
+            mkw::vr::OpenXRRequestRecenter();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close")) {
+            mkw::vr::OpenXRSetSettingsPanelOpen(false);
+        }
+        ImGui::TextDisabled("Aim and pull a trigger to change a setting, push a thumbstick to scroll.");
+        ImGui::TextDisabled("Click both thumbsticks or press Menu to close. The game does not see the controllers meanwhile.");
+        ImGui::Separator();
+        if (ImGui::BeginTabBar("Settings")) {
+            const auto tab = [](const char* label, void (*draw)()) {
+                if (ImGui::BeginTabItem(label)) {
+                    // Its own scrolling region, so the header stays in view.
+                    ImGui::BeginChild("Contents");
+                    draw();
+                    ImGui::EndChild();
+                    ImGui::EndTabItem();
+                }
+            };
+            tab("VR", DrawVrSettings);
+            tab("Graphics", [] {
+                DrawResolutionMenu();
+                ImGui::Separator();
+                DrawGraphicsSettings();
+            });
+            tab("Controllers", DrawControllerSettings);
+            tab("Audio", DrawAudioSettings);
+            tab("Diagnostics", DrawDiagnosticsSettings);
+            ImGui::EndTabBar();
+        }
+    }
+    ImGui::End();
+}
+
+// Called once per presented frame after the desktop menus, with the frame
+// worker done: the draw data handed to Aurora must stay put until the next
+// frame is encoded, and only the next call here rebuilds it.
+void DrawVrSettingsPanel() {
+    if (!mkw::vr::OpenXRIsRunning() || !mkw::vr::OpenXRSettingsPanelOpen()) {
+        aurora_imgui_set_stereo_overlay(nullptr, 0.0f);
+        return;
+    }
+    VrSettingsPanel& panel = g_vrSettingsPanel;
+    if (panel.context == nullptr) {
+        panel.context = CreateVrSettingsPanelContext();
+    }
+    const mkw::vr::OpenXRSettingsPanelPointer pointer = mkw::vr::OpenXRTakeSettingsPanelPointer();
+    const Clock::time_point now = Clock::now();
+    float deltaSeconds = 1.0f / 60.0f;
+    if (panel.lastFrame != Clock::time_point{}) {
+        deltaSeconds = std::clamp(std::chrono::duration<float>(now - panel.lastFrame).count(), 1.0e-4f, 0.25f);
+    }
+    panel.lastFrame = now;
+
+    ImGuiContext* const desktop = ImGui::GetCurrentContext();
+    ImGui::SetCurrentContext(panel.context);
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(mkw::vr::kSettingsPanelWidthPixels, mkw::vr::kSettingsPanelHeightPixels);
+    io.DeltaTime = deltaSeconds;
+    if (pointer.valid) {
+        io.AddMousePosEvent(pointer.x, pointer.y);
+    } else {
+        io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+    }
+    if (pointer.select != panel.selectHeld) {
+        io.AddMouseButtonEvent(ImGuiMouseButton_Left, pointer.select);
+        panel.selectHeld = pointer.select;
+    }
+    if (pointer.wheel != 0.0f) {
+        io.AddMouseWheelEvent(0.0f, pointer.wheel);
+    }
+    ImGui::NewFrame();
+    DrawVrSettingsPanelWindow();
+    ImGui::Render();
+    ImDrawData* const drawData = ImGui::GetDrawData();
+    ImGui::SetCurrentContext(desktop);
+    aurora_imgui_set_stereo_overlay(drawData, mkw::vr::kSettingsPanelWidthFraction);
 }
 } // namespace
 
@@ -1685,6 +1848,7 @@ void Draw() noexcept {
     PADBlockInput(inputBlocked);
     InputBindings::SetInputBlocked(inputBlocked);
     DrawStartupScreen();
+    DrawVrSettingsPanel();
 }
 
 bool StartupScreenVisible() noexcept {

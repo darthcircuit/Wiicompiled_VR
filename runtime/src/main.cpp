@@ -962,6 +962,31 @@ constexpr DWORD kCppExceptionCodeMsvc = 0xE06D7363;
 constexpr DWORD kAsanFatalAppExit = 0x40000015; // STATUS_FATAL_APP_EXIT
 LONG ReportFatalSehAndExit(EXCEPTION_POINTERS* info);
 
+// Exceptions the processor itself raises for the faulting instruction.
+bool IsCpuFaultException(DWORD code) noexcept {
+    switch (code) {
+    case EXCEPTION_ACCESS_VIOLATION:
+    case EXCEPTION_IN_PAGE_ERROR:
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+    case EXCEPTION_PRIV_INSTRUCTION:
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+    case EXCEPTION_INT_OVERFLOW:
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+    case EXCEPTION_DATATYPE_MISALIGNMENT:
+    case EXCEPTION_STACK_OVERFLOW:
+    case EXCEPTION_FLT_DENORMAL_OPERAND:
+    case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+    case EXCEPTION_FLT_INEXACT_RESULT:
+    case EXCEPTION_FLT_INVALID_OPERATION:
+    case EXCEPTION_FLT_OVERFLOW:
+    case EXCEPTION_FLT_STACK_CHECK:
+    case EXCEPTION_FLT_UNDERFLOW:
+        return true;
+    default:
+        return false;
+    }
+}
+
 void ReportStructuredException(EXCEPTION_POINTERS* info) {
     if (!info || !info->ExceptionRecord) {
         RT_LOG(RT_TAG_RUNTIME) << "Structured exception occurred, but no diagnostic info was captured." << std::endl;
@@ -1051,22 +1076,15 @@ LONG CALLBACK SehLogger(EXCEPTION_POINTERS* info) {
     if (g_suppressSehReporting) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    // Let C++ exceptions propagate to std::terminate so we can log their what().
-    if (info->ExceptionRecord->ExceptionCode == kCppExceptionCodeGcc ||
-        info->ExceptionRecord->ExceptionCode == kCppExceptionCodeMsvc) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-    if (info->ExceptionRecord->ExceptionCode == 0x40010006 || // DBG_PRINTEXCEPTION_C
-        info->ExceptionRecord->ExceptionCode == 0x4001000A || // DBG_PRINTEXCEPTION_WIDE_C (OutputDebugStringW)
-        info->ExceptionRecord->ExceptionCode == 0x406D1388 || // SetThreadName
-        info->ExceptionRecord->ExceptionCode == kAsanFatalAppExit) { // ASan reporting - let it print first
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-    // Software-raised exceptions (customer bit set) are used for internal control flow by
-    // system DLLs (e.g. msxml6 while mscms parses a display colour profile) and are caught
-    // by their own frame handlers. Only hardware faults are fatal at first chance; anything
-    // else that truly goes unhandled reaches UnhandledSehFilter.
-    if ((info->ExceptionRecord->ExceptionCode & 0x20000000u) != 0) {
+    // This handler sees every exception on every thread before any frame handler
+    // does, so only CPU faults are fatal here. Everything else is raised in
+    // software and is often caught by its own frames: C++ exceptions (left to
+    // reach std::terminate so their what() is logged), OutputDebugString,
+    // SetThreadName, ASan reports, msxml6's customer codes while mscms parses a
+    // display colour profile, and RPC's 0x6BA (RPC_S_SERVER_UNAVAILABLE) inside
+    // the shell folder picker behind F10 > Diagnostics > Export Logs. Any of
+    // them that truly goes unhandled still reaches UnhandledSehFilter.
+    if (!IsCpuFaultException(info->ExceptionRecord->ExceptionCode)) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
     return ReportFatalSehAndExit(info);

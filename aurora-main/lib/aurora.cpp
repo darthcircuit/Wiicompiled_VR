@@ -10,6 +10,7 @@
 #include "stereo.hpp"
 #include "stereo_mirror.hpp"
 #include "stereo_interpolation.hpp"
+#include "stereo_overlay.hpp"
 #include "webgpu/gpu.hpp"
 #include <webgpu/webgpu_cpp.h>
 #endif
@@ -1613,6 +1614,7 @@ void shutdown() noexcept {
   g_stereoEyeTargets = {};
   g_stereoMirrorState.Reset();
   g_presentationImagePools = {};
+  stereo_overlay::shutdown();
   imgui::shutdown();
   gfx::shutdown();
   webgpu::shutdown();
@@ -1734,6 +1736,7 @@ struct SealedFrameContext {
   bool replayInterpolatedFrames = false;
   std::optional<AuroraStereoFrame> stereoInput;
   bool retainStereo = false;
+  imgui::StereoOverlay stereoOverlay;
 };
 
 // Worker-owned scene state. A separate buffer generation check protects against
@@ -1779,6 +1782,9 @@ void run_retained_stereo_frame(gfx::SealedFrame& sealedFrame) noexcept {
     return;
   for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
     gfx::render_stereo_eye(sealedFrame, encoder, replay, eye, false);
+    // The panel texture from the last sealed frame; its draw data is not ours to touch here.
+    stereo_overlay::composite_immersive(encoder, g_stereoEyeTargets[eye].output().view, replay.eyes[eye].projection,
+                                        replay.eyes[eye].viewFromCenter, eye);
   }
   const auto sink = run_stereo_sink(encoder, input->frameToken, g_retainedStereo.logicalFrame, input->mode);
   const auto buffer = encoder.Finish();
@@ -1847,6 +1853,8 @@ void seal_frame_locked(gfx::SealedFrame& sealedFrame, SealedFrameContext& ctx, u
   // ImGui draw lists are built once per frame and replayed by each slot's ImGui pass, which is why
   // the next ImGui frame cannot start until the encode phase is done.
   imgui::render_frame_data();
+  // The headset panel's draw data follows the same rule on the host's side.
+  ctx.stereoOverlay = imgui::latch_stereo_overlay();
   // Drop the sealed frame's lazy RAM-readback requests while the producer is still excluded; it
   // starts registering the next frame's as soon as SEALED is published.
   gfx::efb_ram::cancel();
@@ -1923,6 +1931,15 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
     }
   };
 
+  // Ahead of every other ImGui pass of this frame: the ImGui backend keeps one projection uniform,
+  // and the headset panel's canvas is not the desktop's size, so its pass has to reach the queue
+  // before a desktop pass rewrites that uniform. The eyes below sample the texture it fills.
+  if (const auto panel = stereo_overlay::prepare(stereo_frame_provider_active() ? ctx.stereoOverlay.drawData : nullptr,
+                                                 ctx.stereoOverlay.widthFraction)) {
+    std::lock_guard submitLock(g_queueSubmitMutex);
+    g_queue.Submit(1, &panel);
+  }
+
   if (ctx.replayInterpolatedFrames) {
     for (uint32_t interpolatedFrame = 0; interpolatedFrame < ctx.interpolatedFrameCount; ++interpolatedFrame) {
       gfx::render(sealedFrame, encoder, static_cast<int32_t>(interpolatedFrame), false);
@@ -1976,6 +1993,9 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
     for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
       gfx::render_stereo_eye(sealedFrame, encoder, *ctx.stereoReplay, eye,
                              !ctx.retainStereo && eye + 1 == AURORA_STEREO_EYE_COUNT);
+      stereo_overlay::composite_immersive(encoder, g_stereoEyeTargets[eye].output().view,
+                                          ctx.stereoReplay->eyes[eye].projection,
+                                          ctx.stereoReplay->eyes[eye].viewFromCenter, eye);
     }
   }
 
@@ -2003,6 +2023,8 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
     };
     for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
       encode_virtual_screen_eye(encoder, completedMono, eye);
+      const auto& output = g_stereoEyeTargets[eye].output();
+      stereo_overlay::composite_flat(encoder, output.view, output.size, eye);
     }
     if (mirrorPlan == MirrorPlan::Black && !headsetOnly) {
       encode_presentation_snapshot(encoder, ctx.presentSource, *finalImage, true, MirrorPlan::Black);

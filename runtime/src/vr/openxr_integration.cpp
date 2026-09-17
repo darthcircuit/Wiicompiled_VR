@@ -741,7 +741,8 @@ private:
             if (input_ != nullptr) {
                 // After the screen is placed, so the pointer aims at this
                 // frame's screen rather than the previous one's.
-                input_->Sync(frame.xr_frame.predicted_display_time, PointerScreen(frame, policy, immersive));
+                input_->Sync(frame.xr_frame.predicted_display_time, PointerScreen(frame, policy, immersive),
+                             SettingsPanelScreen(frame, policy, immersive));
             }
 
             if (!frame.expects_gpu_submission) {
@@ -951,55 +952,19 @@ private:
         if (!aurora_get_stereo_screen_aspects(&picture_aspect, &snapshot_aspect)) {
             return screen;
         }
-        const OpenXRFrame& xr_frame = frame.xr_frame;
-        const bool views_usable = xr_frame.views_valid &&
-                                  (xr_frame.view_state_flags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0;
-        const bool position_usable =
-            views_usable && (xr_frame.view_state_flags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0;
 
         if (immersive) {
-            const float distance = policy.config.hud_distance_meters;
-            const float width = policy.config.hud_width_meters;
-            if (!aurora_get_stereo_hud_screen_enabled() || !(distance > 0.0f) || !(width > 0.0f)) {
+            if (!aurora_get_stereo_hud_screen_enabled() || !(policy.config.hud_width_meters > 0.0f) ||
+                !RaceScreenPose(frame, policy, screen.pose)) {
                 return screen;
             }
-            std::array<float, 3> base{};
-            if (base_position_valid_ && last_immersive_) {
-                base = base_position_;
-            } else if (position_usable) {
-                // BuildPublishedFrame latches exactly this for the frame.
-                base = CenterPosition(xr_frame);
-            } else {
-                return screen;
-            }
-            const float half_angle =
-                0.5f * lean_back_degrees_.load(std::memory_order_relaxed) * kDegreesToRadians;
-            const Quaternion lean{std::sin(half_angle), 0.0f, 0.0f, std::cos(half_angle)};
-            const std::array<float, 3> ahead = Rotate(lean, {0.0f, 0.0f, -distance});
-            screen.pose.orientation = {lean.x, lean.y, lean.z, lean.w};
-            screen.pose.position = {base[0] + ahead[0], base[1] + ahead[1], base[2] + ahead[2]};
-            screen.half_width_meters = 0.5f * width;
+            screen.half_width_meters = 0.5f * policy.config.hud_width_meters;
             screen.half_height_meters = screen.half_width_meters / picture_aspect;
             screen.valid = true;
             return screen;
         }
 
-        if (frame.presentation.mode != OpenXRFrameMode::VirtualScreen || frame.render_width[0] == 0 ||
-            frame.render_height[0] == 0) {
-            return screen;
-        }
-        if (frame.presentation.quad_anchored) {
-            screen.pose = frame.presentation.quad_pose;
-        } else if (position_usable) {
-            // Head-locked in the view space: straight ahead of the head.
-            const auto& head = xr_frame.views[0].pose.orientation;
-            const Quaternion orientation = Normalize({head.x, head.y, head.z, head.w});
-            const std::array<float, 3> center = CenterPosition(xr_frame);
-            const std::array<float, 3> ahead = Rotate(
-                orientation, {0.0f, 0.0f, -std::max(0.25f, frame.presentation.quad_distance_meters)});
-            screen.pose.orientation = {orientation.x, orientation.y, orientation.z, orientation.w};
-            screen.pose.position = {center[0] + ahead[0], center[1] + ahead[1], center[2] + ahead[2]};
-        } else {
+        if (frame.render_width[0] == 0 || frame.render_height[0] == 0 || !MenuScreenPose(frame, screen.pose)) {
             return screen;
         }
         const float eye_aspect =
@@ -1010,6 +975,81 @@ private:
         screen.half_height_meters = extents[1];
         screen.valid = true;
         return screen;
+    }
+
+    // The settings panel's rectangle: centred on the same screen, a fixed
+    // fraction of its width, the way Aurora lays it over the eyes
+    // (aurora_imgui_set_stereo_overlay). Unlike the pointer's picture it is
+    // there in a race even when the 2D layer is not on the screen.
+    OpenXRPointerScreen SettingsPanelScreen(const OpenXRBackendFrame& frame, const MkwVRPolicySnapshot& policy,
+                                            bool immersive) const noexcept {
+        OpenXRPointerScreen screen{};
+        const float screen_width =
+            immersive ? policy.config.hud_width_meters : std::max(0.25f, frame.presentation.quad_width_meters);
+        if (!(screen_width > 0.0f) ||
+            !(immersive ? RaceScreenPose(frame, policy, screen.pose) : MenuScreenPose(frame, screen.pose))) {
+            return screen;
+        }
+        const std::array<float, 2> extents = settings_panel::HalfExtents(screen_width);
+        screen.half_width_meters = extents[0];
+        screen.half_height_meters = extents[1];
+        screen.valid = true;
+        return screen;
+    }
+
+    // Centre of the race's 2D screen. ViewFromBase maps a point p of the
+    // recorded centre-eye space (in metres) to base + lean * p in the
+    // application space, so the screen Aurora hangs hud_distance_meters ahead
+    // sits at base + lean * (0, 0, -distance), turned by the lean.
+    bool RaceScreenPose(const OpenXRBackendFrame& frame, const MkwVRPolicySnapshot& policy,
+                        XrPosef& pose) const noexcept {
+        const OpenXRFrame& xr_frame = frame.xr_frame;
+        const float distance = policy.config.hud_distance_meters;
+        if (!(distance > 0.0f)) {
+            return false;
+        }
+        std::array<float, 3> base{};
+        if (base_position_valid_ && last_immersive_) {
+            base = base_position_;
+        } else if (xr_frame.views_valid &&
+                   (xr_frame.view_state_flags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0 &&
+                   (xr_frame.view_state_flags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0) {
+            // BuildPublishedFrame latches exactly this for the frame.
+            base = CenterPosition(xr_frame);
+        } else {
+            return false;
+        }
+        const float half_angle = 0.5f * lean_back_degrees_.load(std::memory_order_relaxed) * kDegreesToRadians;
+        const Quaternion lean{std::sin(half_angle), 0.0f, 0.0f, std::cos(half_angle)};
+        const std::array<float, 3> ahead = Rotate(lean, {0.0f, 0.0f, -distance});
+        pose.orientation = {lean.x, lean.y, lean.z, lean.w};
+        pose.position = {base[0] + ahead[0], base[1] + ahead[1], base[2] + ahead[2]};
+        return true;
+    }
+
+    // Centre of the menu quad: where UpdateVirtualScreenPose anchored it, or
+    // its head-locked fallback straight ahead of the head.
+    bool MenuScreenPose(const OpenXRBackendFrame& frame, XrPosef& pose) const noexcept {
+        if (frame.presentation.mode != OpenXRFrameMode::VirtualScreen) {
+            return false;
+        }
+        if (frame.presentation.quad_anchored) {
+            pose = frame.presentation.quad_pose;
+            return true;
+        }
+        const OpenXRFrame& xr_frame = frame.xr_frame;
+        if (!xr_frame.views_valid || (xr_frame.view_state_flags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) == 0 ||
+            (xr_frame.view_state_flags & XR_VIEW_STATE_POSITION_VALID_BIT) == 0) {
+            return false;
+        }
+        const auto& head = xr_frame.views[0].pose.orientation;
+        const Quaternion orientation = Normalize({head.x, head.y, head.z, head.w});
+        const std::array<float, 3> center = CenterPosition(xr_frame);
+        const std::array<float, 3> ahead =
+            Rotate(orientation, {0.0f, 0.0f, -std::max(0.25f, frame.presentation.quad_distance_meters)});
+        pose.orientation = {orientation.x, orientation.y, orientation.z, orientation.w};
+        pose.position = {center[0] + ahead[0], center[1] + ahead[1], center[2] + ahead[2]};
+        return true;
     }
 
     void ApplyPendingReferenceSpaceChange(const OpenXRFrame& frame) noexcept {

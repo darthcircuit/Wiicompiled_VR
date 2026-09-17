@@ -182,6 +182,9 @@ cursor for 100 ms before it disappears, so tracking spikes during fast motion do
 Raw IR camera dots in `KPADGetUnifiedWpadStatus` stay invalid; the game reads the pointer from
 `KPADStatus`.
 
+**Settings in the headset.** Clicking both thumbsticks together opens the settings panel described
+below; while it is open the controllers operate the panel and the game sees them idle.
+
 `"gamepad"` keeps the controllers one ordinary gamepad read through PAD as a GameCube controller:
 A/B → South/East, X/Y → West/North, index triggers → trigger axes, grips → shoulders, thumbsticks
 → sticks (clicks → stick buttons), left menu → Start. Every binding in the F10 controller menu
@@ -190,6 +193,45 @@ applies.
 Bindings are suggested for `oculus/touch_controller` (Quest 2, 3 and Pro) and
 `khr/simple_controller`. `mkw_vr_wii_remote_tests` checks the accelerometer frame, the pointer
 raycast and debounce, the picture placement and the button profile without a headset.
+
+## Settings in the headset
+
+The F10 settings bar is only visible on the desktop window, so the same settings are also offered on
+a panel inside the headset, in menus and during an immersive race alike, including on the Quest.
+**Click both thumbsticks together** to open it, and again to close it; the left controller's menu
+button and the panel's *Close* button also close it. It can be opened from the desktop as well, with
+**F10 → VR → Show these settings in the headset**.
+
+The panel has the F10 bar's menus as tabs (VR, Graphics, Controllers, Audio, Diagnostics) and a
+*Recenter view* button. Aim a controller at it: the cursor goes where you aim, a trigger (or A / X)
+selects and drags sliders, and a thumbstick scrolls. Whichever hand last pulled its trigger does the
+pointing. Changes apply exactly as they do from the F10 bar, and the two stay in step.
+
+While the panel is open, and until every button has been released after it closes, the game sees
+the VR controllers idle: no buttons, no pointer and a remote at rest. Nothing reaches the game from
+the chord, the trigger that clicked *Close*, or the menu press that closed the panel. The game is
+not paused, so a race carries on while you change settings. Other controllers (keyboard, desktop
+gamepads, Bluetooth remotes) are not affected.
+
+The panel sits centred on the virtual screen, three quarters of its width across (1.8 m with the
+default `hud_width_meters`). On a menu that is the anchored menu quad; in a race it is the 2D layer's
+screen, `hud_distance_meters` ahead of the latched race origin and turned by the lean-back angle,
+whether or not `hud_virtual_screen` places the HUD there. **Recenter view** brings both back in front
+of you.
+
+How it is drawn: `settings_overlay.cpp` builds the panel with a second Dear ImGui context of its own,
+a 1440 × 1080 canvas at twice the desktop menu's scale with its own font atlas, fed by the pointer
+that `openxr_input.cpp` publishes through `vr/openxr_settings_panel.h`. Aurora renders that draw data
+into a panel texture once per sealed frame and lays it over each eye after the eye is finished
+(`aurora-main/lib/stereo_overlay.cpp`): through the eye's frustum and `viewFromCenter` onto the
+screen rectangle for an immersive eye (including headset-rate interpolated eyes, which reuse the
+texture), and as a centred rectangle on a virtual-screen eye image. The eye images the OpenXR
+backends already submit carry it, so no extra swapchain or composition layer is involved. The
+ImGui backend keeps a single projection uniform, so the panel's pass is submitted on its own command
+buffer before the desktop's ImGui pass of the same frame is recorded.
+
+`mkw_vr_settings_panel_tests` covers the chord, the release latch, selection, scrolling and the
+canvas mapping; `gx_fifo_tests` covers where the panel lands in each eye.
 
 ## The first-person camera
 
@@ -448,8 +490,10 @@ ends, including mid-frame flushes, so live setting changes cannot invalidate pen
 - The Quest build (`android/`, `docs/quest-port.md`) runs on a Quest 3 through menus and races.
   Lifecycle events and performance (about 43 game FPS) are still open. Apple visionOS packaging
   is not implemented.
-- Scene-specific comfort options, culling fixes, replay/spectator classification, and a broader VR
-  settings UI beyond the current enable/replay controls are future work.
+- Scene-specific comfort options, culling fixes and replay/spectator classification are future work.
+- The headset settings panel is drawn into the eye images rather than submitted as its own quad
+  layer, so its text is resampled once more than a compositor layer's would be. It has no laser
+  beam, only the cursor on the panel itself, and text fields cannot be typed into without a keyboard.
 - The desktop window remains available as a mirror/fallback.
 
 OpenXR diagnostics are written to the normal run log under

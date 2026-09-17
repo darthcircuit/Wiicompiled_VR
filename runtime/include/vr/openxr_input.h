@@ -5,6 +5,7 @@
 #if defined(MKW_ENABLE_OPENXR)
 
 #include "vr/openxr_runtime.h"
+#include "vr/openxr_settings_panel.h"
 #include "vr/openxr_wii_remote.h"
 
 #include <array>
@@ -54,6 +55,11 @@ struct OpenXRPointerScreen {
 // Both are bound for the Oculus Touch profile; khr/simple_controller gets
 // select/menu and the poses so an unknown runtime still offers something.
 //
+// Clicking both thumbsticks opens the in-headset settings panel
+// (openxr_settings_panel.h). While it is open, and until every button has been
+// released after it closes, the game sees idle controllers: the chord, the
+// pointer and the triggers belong to the panel.
+//
 // Lifetime: Create after the session exists (attaches the action set, which
 // OpenXR permits once per session), Sync once per xrWaitFrame, Idle while the
 // session is not running, Destroy before the session is destroyed. All of them
@@ -75,8 +81,10 @@ public:
 
     // xrSyncActions + state reads, then publishes to the virtual gamepad and
     // the Wii Remote bridge. predicted_display_time is the frame's XrTime;
-    // screen is where the pointer can land this frame.
-    void Sync(XrTime predicted_display_time, const OpenXRPointerScreen& screen);
+    // screen is where the Wii Remote pointer can land this frame, and
+    // settings_panel where the settings panel is (its whole rectangle).
+    void Sync(XrTime predicted_display_time, const OpenXRPointerScreen& screen,
+              const OpenXRPointerScreen& settings_panel);
 
     // Publishes a remote with nothing held, at rest and not pointing, and stops
     // the haptics, for frames without focused input.
@@ -100,8 +108,13 @@ private:
     XrTime InputSampleTime(XrTime predicted_display_time) const;
     bool AttachVirtualGamepad();
     void DetachVirtualGamepad();
-    void PublishWiiRemote(XrTime predicted_display_time, const OpenXRPointerScreen& screen,
-                          const std::array<wii_remote::HandInputs, kHands>& hands, uint32_t injected_buttons);
+    // `withheld` publishes a remote at rest with nothing held and no pointer,
+    // while still tracking motion so releasing it does not read as a jolt.
+    void PublishWiiRemote(XrTime input_time, const OpenXRPointerScreen& screen,
+                          const std::array<wii_remote::HandInputs, kHands>& hands, uint32_t injected_buttons,
+                          bool withheld);
+    void PublishSettingsPanel(XrTime input_time, const OpenXRPointerScreen& panel,
+                              const settings_panel::Frame& frame);
     void UpdateRumble();
     void StopRumble();
     bool Check(XrResult result, const char* operation);
@@ -128,6 +141,9 @@ private:
     PFN_xrVoidFunction m_convert_now_to_xr_time = nullptr;
     wii_remote::MotionTracker m_motion[kHands];
     wii_remote::PointerFilter m_pointer;
+    settings_panel::Controls m_panel_controls;
+    XrTime m_last_input_time = 0;
+    bool m_panel_select_held = false;
     std::array<float, 2> m_horizon{1.0f, 0.0f};
     bool m_haptics_active[kHands]{};
     uint32_t m_joystick_id = 0; // SDL_JoystickID; 0 when detached

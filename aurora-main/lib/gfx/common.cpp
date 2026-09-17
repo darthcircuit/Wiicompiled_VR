@@ -238,6 +238,10 @@ void set_stereo_hud_screen(bool enabled, float width, float distance) noexcept {
   g_stereoHudScreenEnabled.store(enabled, std::memory_order_relaxed);
 }
 bool get_stereo_hud_screen_enabled() noexcept { return g_stereoHudScreenEnabled.load(std::memory_order_relaxed); }
+void get_stereo_hud_screen_size(float& width, float& distance) noexcept {
+  width = g_stereoHudScreenWidth.load(std::memory_order_relaxed);
+  distance = g_stereoHudScreenDistance.load(std::memory_order_relaxed);
+}
 
 // The desktop mirror choice. Normal is the ordinary mono presentation, so a
 // build that never touches this setting presents exactly as it did before.
