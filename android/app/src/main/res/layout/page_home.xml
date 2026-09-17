@@ -20,39 +20,6 @@
         android:layout_height="1dp"
         android:background="@color/neutral_700" />
 
-    <LinearLayout
-        android:id="@+id/home_data_banner"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:background="@drawable/bg_banner_warning"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:paddingStart="12dp"
-        android:paddingTop="10dp"
-        android:paddingEnd="14dp"
-        android:paddingBottom="10dp"
-        android:visibility="gone">
-
-        <ImageView
-            android:id="@+id/home_data_banner_icon"
-            android:layout_width="22dp"
-            android:layout_height="22dp"
-            android:importantForAccessibility="no"
-            android:src="@drawable/ic_warning"
-            android:tint="@color/warning_500" />
-
-        <TextView
-            android:id="@+id/home_data_banner_text"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="12dp"
-            android:layout_weight="1"
-            android:textColor="@color/neutral_200"
-            android:textIsSelectable="true"
-            android:textSize="13sp" />
-    </LinearLayout>
-
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
@@ -208,6 +175,49 @@
             <Space
                 android:layout_width="match_parent"
                 android:layout_height="40dp" />
+        </LinearLayout>
+
+        <!--
+            The message floats over the page instead of taking room above it: this panel is short,
+            and a long message used to push the main button off the bottom. Long text scrolls inside
+            the banner rather than growing it.
+        -->
+        <LinearLayout
+            android:id="@+id/home_data_banner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top"
+            android:layout_marginStart="24dp"
+            android:layout_marginTop="12dp"
+            android:layout_marginEnd="24dp"
+            android:background="@drawable/bg_banner_warning"
+            android:elevation="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="12dp"
+            android:paddingTop="10dp"
+            android:paddingEnd="14dp"
+            android:paddingBottom="10dp"
+            android:visibility="gone">
+
+            <ImageView
+                android:id="@+id/home_data_banner_icon"
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_warning"
+                android:tint="@color/warning_500" />
+
+            <TextView
+                android:id="@+id/home_data_banner_text"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:layout_weight="1"
+                android:maxHeight="190dp"
+                android:scrollbars="vertical"
+                android:textColor="@color/neutral_200"
+                android:textSize="13sp" />
         </LinearLayout>
     </FrameLayout>
 </LinearLayout>

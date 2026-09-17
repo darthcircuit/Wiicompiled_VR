@@ -259,9 +259,21 @@ launcher's toggle switches between them; the selected one is remembered in `file
 (a plain file, because the launcher and the `:game` process do not share preferences).
 
 Retro Rewind also needs its 2 GB pack on the headset. The app writes `[paths] retro_rewind_root`
-into `Config.toml`, Home says so when the pack is missing, and a `.wcgame` can carry it (below).
-Building the mod on the headset additionally needs the mod's `Code.pul`, which arrives with that
-pack, so **Build on this Quest** offers Retro Rewind only once the pack is installed.
+into `Config.toml`, and the pack arrives either way a PC player gets it:
+
+- **Download Retro Rewind** (`RetroRewindPack`, a `GameSetup` task) fetches it from Retro Rewind's
+  own distribution server, exactly as WheelWizard does on a PC. `RetroRewindInstall.txt` names the
+  full install zip, `RetroRewindVersion.txt` lists `<version> <url> <path> <description>` per
+  published update and `RetroRewindDelete.txt` lists `<version> <path>` deletions; an installation
+  is the base zip plus every update newer than the `version.txt` it holds. Only entries under
+  `RetroRewind6/` are kept (the Riivolution XML beside them belongs to a Wii setup), a base install
+  is staged and swapped like every other task, and the version is written after the last update, so
+  an interrupted update simply runs again. Nothing of the pack ships in the APK.
+- Or a `.wcgame` carries it (below), for a headset with no Wi‑Fi to spare.
+
+Home's main button becomes **Download Retro Rewind** whenever that game is selected and its pack is
+missing, and Settings → About shows the installed version with an Update button. Building the mod on
+the headset needs the mod's `Code.pul`, which is part of the pack, so the same rule covers it.
 
 ### Game packages (.wcgame) and Import from computer
 

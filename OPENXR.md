@@ -22,11 +22,14 @@ each VR launch, preserving other preferences. Its portable configuration lives a
 `RecompVR/UserData/Config.toml` beneath WheelWizard's data folder. Normal graphics settings remain
 in `Recomp/UserData/Config.toml`. Both backends use the normal installation's effective NAND.
 
-Standalone launches remain opt-in. `Config.toml` is created with the following defaults:
+Standalone launches start in VR too: this is the VR build, and `required = false` makes a failed
+headset startup fall back to the desktop renderer rather than stop the game. `Config.toml` is
+created with the following defaults, and a configuration that never mentions `enabled` reads the
+same way:
 
 ```toml
 [vr]
-enabled = false
+enabled = true
 required = false
 mirror_view = "normal"
 controller_mode = "wii_remote"
@@ -48,9 +51,9 @@ first_person_hidden_model = 0
 first_person_rotation = "yaw"
 ```
 
-Set `enabled = true`, close the game completely, and start it again. These settings are read only
-at launch. The in-game F10 settings bar also exposes the enable switch, but a restart is still
-required.
+To play this installation on the desktop instead, set `enabled = false`, close the game completely,
+and start it again. These settings are read only at launch. The in-game F10 settings bar also
+exposes the enable switch, but a restart is still required.
 
 `required = false` is the safe default: an absent runtime, disconnected headset, unsupported GPU,
 or graphics-binding failure is logged and the game continues in ordinary desktop mode. A temporary

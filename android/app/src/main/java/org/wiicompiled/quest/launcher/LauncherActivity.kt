@@ -9,6 +9,7 @@ import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Bundle
 import android.text.format.Formatter
+import android.text.method.ScrollingMovementMethod
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
@@ -42,7 +43,7 @@ class LauncherActivity : Activity() {
     private enum class Page { Home, Settings }
 
     /** What Home's main and secondary buttons do. */
-    private enum class Action { Play, Resume, SelectDisc, ImportGame, BuildGame }
+    private enum class Action { Play, Resume, SelectDisc, ImportGame, BuildGame, DownloadModPack }
 
     private lateinit var navHome: View
     private lateinit var navSettings: View
@@ -107,6 +108,9 @@ class LauncherActivity : Activity() {
         dataBanner = findViewById(R.id.home_data_banner)
         dataBannerIcon = findViewById(R.id.home_data_banner_icon)
         dataBannerText = findViewById(R.id.home_data_banner_text)
+        // The banner floats over the page, so a long message scrolls inside it rather than growing
+        // over the buttons underneath.
+        dataBannerText.movementMethod = ScrollingMovementMethod()
 
         homeTitle = findViewById(R.id.home_title)
         gameToggle = findViewById(R.id.home_game_toggle)
@@ -121,6 +125,7 @@ class LauncherActivity : Activity() {
             selectDiscImage = ::selectDiscImage,
             importGame = ::importGame,
             buildGame = ::buildGame,
+            downloadModPack = ::downloadModPack,
         )
         savedInstanceState?.getString(KEY_TAB)?.let { name ->
             SettingsPage.Tab.entries.firstOrNull { it.name == name }?.let(settings::select)
@@ -220,12 +225,15 @@ class LauncherActivity : Activity() {
         val task = setupTask(setup)
         val importing = task == GameSetup.Task.ImportPackage
         val building = task == GameSetup.Task.BuildGame
+        val downloadingPack = task == GameSetup.Task.DownloadModPack
 
         // Without anything yet, a player with only a headset starts from their disc image, and
         // builds the game once its files are there; a PC-built game can always be imported instead.
+        // Retro Rewind also needs its own pack, which neither building nor playing can do without.
         mainAction = when {
             running -> Action.Resume
             discStatus != GameStorage.DiscStatus.Ready -> Action.SelectDisc
+            !GameStorage.modContentReady(this, profile) -> Action.DownloadModPack
             gameStatus != GameLibrary.Status.Ready -> Action.BuildGame
             else -> Action.Play
         }
@@ -250,6 +258,7 @@ class LauncherActivity : Activity() {
                 when {
                     building -> R.string.home_building
                     importing -> R.string.home_importing
+                    downloadingPack -> R.string.home_mod_pack_downloading
                     else -> R.string.home_extracting
                 },
                 percent(setup),
@@ -291,12 +300,16 @@ class LauncherActivity : Activity() {
 
         when {
             settingUp && building -> showBanner(getString(R.string.home_build_running), warning = false)
+            settingUp && downloadingPack -> showBanner(getString(R.string.home_mod_pack_running), warning = false)
             settingUp -> showBanner(null)
             setup is GameSetup.State.Failed && building -> showBanner(getString(R.string.home_build_failed, setup.message), warning = true)
+            setup is GameSetup.State.Failed && downloadingPack -> showBanner(getString(R.string.home_mod_pack_failed, setup.message), warning = true)
             setup is GameSetup.State.Failed -> showBanner(getString(R.string.home_setup_failed, setup.message), warning = true)
             discStatus == GameStorage.DiscStatus.Incomplete -> showBanner(getString(R.string.home_data_incomplete, disc), warning = true)
-            !GameStorage.modContentReady(this, profile) ->
-                showBanner(getString(R.string.home_mod_missing, GameStorage.modDirectory(this).absolutePath), warning = true)
+            // Only once the disc files are there is the pack the next thing missing; before that a
+            // first-time player is still reading how to get those.
+            discStatus == GameStorage.DiscStatus.Ready && !GameStorage.modContentReady(this, profile) ->
+                showBanner(getString(R.string.home_mod_needed_message), warning = true)
             gameStatus == GameLibrary.Status.Stale -> showBanner(getString(R.string.home_game_stale), warning = true)
             gameStatus == GameLibrary.Status.Missing && discStatus == GameStorage.DiscStatus.Missing ->
                 showBanner(getString(R.string.home_setup_intro), warning = false)
@@ -351,6 +364,7 @@ class LauncherActivity : Activity() {
         Action.SelectDisc -> R.string.home_select_disc
         Action.ImportGame -> R.string.home_import
         Action.BuildGame -> R.string.home_build
+        Action.DownloadModPack -> R.string.home_download_mod_pack
     }
 
     private fun perform(action: Action) {
@@ -360,6 +374,25 @@ class LauncherActivity : Activity() {
             Action.SelectDisc -> selectDiscImage()
             Action.ImportGame -> importGame()
             Action.BuildGame -> buildGame()
+            Action.DownloadModPack -> downloadModPack()
+        }
+    }
+
+    /**
+     * Fetches Retro Rewind's pack from Retro Rewind's own server, as the computer launcher does,
+     * after saying where it comes from and how big it is.
+     */
+    private fun downloadModPack() {
+        if (GameSetup.isRunning) return
+        val installed = RetroRewindPack.installedVersion(this)
+        val message = if (installed == null) {
+            getString(R.string.home_mod_pack_message)
+        } else {
+            getString(R.string.home_mod_pack_update_message, installed)
+        }
+        confirm(R.string.home_mod_pack_title, message, R.string.home_download_mod_pack) {
+            GameSetupService.startModPackDownload(this)
+            showPage(Page.Home)
         }
     }
 
@@ -376,7 +409,7 @@ class LauncherActivity : Activity() {
     private fun buildGame() {
         if (GameSetup.isRunning || GameStorage.discStatus(this) != GameStorage.DiscStatus.Ready) return
         if (!GameStorage.modContentReady(this, profile)) {
-            confirm(R.string.home_mod_needed_title, R.string.home_mod_needed_message, R.string.home_import) { importGame() }
+            confirm(R.string.home_mod_needed_title, R.string.home_mod_needed_message, R.string.home_download_mod_pack) { downloadModPack() }
             return
         }
         val message = if (GameLibrary.status(this, profile) == GameLibrary.Status.Ready) {
@@ -396,6 +429,7 @@ class LauncherActivity : Activity() {
             return
         }
         dataBannerText.text = text
+        dataBannerText.scrollTo(0, 0)
         dataBanner.setBackgroundResource(if (warning) R.drawable.bg_banner_warning else R.drawable.bg_banner_info)
         dataBannerIcon.setImageResource(if (warning) R.drawable.ic_warning else R.drawable.ic_disc)
         dataBannerIcon.imageTintList = ColorStateList.valueOf(getColor(if (warning) R.color.warning_500 else R.color.primary_400))
@@ -426,7 +460,10 @@ class LauncherActivity : Activity() {
         }
     }
 
-    private fun confirm(title: Int, message: Int, positive: Int, onConfirm: () -> Unit) {
+    private fun confirm(title: Int, message: Int, positive: Int, onConfirm: () -> Unit) =
+        confirm(title, getString(message), positive, onConfirm)
+
+    private fun confirm(title: Int, message: CharSequence, positive: Int, onConfirm: () -> Unit) {
         AlertDialog.Builder(this)
             .setTitle(title)
             .setMessage(message)

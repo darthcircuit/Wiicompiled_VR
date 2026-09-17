@@ -40,6 +40,7 @@ class SettingsPage(
     private val selectDiscImage: () -> Unit,
     private val importGame: () -> Unit,
     private val buildGame: () -> Unit,
+    private val downloadModPack: () -> Unit,
 ) {
 
     enum class Tab(val label: Int) {
@@ -47,6 +48,7 @@ class SettingsPage(
         Graphics(R.string.settings_tab_graphics),
         Controls(R.string.settings_tab_controls),
         Audio(R.string.settings_tab_audio),
+        Other(R.string.settings_tab_other),
         About(R.string.settings_tab_about),
     }
 
@@ -91,16 +93,20 @@ class SettingsPage(
         current = store.load() ?: TomlConfig.parse("")
         rows.removeAllViews()
         dependents.clear()
-        if (gameRunning()) {
-            banner(R.drawable.bg_banner_warning, R.string.settings_running_note)
-        } else {
-            banner(R.drawable.bg_banner_info, R.string.settings_apply_note)
+        // About changes nothing, so the note about when changes take effect has no place there.
+        if (tab != Tab.About) {
+            if (gameRunning()) {
+                banner(R.drawable.bg_banner_warning, R.string.settings_running_note)
+            } else {
+                banner(R.drawable.bg_banner_info, R.string.settings_apply_note)
+            }
         }
         when (tab) {
             Tab.Vr -> buildVr()
             Tab.Graphics -> buildGraphics()
             Tab.Controls -> buildControls()
             Tab.Audio -> buildAudio()
+            Tab.Other -> buildOther()
             Tab.About -> buildAbout()
         }
         updateDependents(current)
@@ -259,10 +265,8 @@ class SettingsPage(
         }
     }
 
-    private fun buildAbout() {
-        section(R.string.section_about_app) {
-            info(R.string.about_version, BuildConfig.VERSION_NAME)
-        }
+    /** What the player's own files are and what makes them, as the PC launcher's Other tab does. */
+    private fun buildOther() {
         section(R.string.section_about_storage) {
             val disc = GameStorage.discDirectory(activity).absolutePath
             val status = when (GameStorage.discStatus(activity)) {
@@ -297,6 +301,24 @@ class SettingsPage(
             action(R.string.home_import, R.string.about_import_helper, R.string.home_import, enabled = !GameSetup.isRunning) {
                 importGame()
             }
+            // Retro Rewind's pack is its own download, and the row says which version is installed.
+            if (GameProfile.RetroRewind in GameProfile.available(activity)) {
+                val installed = RetroRewindPack.installedVersion(activity)
+                info(
+                    R.string.about_mod_pack,
+                    installed?.let { activity.getString(R.string.about_mod_pack_version, it) }
+                        ?: activity.getString(R.string.about_mod_pack_missing),
+                    stacked = true,
+                )
+                action(
+                    R.string.about_mod_pack_action,
+                    R.string.about_mod_pack_helper,
+                    if (installed == null) R.string.home_download_mod_pack else R.string.about_mod_pack_update,
+                    enabled = !GameSetup.isRunning,
+                ) {
+                    downloadModPack()
+                }
+            }
             info(R.string.about_config, store.file.absolutePath, stacked = true)
             info(R.string.about_logs, GameStorage.logsDirectory(activity).absolutePath, stacked = true)
         }
@@ -306,6 +328,33 @@ class SettingsPage(
                 read = { it.bool("diagnostics", "openxr_logging") ?: false },
                 write = { c, value -> c.setBool("diagnostics", "openxr_logging", value) },
             )
+        }
+    }
+
+    /** Who made what, and what this app is built on. */
+    private fun buildAbout() {
+        section(R.string.section_about_this_app) {
+            info(R.string.about_app_name, activity.getString(R.string.about_app_summary), stacked = true)
+            info(R.string.about_version, BuildConfig.VERSION_NAME)
+            // The fingerprint ties a built game to this APK, so it belongs where a player can read it out.
+            GameLibrary.kitFingerprint(activity)?.let { info(R.string.about_kit, it, stacked = true) }
+        }
+        section(R.string.section_about_credits) {
+            info(R.string.about_credit_title_vr, activity.getString(R.string.about_credit_vr), stacked = true)
+            info(R.string.about_credit_title_wiicompiled, activity.getString(R.string.about_credit_wiicompiled), stacked = true)
+            info(R.string.about_credit_title_retro_rewind, activity.getString(R.string.about_credit_retro_rewind), stacked = true)
+            info(R.string.about_credit_title_wheel_wizard, activity.getString(R.string.about_credit_wheel_wizard), stacked = true)
+            info(R.string.about_credit_title_graphics, activity.getString(R.string.about_credit_aurora), stacked = true)
+            info(R.string.about_credit_title_platform, activity.getString(R.string.about_credit_openxr), stacked = true)
+            info(R.string.about_credit_title_disc, activity.getString(R.string.about_credit_nod), stacked = true)
+            if (BuildConfig.ON_DEVICE_BUILD) {
+                info(R.string.about_credit_title_toolchain, activity.getString(R.string.about_credit_toolchain), stacked = true)
+            }
+            info(R.string.about_credit_title_dolphin, activity.getString(R.string.about_credit_dolphin), stacked = true)
+            info(R.string.about_credit_title_logo, activity.getString(R.string.about_credit_logo), stacked = true)
+        }
+        section(R.string.section_about_licence) {
+            info(R.string.about_licence_title, activity.getString(R.string.about_licence_text), stacked = true)
         }
     }
 

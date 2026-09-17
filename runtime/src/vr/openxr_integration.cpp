@@ -54,13 +54,10 @@ namespace {
 
 inline constexpr float kDegreesToRadians = 0.01745329252f;
 
-// A standalone headset has no desktop to fall back to, so VR is on unless the
-// user's configuration turns it off. Desktop builds keep the opt-in default.
-#if defined(__ANDROID__)
+// This is the VR build, so the headset path is what an unconfigured installation
+// starts in, on the headset and on the desktop alike. Nothing is lost by it:
+// with vr.required false, a missing runtime or headset falls back to desktop.
 inline constexpr bool kVrEnabledDefault = true;
-#else
-inline constexpr bool kVrEnabledDefault = false;
-#endif
 
 void ConfigurePolicy(bool enabled) noexcept {
     MkwVRPolicyReset();

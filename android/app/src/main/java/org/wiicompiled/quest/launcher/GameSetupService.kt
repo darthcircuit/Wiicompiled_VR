@@ -42,7 +42,8 @@ class GameSetupService : Service() {
             ?: GameSetup.Task.ExtractDisc
         startForeground(NOTIFICATION_ID, notification(GameSetup.State.Checking(task)), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         val uri = intent?.data
-        if ((uri == null && task != GameSetup.Task.BuildGame) || !GameSetup.begin(task)) {
+        val needsUri = task != GameSetup.Task.BuildGame && task != GameSetup.Task.DownloadModPack
+        if ((uri == null && needsUri) || !GameSetup.begin(task)) {
             // A task already going keeps the service, and ends it itself.
             if (!GameSetup.isRunning) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -103,6 +104,7 @@ class GameSetupService : Service() {
                 GameSetup.Task.ImportPackage -> R.string.disc_setup_importing
                 GameSetup.Task.BuildGame -> R.string.disc_setup_building
                 GameSetup.Task.ExtractDisc -> R.string.disc_setup_extracting
+                GameSetup.Task.DownloadModPack -> R.string.mod_pack_downloading
             }
             builder.setContentText(getString(text, percent)).setProgress(100, percent, false)
         } else {
@@ -122,6 +124,13 @@ class GameSetupService : Service() {
         // Longer than any real task; only a hung run would reach it.
         private const val WAKE_LOCK_TIMEOUT_MS = 60L * 60 * 1000
         private const val BUILD_WAKE_LOCK_TIMEOUT_MS = 3L * 60 * 60 * 1000
+
+        /** Downloads or updates the Retro Rewind pack from its own server ([RetroRewindPack]). */
+        fun startModPackDownload(context: Context) {
+            val intent = Intent(context, GameSetupService::class.java)
+                .putExtra(EXTRA_TASK, GameSetup.Task.DownloadModPack.name)
+            context.startForegroundService(intent)
+        }
 
         /** Builds [profile]'s game from DATA on this headset ([GameBuild]). */
         fun startBuild(context: Context, profile: GameProfile) {

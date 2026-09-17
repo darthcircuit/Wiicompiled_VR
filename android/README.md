@@ -26,8 +26,10 @@ powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Product ba
 powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Product retro_rewind -Mod <RetroRewind6> -Install
 ```
 
-`-Mod` puts the Retro Rewind pack in the package, which is how the headset gets
-it; **Import from computer** takes the same `.wcgame` from the Import folder.
+`-Mod` puts the Retro Rewind pack in the package; **Import from computer** takes
+the same `.wcgame` from the Import folder. The headset can also fetch that pack
+itself with **Download Retro Rewind** on Home, from Retro Rewind's own
+distribution server, the way the PC launcher does.
 Copy your disc image to the headset (for example `adb push MarioKart.iso
 /sdcard/Download/`) and press **Select disc image** in the launcher, which checks
 and extracts it with nod, as the PC installer does. Or push an already extracted
@@ -43,6 +45,7 @@ The app opens on a 2D launcher panel modelled on the PC launcher (WheelWizard VR
 **Home** picks the game with a toggle, starts it in the headset and says what is
 still missing (the disc files, the game itself, or Retro Rewind's pack), and
 **Settings** edits `Config.toml` (VR camera, render scale, virtual screen,
-resolution, controllers, audio) and lists both games. The game itself is `QuestActivity`, in its own
+resolution, controllers, audio), with an **Other** tab for the files and the
+games built from them and an **About** tab carrying the credits. The game itself is `QuestActivity`, in its own
 `:game` process; `adb shell am start -n org.wiicompiled.quest/.QuestActivity`
 still starts it directly.

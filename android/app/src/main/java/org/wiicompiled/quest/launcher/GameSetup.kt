@@ -17,13 +17,14 @@ import org.wiicompiled.quest.GameProfile
  *  - [Task.ImportPackage]: a .wcgame built on a PC becomes the game library, and DATA too when
  *    the package carries it ([GamePackageImport]).
  *  - [Task.BuildGame]: the game library is built on the headset from DATA ([GameBuild]).
+ *  - [Task.DownloadModPack]: Retro Rewind's own server provides its pack ([RetroRewindPack]).
  *
  * Every task stages its output next to the destination and swaps it in only after it has been
  * checked, so a failed, cancelled or killed run never costs working files.
  */
 object GameSetup {
 
-    enum class Task { ExtractDisc, ImportPackage, BuildGame }
+    enum class Task { ExtractDisc, ImportPackage, BuildGame, DownloadModPack }
 
     sealed interface State {
         data object Idle : State
@@ -101,6 +102,8 @@ object GameSetup {
                     !cancelRequested
                 }
                 GameBuild.run(context, profile, reporter, cancelled = { cancelRequested }, finishing)
+            } else if (task == Task.DownloadModPack) {
+                RetroRewindPack.run(context, progress, cancelled = { cancelRequested }, finishing)
             } else {
                 uri?.let { context.contentResolver.openFileDescriptor(it, "r") }?.use { descriptor ->
                     when (task) {
