@@ -16,6 +16,10 @@ internal static class InstallStages
     public const string BuildBase = "build-base";
     public const string BuildRetro = "build-retro";
     public const string Publish = "publish";
+    public const string QuestKit = "quest-kit";
+    public const string QuestToolchain = "quest-toolchain";
+    public const string QuestBuild = "quest-build";
+    public const string QuestPackage = "quest-package";
 }
 
 /// <summary>
@@ -91,6 +95,23 @@ internal sealed class NdjsonInstallReporter : IInstallReporter
             WriteLine(new { type = "result", success = false, error });
         }
         _log?.Invoke("FAILED: " + error);
+    }
+
+    /// <summary>
+    /// <c>--build-quest</c>'s product: where the game package is and what it was built against. Written
+    /// once, before the terminal result line.
+    /// </summary>
+    public void QuestPackage(QuestBuildService.Result result)
+    {
+        lock (_gate)
+        {
+            if (_finished) return;
+            WriteLine(new
+            {
+                type = "quest-package", path = result.PackagePath, kitFingerprint = result.KitFingerprint,
+                includesGameFiles = result.IncludesGameFiles, sizeBytes = result.SizeBytes
+            });
+        }
     }
 
     /// <summary>

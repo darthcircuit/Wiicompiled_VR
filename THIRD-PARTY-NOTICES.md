@@ -141,6 +141,19 @@ trees themselves (fetched by `Launcher/Prepare-Dependencies.ps1`) so end-user bu
 | OpenXR-SDK | 1.1.61 | Apache-2.0 | <https://github.com/KhronosGroup/OpenXR-SDK> |
 | nodtool (disc image extraction) | v2.0.0-alpha.10 | MIT OR Apache-2.0 | <https://github.com/encounter/nod> |
 
+The Meta Quest APK builds nod itself into `libnod_jni.so` (`android/nod-jni`) for its disc image
+extraction, and that library also carries the compression code nod reads WIA and RVZ images with.
+The Rust crates pulled in by `android/nod-jni/Cargo.lock` are all MIT, Apache-2.0, BSD, Zlib,
+Unicode-3.0, BSL-1.0 or Unlicense licensed.
+
+| Component (Quest APK) | Version | License | Upstream |
+| --- | --- | --- | --- |
+| nod | v2.0.0-alpha.10 | MIT OR Apache-2.0 | <https://github.com/encounter/nod> |
+| Zstandard (via zstd-sys) | 1.5.7 | BSD-3-Clause | <https://github.com/facebook/zstd> |
+| XZ Utils liblzma (via liblzma-sys) | liblzma-sys 0.4.9 | 0BSD | <https://github.com/tukaani-project/xz> |
+| bzip2 (via bzip2-sys) | 1.0.8 | bzip2 license (BSD-style) | <https://sourceware.org/bzip2/> |
+| jni-rs | 0.21.1 | MIT OR Apache-2.0 | <https://github.com/jni-rs/jni-rs> |
+
 ### Dual-licensed components - elections made by this project
 
 - **FreeType** is offered under the FreeType License (FTL) or GPL-2.0. **This project elects the
@@ -173,6 +186,12 @@ unmodified, with their license texts, in the installer's `licenses/` folder.
 > is available from the upstream project linked above at its pinned version, and this project will
 > supply it on request for the exact version shipped in any given release. Pins live in
 > `Launcher/Prepare-PortableTools.ps1` and `Launcher/NativeBuildFlags.ps1`.
+
+## Downloaded on the user's machine, never redistributed
+
+| Component | License | Upstream |
+| --- | --- | --- |
+| Android NDK r29 for Windows (clang, lld, sysroot), fetched by `--build-quest` from Google with a pinned SHA-1 | Android Software Development Kit License Agreement | <https://developer.android.com/studio/terms> |
 
 ---
 

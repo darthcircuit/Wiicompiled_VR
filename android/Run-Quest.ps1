@@ -1,5 +1,6 @@
 # Installs the built APK on the connected Quest, places the game data, launches
-# the activity and collects diagnostics for one session.
+# the game activity directly (skipping the launcher panel) and collects
+# diagnostics for one session.
 #
 #   powershell -ExecutionPolicy Bypass -File android/Run-Quest.ps1 [-Apk <path>] [-Data <extracted disc dir>]
 #                                                                  [-Seconds 60] [-NoLaunch] [-SkipInstall]
@@ -96,8 +97,9 @@ $logcat = Join-Path $runDir 'logcat.txt'
 & $adb logcat -d -v time | Out-File -FilePath $logcat -Encoding utf8
 Write-Host "logcat: $logcat"
 
-$running = ((& $adb shell pidof $package) | Out-String).Trim()
-if ($running) { Write-Host "Process still running (pid $running)" } else { Write-Warning 'Process is not running' }
+# The game runs in its own process; the package's main process is the launcher panel.
+$running = ((& $adb shell pidof "${package}:game") | Out-String).Trim()
+if ($running) { Write-Host "Game process still running (pid $running)" } else { Write-Warning 'Game process is not running' }
 
 $latest = ((& $adb shell "ls -t '$appDir/Logs' 2>/dev/null | head -1") | Out-String).Trim()
 if ($latest) {

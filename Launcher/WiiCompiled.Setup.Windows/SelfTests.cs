@@ -98,6 +98,9 @@ internal static class SelfTests
         Test("Toolkit fingerprint", TestToolkitFingerprint, failures);
         Test("Retro Rewind inspection state machine", TestCodePulStateMachine, failures);
         Test("Products report contract", TestProductsReport, failures);
+        Test("Quest build command line", TestQuestBuildCommandLine, failures);
+        Test("Quest toolchain selection", TestQuestToolchainSelection, failures);
+        Test("Quest game kit extraction", TestQuestKitExtraction, failures);
         foreach (var failure in failures) Console.Error.WriteLine("FAILED " + failure);
         return failures.Count == 0 ? 0 : 1;
     }
@@ -290,6 +293,105 @@ internal static class SelfTests
             }
             catch (InvalidOperationException) { }
         }
+    }
+
+    private static void TestQuestBuildCommandLine()
+    {
+        var build = CommandLine.Parse([
+            "--build-quest", "--install-dir", "C:\\Games\\MKW", "--quest-apk", "quest.apk",
+            "--output", "D:\\MarioKartWii.wcgame", "--include-game-files", "--progress-json"
+        ]);
+        if (build.Mode != AppMode.BuildQuest || build.QuestApkPath != "quest.apk" ||
+            build.OutputPath != "D:\\MarioKartWii.wcgame" || !build.IncludeGameFiles || !build.ProgressJson)
+            throw new Exception("The Quest build contract did not parse.");
+
+        void Rejects(string description, params string[] args)
+        {
+            try
+            {
+                CommandLine.Parse(args);
+                throw new Exception(description + " was accepted.");
+            }
+            catch (ArgumentException) { }
+        }
+        Rejects("A Quest build without the app", "--build-quest", "--install-dir", "i", "--output", "o.wcgame");
+        Rejects("A Quest build without an output", "--build-quest", "--install-dir", "i", "--quest-apk", "a.apk");
+        Rejects("A Quest build without an installation", "--build-quest", "--quest-apk", "a.apk", "--output", "o");
+        Rejects("--quest-apk outside a Quest build", "--launch-base", "--quest-apk", "a.apk");
+        Rejects("--include-game-files outside a Quest build", "--check-products", "--include-game-files");
+    }
+
+    private static void TestQuestToolchainSelection()
+    {
+        var prefix = QuestBuildService.Ndk.LlvmPrefix;
+        (string Entry, string? Expected)[] cases =
+        [
+            (prefix + "bin/clang.exe", "bin/clang.exe"),
+            (prefix + "bin/ld.lld.exe", "bin/ld.lld.exe"),
+            (prefix + "bin/libxml2.dll", "bin/libxml2.dll"),
+            (prefix + "bin/clang-tidy.exe", null),
+            (prefix + "lib/clang/21/include/arm_neon.h", "lib/clang/21/include/arm_neon.h"),
+            (prefix + "lib/clang/21/lib/linux/libclang_rt.builtins-aarch64-android.a",
+                "lib/clang/21/lib/linux/libclang_rt.builtins-aarch64-android.a"),
+            (prefix + "lib/clang/21/lib/linux/libclang_rt.builtins-x86_64-android.a", null),
+            (prefix + "lib/clang/21/lib/linux/aarch64/libunwind.a", "lib/clang/21/lib/linux/aarch64/libunwind.a"),
+            (prefix + "sysroot/usr/include/stdio.h", "sysroot/usr/include/stdio.h"),
+            (prefix + "sysroot/usr/include/aarch64-linux-android/asm/unistd.h",
+                "sysroot/usr/include/aarch64-linux-android/asm/unistd.h"),
+            (prefix + "sysroot/usr/include/x86_64-linux-android/asm/unistd.h", null),
+            (prefix + "sysroot/usr/lib/aarch64-linux-android/libc++_shared.so",
+                "sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"),
+            (prefix + "sysroot/usr/lib/aarch64-linux-android/29/crtbegin_so.o",
+                "sysroot/usr/lib/aarch64-linux-android/29/crtbegin_so.o"),
+            (prefix + "sysroot/usr/lib/aarch64-linux-android/30/crtbegin_so.o", null),
+            (prefix + "sysroot/usr/lib/arm-linux-androideabi/libc++_shared.so", null),
+            ("android-ndk-r29/source.properties", null),
+        ];
+        foreach (var (entry, expected) in cases)
+        {
+            var actual = QuestBuildService.SelectToolchainEntry(entry);
+            if (actual != expected)
+                throw new Exception($"{entry} selected as {actual ?? "(skipped)"}, expected {expected ?? "(skipped)"}.");
+        }
+    }
+
+    private static void TestQuestKitExtraction()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "mkwc-questkit-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            var apk = Path.Combine(temp, "app.apk");
+            using (var zip = System.IO.Compression.ZipFile.Open(apk, System.IO.Compression.ZipArchiveMode.Create))
+            {
+                void Add(string name, string text)
+                {
+                    using var writer = new StreamWriter(zip.CreateEntry(name).Open());
+                    writer.Write(text);
+                }
+                Add("assets/game_kit/kit.json", "{\"schema\":1,\"fingerprint\":\"abc123\"}");
+                Add("assets/game_kit/include/memory.h", "#pragma once");
+                Add("assets/runtime_resources/dsp_coef.bin", "not the kit");
+                Add("lib/arm64-v8a/libSDL3.so", "not the kit");
+            }
+            var kit = Path.Combine(temp, "kit");
+            if (QuestBuildService.ExtractKit(apk, kit, CancellationToken.None) != "abc123")
+                throw new Exception("The kit fingerprint was not read.");
+            if (!File.Exists(Path.Combine(kit, "include", "memory.h")) ||
+                Directory.GetFiles(kit, "*", SearchOption.AllDirectories).Length != 2)
+                throw new Exception("The kit extraction took the wrong files.");
+
+            var notQuest = Path.Combine(temp, "other.apk");
+            using (var zip = System.IO.Compression.ZipFile.Open(notQuest, System.IO.Compression.ZipArchiveMode.Create))
+                zip.CreateEntry("lib/arm64-v8a/libmain.so");
+            try
+            {
+                QuestBuildService.ExtractKit(notQuest, kit, CancellationToken.None);
+                throw new Exception("An APK without a game kit was accepted.");
+            }
+            catch (InvalidDataException) { }
+        }
+        finally { Directory.Delete(temp, recursive: true); }
     }
 
     private static void TestCommandLineContract()

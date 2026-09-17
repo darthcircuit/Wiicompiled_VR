@@ -16,6 +16,8 @@ internal static class ConsoleCommands
         Console.Out.WriteLine("  --check-products [--install-dir <dir>] [--retro-dir <folder>] [--progress-json]");
         Console.Out.WriteLine("  --repair-products --install-dir <dir> --retro-dir <folder> " +
                              "(--download-retro-wfc-payload | --skip-retro-wfc-payload) [--progress-json]");
+        Console.Out.WriteLine("  --build-quest --install-dir <dir> --quest-apk <apk> --output <file.wcgame> " +
+                             "[--include-game-files] [--progress-json]");
         Console.Out.WriteLine("  --launch-retro | --launch-base");
         Console.Out.WriteLine("  --uninstall --install-dir <dir>");
         Console.Out.WriteLine("  --version");
@@ -33,7 +35,7 @@ internal static class ConsoleCommands
     {
         Console.Out.WriteLine(JsonSerializer.Serialize(new
         {
-            productId = ProductInfo.Id, version = ProductInfo.Version, openxrD3D12 = true
+            productId = ProductInfo.Id, version = ProductInfo.Version, openxrD3D12 = true, questBuild = true
         }));
         return 0;
     }
@@ -260,6 +262,53 @@ internal static class ConsoleCommands
         finally
         {
             ndjson?.EnsureFinished("Product repair stopped before it reached a result.");
+        }
+    }
+
+    /// <summary>
+    /// Builds the player's game for the Meta Quest app from this installation's translation and writes it
+    /// as a .wcgame (see <see cref="QuestBuildService"/>). Holds the installation's operation lock, so it
+    /// never races a repair of the translation it compiles.
+    /// </summary>
+    public static async Task<int> BuildQuest(CommandLine command, CancellationToken cancellationToken = default)
+    {
+        var logPath = Path.Combine(Path.GetTempPath(), "WiiCompiled-quest-build.log");
+        var logLock = new object();
+        void Log(string message)
+        {
+            lock (logLock)
+            {
+                File.AppendAllText(logPath, $"[{DateTime.Now:O}] {message}{Environment.NewLine}");
+            }
+        }
+        File.WriteAllText(logPath, $"{ProductInfo.Name} Quest build {ProductInfo.Version}{Environment.NewLine}");
+
+        var ndjson = command.ProgressJson ? new NdjsonInstallReporter(Log) : null;
+        IInstallReporter reporter = ndjson is null ? new ConsoleInstallReporter(Log) : ndjson;
+        var installation = new Installation(Path.GetFullPath(command.InstallDirectory!));
+        try
+        {
+            if (!installation.IsPresent)
+                throw new InvalidOperationException($"WiiCompiled is not installed at {installation.Root}.");
+            using var operationLock = InstallOperationLock.Acquire(installation.Root, reporter);
+            var result = await new QuestBuildService(reporter).BuildAsync(installation,
+                Path.GetFullPath(command.QuestApkPath!), Path.GetFullPath(command.OutputPath!),
+                command.IncludeGameFiles, cancellationToken);
+            if (ndjson is null)
+                Console.Out.WriteLine($"Quest game package: {result.PackagePath} ({result.SizeBytes / 1_000_000} MB)");
+            ndjson?.QuestPackage(result);
+            ndjson?.Success(installation.Root);
+            return 0;
+        }
+        catch (Exception ex) when (ndjson is not null)
+        {
+            ndjson.Failure(ex is OperationCanceledException ? "Operation canceled." : ex.Message);
+            Console.Error.WriteLine(ex);
+            return 1;
+        }
+        finally
+        {
+            ndjson?.EnsureFinished("The Quest build stopped before it reached a result.");
         }
     }
 

@@ -3,6 +3,9 @@ package org.wiicompiled.quest
 import android.app.AlertDialog
 import android.content.Context
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.Process
 import android.system.Os
 import android.util.Log
 import java.io.File
@@ -11,7 +14,9 @@ import org.libsdl.app.SDLActivity
 import org.libsdl.app.SDLSurface
 
 /**
- * The one activity of the standalone Quest build.
+ * The game: the immersive activity that runs the native runtime and the player's
+ * own compiled game. The app opens on [org.wiicompiled.quest.launcher.LauncherActivity],
+ * whose Play button starts this one.
  *
  * SDLActivity owns the surface, the Java-side event pump and the JNI plumbing
  * the OpenXR loader needs (the runtime fetches the JavaVM and this activity
@@ -19,42 +24,76 @@ import org.libsdl.app.SDLSurface
  * adds is everything the native runtime cannot discover on its own:
  *
  *  - the data directory the player fills with the extracted disc
- *    (Android/data/<package>/files/WiiCompiled/DATA) and where Config.toml,
- *    saves and logs live;
- *  - the bundled read-only runtime resources, unpacked from the APK once;
- *  - a Config.toml with VR enabled and the disc path filled in.
+ *    (Android/data/<package>/files/WiiCompiledOpenXRVR/DATA) and where
+ *    Config.toml, saves and logs live ([GameStorage]);
+ *  - the bundled read-only runtime resources, unpacked from the APK once.
  *
  * The paths are handed over through the environment before SDLActivity's own
  * onCreate loads the native libraries, because the runtime resolves them from
  * static initialisers where SDL's JNI helpers are not yet usable.
+ *
+ * This activity lives in its own `:game` process, and that process ends with
+ * it. Neither SDL nor the runtime can start a second time in one process:
+ * SDLActivity calls System.exit on a re-created activity once SDL_main has run,
+ * and guest memory, fibers and the OpenXR device are process-wide. A fresh
+ * process per session also keeps the launcher alive when the game exits.
  */
 class QuestActivity : SDLActivity() {
 
-    override fun getLibraries(): Array<String> = arrayOf("SDL3", BuildConfig.MAIN_LIBRARY)
+    override fun getLibraries(): Array<String> =
+        if (BuildConfig.EXTERNAL_GAME) arrayOf("SDL3") else arrayOf("SDL3", BuildConfig.MAIN_LIBRARY)
+
+    /**
+     * The game is not part of the APK: it is the libmain.so the player built from their own disc
+     * ([GameLibrary]), loaded from private storage. Its libSDL3.so, libpng16.so and
+     * libc++_shared.so dependencies resolve against the ones this APK installed.
+     */
+    override fun loadLibraries() {
+        super.loadLibraries()
+        if (BuildConfig.EXTERNAL_GAME) {
+            // SDLActivity reports a failed load in its own error dialog and never starts the game.
+            if (GameLibrary.status(this) != GameLibrary.Status.Ready) {
+                throw UnsatisfiedLinkError(getString(R.string.game_not_installed))
+            }
+            System.load(GameLibrary.library(this).absolutePath)
+        }
+    }
+
+    override fun getMainSharedObject(): String =
+        if (BuildConfig.EXTERNAL_GAME) GameLibrary.library(this).absolutePath else super.getMainSharedObject()
 
     override fun createSDLSurface(context: Context): SDLSurface = QuestSurface(context)
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        val dataRoot = (getExternalFilesDir(null) ?: filesDir)
-        val gameRoot = File(dataRoot, APP_DIRECTORY)
-        gameRoot.mkdirs()
+        GameStorage.prepare(this)
         val resources = unpackRuntimeResources()
 
-        Os.setenv("MKW_ANDROID_DATA_DIR", dataRoot.absolutePath, true)
+        Os.setenv("MKW_ANDROID_DATA_DIR", GameStorage.dataRoot(this).absolutePath, true)
         Os.setenv("MKW_ANDROID_RESOURCES_DIR", resources.absolutePath, true)
-        ensureConfig(gameRoot)
 
         super.onCreate(savedInstanceState)
 
-        if (!File(gameRoot, DISC_DIRECTORY).isDirectory && !mBrokenLibraries) {
-            Log.w(TAG, "No extracted disc found under ${gameRoot.absolutePath}")
+        // The launcher does not offer Play without DATA; this covers a direct
+        // start, such as adb am start.
+        if (GameStorage.discStatus(this) == GameStorage.DiscStatus.Missing && !mBrokenLibraries) {
+            val disc = GameStorage.discDirectory(this)
+            Log.w(TAG, "No extracted disc found under ${disc.parentFile?.absolutePath}")
             AlertDialog.Builder(this)
                 .setTitle(getString(R.string.missing_game_data_title))
-                .setMessage(getString(R.string.missing_game_data_message, File(gameRoot, DISC_DIRECTORY).absolutePath))
+                .setMessage(getString(R.string.missing_game_data_message, disc.absolutePath))
                 .setCancelable(false)
                 .setPositiveButton(android.R.string.ok) { _, _ -> finish() }
                 .show()
         }
+    }
+
+    override fun onDestroy() {
+        // SDLActivity asks SDL_main to quit and waits up to a second for it.
+        super.onDestroy()
+        // Ended from the main looper so the activity manager has already
+        // recorded this destruction and returns to the launcher.
+        Log.i(TAG, "Game activity destroyed; ending the game process")
+        Handler(Looper.getMainLooper()).post { Process.killProcess(Process.myPid()) }
     }
 
     /**
@@ -92,37 +131,7 @@ class QuestActivity : SDLActivity() {
         }
     }
 
-    /**
-     * Writes a first Config.toml pointing at the disc directory with VR on.
-     * An existing file is left alone: the settings overlay edits it in place.
-     */
-    private fun ensureConfig(gameRoot: File) {
-        val config = File(gameRoot, "Config.toml")
-        if (config.isFile) {
-            return
-        }
-        val disc = File(gameRoot, DISC_DIRECTORY).absolutePath
-        config.writeText(
-            """
-            # WiiCompiled Quest configuration. Edit with adb pull/push or the in-game overlay.
-            [paths]
-            dvd_root = "$disc"
-
-            [video]
-            widescreen = true
-            resolution_multiplier = 1.0
-
-            [vr]
-            enabled = true
-            render_scale = 1.0
-            """.trimIndent() + "\n",
-        )
-    }
-
-    companion object {
-        private const val TAG = "WiiCompiledQuest"
-        // Must match kApplicationDirectoryName in runtime/include/runtime_config.h.
-        private const val APP_DIRECTORY = "WiiCompiledOpenXRVR"
-        private const val DISC_DIRECTORY = "DATA"
+    private companion object {
+        const val TAG = "WiiCompiledQuest"
     }
 }

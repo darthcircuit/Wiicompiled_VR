@@ -1,3 +1,4 @@
+import javax.inject.Inject
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -26,6 +27,62 @@ val prepareRuntimeResources by tasks.registering(Copy::class) {
     into(runtimeResources)
 }
 
+// The disc the launcher accepts when it extracts the player's image: the game ID and
+// the clean PAL main.dol / StaticR.rel hashes, read from the same recomp.yml pins the
+// PC installer's payload manifest uses (Launcher/Build-Installer.ps1).
+val discPins: Map<String, String> = run {
+    val manifest = File(mkwRepoRoot, "projects/mkwii/recomp.yml").readText()
+    fun pin(pattern: String): String =
+        Regex(pattern, RegexOption.DOT_MATCHES_ALL).find(manifest)?.groupValues?.get(1)
+            ?: throw GradleException("projects/mkwii/recomp.yml has no match for $pattern")
+    mapOf(
+        "DISC_GAME_ID" to pin("""\n\s*game_id:\s*(\w+)"""),
+        "DISC_DOL_SHA256" to pin("""\n\s*dol:.*?sha256:\s*([0-9a-fA-F]{64})"""),
+        "DISC_REL_SHA256" to pin("""\n\s*rel:.*?sha256:\s*([0-9a-fA-F]{64})"""),
+    )
+}
+
+// android/nod-jni: nod, the disc image library the PC installer runs as nodtool,
+// cross-compiled with cargo for the launcher's "Select disc image". Needs a Rust
+// toolchain with the aarch64-linux-android target (see docs/quest-port.md).
+val nodJniDir = rootProject.file("nod-jni")
+val nodJniTargetDir = layout.buildDirectory.dir("nod-jni")
+val nodJniLibs = layout.buildDirectory.dir("generated/jniLibs/nodJni")
+val buildNodJni by tasks.registering(Exec::class) {
+    inputs.dir(File(nodJniDir, "src"))
+    inputs.files(File(nodJniDir, "Cargo.toml"), File(nodJniDir, "Cargo.lock"))
+    outputs.file(nodJniTargetDir.map { it.file("aarch64-linux-android/release/libnod_jni.so") })
+    workingDir = nodJniDir
+    val windows = System.getProperty("os.name").startsWith("Windows")
+    val cargoHome = System.getenv("CARGO_HOME")?.let(::File) ?: File(System.getProperty("user.home"), ".cargo")
+    val cargo = providers.gradleProperty("cargo").orNull
+        ?: File(cargoHome, if (windows) "bin/cargo.exe" else "bin/cargo").takeIf { it.isFile }?.path
+        ?: "cargo"
+    commandLine(cargo, "build", "--release", "--locked", "--target", "aarch64-linux-android")
+    doFirst {
+        val host = when {
+            windows -> "windows-x86_64"
+            System.getProperty("os.name").startsWith("Mac") -> "darwin-x86_64"
+            else -> "linux-x86_64"
+        }
+        val bin = File(androidComponents.sdkComponents.ndkDirectory.get().asFile, "toolchains/llvm/prebuilt/$host/bin")
+        val clang = File(bin, "aarch64-linux-android29-clang" + if (windows) ".cmd" else "").path
+        environment("CARGO_TARGET_DIR", nodJniTargetDir.get().asFile.path)
+        environment("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", clang)
+        environment("CC_aarch64_linux_android", clang)
+        environment("AR_aarch64_linux_android", File(bin, "llvm-ar" + if (windows) ".exe" else "").path)
+    }
+}
+val stageNodJni by tasks.registering(Copy::class) {
+    from(buildNodJni) { include("**/libnod_jni.so") }
+    eachFile { path = "arm64-v8a/$name" }
+    includeEmptyDirs = false
+    into(nodJniLibs)
+}
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("JniLibFolders") }.configureEach {
+    dependsOn(stageNodJni)
+}
+
 android {
     namespace = "org.wiicompiled.quest"
     compileSdk = 36
@@ -38,6 +95,11 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0-quest"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        for ((name, value) in discPins) {
+            buildConfigField("String", name, "\"$value\"")
+        }
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -65,7 +127,10 @@ android {
             dimension = "profile"
             buildConfigField("String", "MAIN_LIBRARY", "\"main\"")
             buildConfigField("String", "PROFILE", "\"base\"")
-            externalNativeBuild { cmake { targets += "WiiCompiled" } }
+            // The APK carries the game kit, not the game: the player's libmain.so is built from
+            // their own disc and loaded from private storage (see android/QuestGameKit.psm1).
+            buildConfigField("boolean", "EXTERNAL_GAME", "true")
+            externalNativeBuild { cmake { targets += "mkw_quest_kit_probe" } }
         }
         create("retroRewind") {
             dimension = "profile"
@@ -73,6 +138,9 @@ android {
             versionNameSuffix = "-retro-rewind"
             buildConfigField("String", "MAIN_LIBRARY", "\"main_retro_rewind\"")
             buildConfigField("String", "PROFILE", "\"retro_rewind\"")
+            // Not moved to the game kit yet: this flavour still bundles its translated library,
+            // so a Retro Rewind APK is for local use only.
+            buildConfigField("boolean", "EXTERNAL_GAME", "false")
             externalNativeBuild { cmake { targets += "RetroRewind" } }
         }
     }
@@ -92,6 +160,7 @@ android {
 
     sourceSets.named("main") {
         assets.srcDir(runtimeResources)
+        jniLibs.srcDir(nodJniLibs)
     }
 
     compileOptions {
@@ -101,6 +170,8 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = false
+            // Built only to produce the game kit; its objects travel as assets/game_kit.
+            excludes += "**/libmkw_quest_kit_probe.so"
         }
     }
     lint {
@@ -112,6 +183,71 @@ tasks.named("preBuild") {
     dependsOn(prepareRuntimeResources)
 }
 
+/**
+ * Exports the game kit (android/QuestGameKit.psm1) from the CMake tree this variant's native
+ * build just produced, into the variant's assets as game_kit/. The tree is found through the
+ * probe library: AGP gives the .cxx directory and the obj directory the same configuration hash.
+ */
+abstract class ExportQuestGameKit : DefaultTask() {
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @get:Internal
+    abstract val appDir: DirectoryProperty
+
+    @get:Internal
+    abstract val script: RegularFileProperty
+
+    @get:Internal
+    abstract val llvmStrip: RegularFileProperty
+
+    @get:Inject
+    abstract val execOperations: ExecOperations
+
+    init {
+        // The kit's inputs are CMake's outputs, which Gradle does not track; exporting takes seconds.
+        outputs.upToDateWhen { false }
+    }
+
+    @TaskAction
+    fun export() {
+        val app = appDir.get().asFile
+        val probe = File(app, "build/intermediates/cxx").walkTopDown()
+            .filter { it.name == "libmkw_quest_kit_probe.so" && it.parentFile.name == "arm64-v8a" }
+            .maxByOrNull { it.lastModified() }
+            ?: throw GradleException("No libmkw_quest_kit_probe.so; the native build did not produce the game kit probe")
+        val configuration = probe.parentFile.parentFile.parentFile // <BuildType>/<hash>
+        val binaryDir = File(app, ".cxx/${configuration.parentFile.name}/${configuration.name}/arm64-v8a")
+        if (!File(binaryDir, "build.ninja").isFile) throw GradleException("No CMake tree at $binaryDir")
+        val kitDir = File(outputDir.get().asFile, "game_kit")
+        execOperations.exec {
+            commandLine(
+                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.get().asFile.path,
+                "-CMakeBinaryDir", binaryDir.path, "-OutputDir", kitDir.path, "-LlvmStrip", llvmStrip.get().asFile.path,
+            )
+        }
+    }
+}
+
+androidComponents {
+    onVariants(selector().withFlavor("profile" to "base")) { variant ->
+        val capitalized = variant.name.replaceFirstChar { it.uppercase() }
+        // AGP packages every library in the CMake output directory, so a game library left over
+        // from a build that still linked the game would otherwise ship in the APK.
+        variant.packaging.jniLibs.excludes.add("**/libmain*.so")
+        val export = tasks.register<ExportQuestGameKit>("export${capitalized}QuestGameKit") {
+            dependsOn("merge${capitalized}NativeLibs")
+            appDir.set(layout.projectDirectory)
+            script.set(rootProject.layout.projectDirectory.file("Export-QuestGameKit.ps1"))
+            val host = if (System.getProperty("os.name").startsWith("Windows")) "windows-x86_64" else "linux-x86_64"
+            llvmStrip.set(sdkComponents.ndkDirectory.map {
+                it.file("toolchains/llvm/prebuilt/$host/bin/llvm-strip" + if (host.startsWith("windows")) ".exe" else "")
+            })
+        }
+        variant.sources.assets?.addGeneratedSourceDirectory(export, ExportQuestGameKit::outputDir)
+    }
+}
+
 kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
@@ -121,4 +257,7 @@ kotlin {
 dependencies {
     // SDLActivity and libSDL3.so; the AAR is downloaded by Prepare-QuestDependencies.ps1.
     implementation(files("libs/SDL3-3.4.4.aar"))
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }

@@ -24,7 +24,8 @@ dotnet test translator/Translator.sln -c Release
 ```
 
 `--version` still prints a plain version. `--info-json` additionally reports `productId` as
-`wiicompiled-openxr-vr`, `version`, and `openxrD3D12: true`. VR refuses installation, repair,
+`wiicompiled-openxr-vr`, `version`, `openxrD3D12: true`, and `questBuild: true` when the setup
+supports `--build-quest` (see `docs/quest-port.md`). VR refuses installation, repair,
 launch, or uninstall of a normal or unidentified installation. Nonportable VR installations use
 `WiiCompiledOpenXRVR` application data and a distinct uninstall registration and shortcut.
 

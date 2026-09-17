@@ -161,6 +161,14 @@ set_source_files_properties(${MKW_PPC_SEMANTIC_RUNTIME_SOURCES} PROPERTIES
     SKIP_UNITY_BUILD_INCLUSION ON
     SKIP_PRECOMPILE_HEADERS ON
     COMPILE_OPTIONS "${MKW_TRANSLATED_PPC_FP_OPTIONS}")
+if(MKW_PLATFORM_ANDROID)
+    # The Quest app ships the runtime prebuilt and builds only the game from the player's disc
+    # (android/app/src/main/cpp/CMakeLists.txt, the game kit). These two are generated from that
+    # disc, so they must stay objects of their own rather than disappear into a unity batch the
+    # kit has to ship.
+    set_source_files_properties("${DATA_INIT_FILE}" "${GUEST_SYMBOL_TABLE_FILE}" PROPERTIES
+        SKIP_UNITY_BUILD_INCLUSION ON)
+endif()
 set_target_properties(mkw_runtime_common PROPERTIES UNITY_BUILD ON UNITY_BUILD_MODE GROUP)
 target_precompile_headers(mkw_runtime_common PRIVATE "${MKW_RUNTIME_SOURCE_DIR}/include/mkw_pch.h")
 mkw_apply_common_compile_options(mkw_runtime_common)
@@ -230,8 +238,16 @@ if(MKW_HAVE_RETRO_REWIND)
     target_precompile_headers(mkw_retro_rewind_functions REUSE_FROM mkw_base_shared)
 endif()
 
+# WITHOUT_GAME configures everything a product links except the translated game: the base
+# shards and the runtime objects generated from the disc. The Quest game kit is built that way.
 function(mkw_configure_product target)
-    target_sources(${target} PRIVATE $<TARGET_OBJECTS:mkw_runtime_common>)
+    cmake_parse_arguments(PARSE_ARGV 1 MKW_PRODUCT "WITHOUT_GAME" "" "")
+    if(MKW_PRODUCT_WITHOUT_GAME)
+        target_sources(${target} PRIVATE
+            "$<FILTER:$<TARGET_OBJECTS:mkw_runtime_common>,EXCLUDE,data_sections_init|guest_symbol_table>")
+    else()
+        target_sources(${target} PRIVATE $<TARGET_OBJECTS:mkw_runtime_common>)
+    endif()
     # Startup CPU check. Must stay a separate object library so it keeps the
     # plain baseline ISA while everything around it is built for x86-64-v3.
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
@@ -253,8 +269,13 @@ function(mkw_configure_product target)
     # The dispatch-table and registration shards compile inside the product target itself and
     # include the same fat translated headers; bound them by the same pool.
     mkw_bound_translated_compiles(${target})
-    target_link_libraries(${target} PRIVATE
-        mkw_platform mkw_base_shared mkw::pugixml mkw::toml11 mkw::cryptopp)
+    if(MKW_PRODUCT_WITHOUT_GAME)
+        target_link_libraries(${target} PRIVATE
+            mkw_platform mkw::pugixml mkw::toml11 mkw::cryptopp)
+    else()
+        target_link_libraries(${target} PRIVATE
+            mkw_platform mkw_base_shared mkw::pugixml mkw::toml11 mkw::cryptopp)
+    endif()
 
     target_link_libraries(${target} PRIVATE
         aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
@@ -366,6 +387,18 @@ if(TARGET mkw_base_sensitive)
     target_sources(WiiCompiled PRIVATE $<TARGET_OBJECTS:mkw_base_sensitive>)
 endif()
 
+if(MKW_PLATFORM_ANDROID)
+    # The Quest game kit. The APK never contains the translated game: the player builds
+    # libmain.so from their own disc, on the headset or on a PC, and the app loads it from
+    # private storage. This probe is WiiCompiled without the game, linked with the game's
+    # symbols left unresolved. Building it builds every input the kit ships, and its link line
+    # is the recipe android/QuestGameKit.psm1 exports and the game builders replay.
+    add_library(mkw_quest_kit_probe SHARED "${MKW_BASE_PRODUCT_SOURCE}")
+    mkw_configure_product(mkw_quest_kit_probe WITHOUT_GAME)
+    target_precompile_headers(mkw_quest_kit_probe REUSE_FROM WiiCompiled)
+    target_link_options(mkw_quest_kit_probe PRIVATE "-Wl,--unresolved-symbols=ignore-all")
+endif()
+
 if(MKW_HAVE_RETRO_REWIND)
     if(MKW_PLATFORM_ANDROID)
         add_library(RetroRewind SHARED "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
@@ -407,7 +440,7 @@ endif()
 
 set(MKW_ALL_BUILD_TARGETS
     mkw_runtime_common mkw_base_shared mkw_base_sensitive mkw_retro_sensitive
-    mkw_retro_rewind_functions WiiCompiled RetroRewind)
+    mkw_retro_rewind_functions WiiCompiled RetroRewind mkw_quest_kit_probe)
 foreach(target IN LISTS MKW_ALL_BUILD_TARGETS)
     if(TARGET ${target} AND MKW_BASELINE_ARCH_FLAG)
         target_compile_options(${target} PRIVATE ${MKW_BASELINE_ARCH_FLAG})

@@ -1,0 +1,33 @@
+[package]
+name = "nod-jni"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-only"
+publish = false
+description = "JNI bridge from the Quest launcher to nod, the disc image library behind the PC installer's nodtool."
+
+[lib]
+name = "nod_jni"
+crate-type = ["cdylib"]
+
+# Built on its own, never as part of an outer workspace.
+[workspace]
+
+[dependencies]
+jni = "0.21"
+# The same nod release as Launcher/WiiCompiled.Setup.Common/NodToolProvider.cs, so the
+# Quest and PC installers extract a disc identically. alpha.10 is only published on GitHub.
+nod = { git = "https://github.com/encounter/nod", tag = "v2.0.0-alpha.10", default-features = false, features = [
+    "compress-bzip2-static",
+    "compress-lzma-static",
+    "compress-zlib-static",
+    "compress-zstd-static",
+    "threading",
+] }
+zerocopy = "0.8"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true

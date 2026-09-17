@@ -1,4 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="ic_launcher_background">#1A237E</color>
+
+    <!-- The launcher uses WheelWizard's palette (Views/Styles/Resources/Constants.axaml)
+         so the Quest and PC launchers read as the same product. -->
+    <color name="neutral_50">#F6F7F9</color>
+    <color name="neutral_100">#EDEDF1</color>
+    <color name="neutral_200">#D7D9E0</color>
+    <color name="neutral_300">#B4B8C5</color>
+    <color name="neutral_400">#8B91A5</color>
+    <color name="neutral_500">#6C7389</color>
+    <color name="neutral_600">#575D72</color>
+    <color name="neutral_700">#474B5D</color>
+    <color name="neutral_800">#3E424E</color>
+    <color name="neutral_900">#363944</color>
+    <color name="neutral_950">#24252D</color>
+
+    <color name="primary_200">#8EFFE2</color>
+    <color name="primary_300">#34EAC5</color>
+    <color name="primary_400">#01CBA5</color>
+    <color name="primary_600">#00A488</color>
+    <color name="primary_700">#03826E</color>
+    <color name="primary_800">#08675A</color>
+
+    <color name="warning_500">#FFC800</color>
+    <color name="warning_600">#D19200</color>
+    <color name="danger_500">#FE2048</color>
 </resources>

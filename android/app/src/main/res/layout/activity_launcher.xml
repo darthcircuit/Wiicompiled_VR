@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The launcher panel: WheelWizard's layout, a sidebar of pages beside the open page. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/neutral_900"
+    android:orientation="horizontal">
+
+    <LinearLayout
+        android:layout_width="210dp"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:paddingStart="10dp"
+        android:paddingTop="12dp"
+        android:paddingEnd="10dp"
+        android:paddingBottom="12dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="4dp"
+            android:paddingBottom="20dp">
+
+            <ImageView
+                android:layout_width="26dp"
+                android:layout_height="26dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_wheel"
+                android:tint="@color/neutral_400" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:text="@string/app_name"
+                android:textColor="@color/neutral_300"
+                android:textSize="16sp" />
+        </LinearLayout>
+
+        <TextView
+            style="@style/Launcher.SectionLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:layout_marginBottom="6dp"
+            android:text="@string/launcher_section_general" />
+
+        <LinearLayout
+            android:id="@+id/nav_home"
+            style="@style/Launcher.NavItem">
+
+            <ImageView
+                style="@style/Launcher.NavIcon"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_home" />
+
+            <TextView
+                style="@style/Launcher.NavLabel"
+                android:text="@string/launcher_nav_home" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/nav_settings"
+            style="@style/Launcher.NavItem">
+
+            <ImageView
+                style="@style/Launcher.NavIcon"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_sliders" />
+
+            <TextView
+                style="@style/Launcher.NavLabel"
+                android:text="@string/launcher_nav_settings" />
+        </LinearLayout>
+
+        <Space
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <TextView
+            android:id="@+id/launcher_version"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:background="@drawable/bg_pill"
+            android:paddingStart="12dp"
+            android:paddingTop="4dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="4dp"
+            android:textColor="@color/neutral_300"
+            android:textSize="13sp" />
+    </LinearLayout>
+
+    <FrameLayout
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1"
+        android:background="@drawable/bg_content"
+        android:clipToOutline="true">
+
+        <include
+            android:id="@+id/page_home"
+            layout="@layout/page_home" />
+
+        <include
+            android:id="@+id/page_settings"
+            layout="@layout/page_settings"
+            android:visibility="gone" />
+    </FrameLayout>
+</LinearLayout>

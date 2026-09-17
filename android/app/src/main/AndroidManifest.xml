@@ -5,6 +5,10 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- The launcher's disc image extraction runs as a foreground service that keeps the CPU awake. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- The Khronos loader brokers the system OpenXR runtime through this permission. -->
     <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
 
@@ -38,6 +42,35 @@
         <!-- Let the runtime move CPU budget to the GPU; Aurora's replay is GPU-bound. -->
         <meta-data android:name="com.oculus.trade_cpu_for_gpu_amount" android:value="-1" />
 
+        <!-- The app opens on this 2D panel: Play starts QuestActivity, Settings edits Config.toml. -->
+        <activity
+            android:name=".launcher.LauncherActivity"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode|density"
+            android:exported="true"
+            android:resizeableActivity="true"
+            android:theme="@style/Theme.WiiCompiled.Launcher">
+            <!-- Horizon OS panel size. -->
+            <layout
+                android:defaultWidth="1024dp"
+                android:defaultHeight="640dp"
+                android:minWidth="760dp"
+                android:minHeight="520dp" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Extracts the player's disc image and imports games built on a PC (launcher process). -->
+        <service
+            android:name=".launcher.GameSetupService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- The immersive game, as DolphinXR's EmulationActivity: VR category, no
+             launcher entry, still exported so adb can start it directly. Its own
+             process, which QuestActivity ends when the game closes: SDL and the
+             runtime cannot start twice in one process. -->
         <activity
             android:name=".QuestActivity"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode|density"
@@ -45,6 +78,7 @@
             android:exported="true"
             android:launchMode="singleTask"
             android:preferMinimalPostProcessing="true"
+            android:process=":game"
             android:resizeableActivity="false"
             android:screenOrientation="landscape">
             <property
@@ -53,7 +87,7 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="com.oculus.intent.category.VR" />
-                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
     </application>

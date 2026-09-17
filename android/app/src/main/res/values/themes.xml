@@ -6,4 +6,81 @@
         <item name="android:windowBackground">@android:color/black</item>
         <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
     </style>
+
+    <!-- The 2D launcher panel: dark Material widgets tinted with the launcher palette. -->
+    <style name="Theme.WiiCompiled.Launcher" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/neutral_900</item>
+        <item name="android:statusBarColor">@color/neutral_900</item>
+        <item name="android:navigationBarColor">@color/neutral_900</item>
+        <item name="android:colorPrimary">@color/neutral_900</item>
+        <item name="android:colorAccent">@color/primary_400</item>
+        <item name="android:colorControlNormal">@color/neutral_400</item>
+        <item name="android:textColorPrimary">@color/neutral_100</item>
+        <item name="android:textColorSecondary">@color/neutral_400</item>
+        <item name="android:colorBackground">@color/neutral_950</item>
+        <item name="android:alertDialogTheme">@style/Theme.WiiCompiled.Launcher.Dialog</item>
+    </style>
+
+    <style name="Theme.WiiCompiled.Launcher.Dialog" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:colorAccent">@color/primary_400</item>
+        <item name="android:colorBackground">@color/neutral_900</item>
+    </style>
+
+    <!-- Namespace for the launcher's view styles below. -->
+    <style name="Launcher" />
+
+    <style name="Launcher.PageTitle">
+        <item name="android:textColor">@color/neutral_300</item>
+        <item name="android:textSize">26sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+    </style>
+
+    <style name="Launcher.SectionLabel">
+        <item name="android:textColor">@color/neutral_300</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+    </style>
+
+    <style name="Launcher.NavItem">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">48dp</item>
+        <item name="android:orientation">horizontal</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:paddingStart">12dp</item>
+        <item name="android:paddingEnd">12dp</item>
+        <item name="android:layout_marginBottom">2dp</item>
+        <item name="android:background">@drawable/bg_nav_item</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+    </style>
+
+    <style name="Launcher.NavIcon">
+        <item name="android:layout_width">24dp</item>
+        <item name="android:layout_height">24dp</item>
+        <item name="android:tint">@color/nav_content</item>
+        <item name="android:duplicateParentState">true</item>
+    </style>
+
+    <style name="Launcher.NavLabel">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginStart">14dp</item>
+        <item name="android:textColor">@color/nav_content</item>
+        <item name="android:textSize">19sp</item>
+        <item name="android:duplicateParentState">true</item>
+    </style>
+
+    <style name="Launcher.Tab">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">44dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingStart">14dp</item>
+        <item name="android:paddingEnd">14dp</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:textColor">@color/tab_text</item>
+        <item name="android:background">@drawable/bg_tab</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+    </style>
 </resources>

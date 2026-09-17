@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A kart wheel: tyre, rim with five holes, hub. Drawn for this app. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M1,12a11,11 0 1,0 22,0a11,11 0 1,0 -22,0z M4,12a8,8 0 1,0 16,0a8,8 0 1,0 -16,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M5.5,12a6.5,6.5 0 1,0 13,0a6.5,6.5 0 1,0 -13,0z
+            M10.55,8.1a1.45,1.45 0 1,0 2.9,0a1.45,1.45 0 1,0 -2.9,0z
+            M14.26,10.8a1.45,1.45 0 1,0 2.9,0a1.45,1.45 0 1,0 -2.9,0z
+            M12.84,15.16a1.45,1.45 0 1,0 2.9,0a1.45,1.45 0 1,0 -2.9,0z
+            M8.26,15.16a1.45,1.45 0 1,0 2.9,0a1.45,1.45 0 1,0 -2.9,0z
+            M6.84,10.8a1.45,1.45 0 1,0 2.9,0a1.45,1.45 0 1,0 -2.9,0z
+            M11.1,12a0.9,0.9 0 1,0 1.8,0a0.9,0.9 0 1,0 -1.8,0z" />
+</vector>

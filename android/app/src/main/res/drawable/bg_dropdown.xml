@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <selector>
+            <item android:state_hovered="true">
+                <shape android:shape="rectangle">
+                    <solid android:color="@color/neutral_700" />
+                    <corners android:radius="6dp" />
+                </shape>
+            </item>
+            <item>
+                <shape android:shape="rectangle">
+                    <solid android:color="@color/neutral_800" />
+                    <corners android:radius="6dp" />
+                </shape>
+            </item>
+        </selector>
+    </item>
+    <item
+        android:width="16dp"
+        android:height="16dp"
+        android:end="10dp"
+        android:drawable="@drawable/ic_chevron_down"
+        android:gravity="end|center_vertical" />
+</layer-list>

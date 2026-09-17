@@ -58,6 +58,12 @@ internal static class Program
                 return ConsoleCommands.CheckProducts(command, cancellationSignal.Token);
             }
 
+            if (command.Mode == AppMode.BuildQuest)
+            {
+                using var cancellationSignal = CancellationSignal.ObserveEnvironment();
+                return ConsoleCommands.BuildQuest(command, cancellationSignal.Token).GetAwaiter().GetResult();
+            }
+
             if (command.Mode is AppMode.LaunchBase or AppMode.LaunchRetro)
                 return GameLaunchService.LaunchAsync(
                     command.Mode == AppMode.LaunchBase ? BuildProfile.Base : BuildProfile.RetroRewind)

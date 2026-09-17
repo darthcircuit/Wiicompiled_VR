@@ -15,7 +15,8 @@ internal enum AppMode
     RepairProducts,
     Version,
     InfoJson,
-    EmitPayloadIdentities
+    EmitPayloadIdentities,
+    BuildQuest
 }
 
 /// <summary>
@@ -34,6 +35,7 @@ internal sealed record ModeRules
     public bool RequiresInstallDirectory { get; init; }
     public bool RequiresPayloadRoot { get; init; }
     public bool AcceptsPortable { get; init; }
+    public bool AcceptsQuestBuild { get; init; }
 }
 
 internal sealed class CommandLine
@@ -47,6 +49,9 @@ internal sealed class CommandLine
     public bool ProgressJson { get; private set; }
     public string? PayloadRootPath { get; private set; }
     public bool Portable { get; private set; }
+    public string? QuestApkPath { get; private set; }
+    public string? OutputPath { get; private set; }
+    public bool IncludeGameFiles { get; private set; }
 
     public static bool WantsProgressJson(string[] args) =>
         args.Any(argument => argument.Equals("--progress-json", StringComparison.OrdinalIgnoreCase));
@@ -88,6 +93,10 @@ internal sealed class CommandLine
                     result.RetroWfcPayloadMode = RetroWfcPayloadMode.Skipped;
                     break;
                 case "--install-dir": result.InstallDirectory = RequireValue(args, ref i); break;
+                case "--build-quest": result.Mode = AppMode.BuildQuest; break;
+                case "--quest-apk": result.QuestApkPath = RequireValue(args, ref i); break;
+                case "--output": result.OutputPath = RequireValue(args, ref i); break;
+                case "--include-game-files": result.IncludeGameFiles = true; break;
                 default:
                     throw new ArgumentException($"Unknown CLI option: {args[i]}");
             }
@@ -136,6 +145,11 @@ internal sealed class CommandLine
         [AppMode.EmitPayloadIdentities] = new ModeRules
         {
             Flag = "--emit-payload-identities", RequiresPayloadRoot = true
+        },
+        [AppMode.BuildQuest] = new ModeRules
+        {
+            Flag = "--build-quest", AcceptsProgressJson = true, RequiresInstallDirectory = true,
+            AcceptsQuestBuild = true
         }
     };
 
@@ -153,6 +167,11 @@ internal sealed class CommandLine
         Reject(ProgressJson && !rules.AcceptsProgressJson, "--progress-json");
         Reject(PayloadRootPath is not null && !rules.RequiresPayloadRoot, "--payload-root");
         Reject(Portable && !rules.AcceptsPortable, "--portable");
+        Reject(QuestApkPath is not null && !rules.AcceptsQuestBuild, "--quest-apk");
+        Reject(OutputPath is not null && !rules.AcceptsQuestBuild, "--output");
+        Reject(IncludeGameFiles && !rules.AcceptsQuestBuild, "--include-game-files");
+        if (rules.AcceptsQuestBuild && (string.IsNullOrWhiteSpace(QuestApkPath) || string.IsNullOrWhiteSpace(OutputPath)))
+            throw new ArgumentException($"--quest-apk and --output are required with {rules.Flag}.");
         Reject(RetroWfcPayloadMode != RetroWfcPayloadMode.NotApplicable && !rules.AcceptsPayloadMode,
             "A Retro-WFC payload option");
 

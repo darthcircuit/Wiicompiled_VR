@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The tall card behind the game title: a half-circle top on a 250dp width. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/neutral_900" />
+    <corners android:topLeftRadius="125dp" android:topRightRadius="125dp" />
+</shape>

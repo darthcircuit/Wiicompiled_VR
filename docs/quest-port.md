@@ -138,6 +138,157 @@ suggested for `oculus/touch_controller` and `khr/simple_controller`.
 - Time conversion for frame interpolation uses `XR_KHR_convert_timespec_time`
   (CLOCK_MONOTONIC, the clock behind `steady_clock` on Bionic).
 
+### Launcher and game process
+
+The app opens on `LauncherActivity` (`android/app/src/main/java/org/wiicompiled/quest/launcher/`),
+a 2D Horizon OS panel modelled on the PC launcher, WheelWizard VR, and using its
+palette. **Home** has the Play button and reports a missing or incomplete `DATA`
+(the check is the runtime's own `IsDvdDataRoot`: `files/` and `sys/fst.bin`).
+**Settings** edits `Config.toml` in tabs: VR (camera, rotation, driver hiding,
+lean back, render scale, VR interpolation, virtual screen size and distance),
+Graphics (resolution, widescreen, bloom, shader stutter), Controls (controller
+mode, vibration, the Wii Remote mapping), Audio, and About (paths, OpenXR
+logging). The launch-time geometry (`render_scale`, `hud_distance_meters`,
+`hud_width_meters`) is only reachable here, not from the in-headset panel.
+
+The launcher follows the runtime's rules exactly. `TomlConfig` edits one line
+the way `RuntimeConfigFile::WriteSetting` does, and every edit re-reads the file,
+so values the in-headset panel wrote are kept. Each row reads its key with the
+runtime's default and accepted range. `TomlConfigTest` (`gradlew
+:app:testBaseDebugUnitTest`) covers the editor.
+
+`QuestActivity`, the immersive game, is started from Play, like DolphinXR's
+`EmulationActivity`: `com.oculus.intent.category.VR` without `LAUNCHER`. It runs
+in its own `:game` process, and its `onDestroy` ends that process. This is
+required, not tidiness:
+
+- SDLActivity calls `System.exit(0)` when an activity is created again after
+  `SDL_main` has returned. In one shared process, the second Play would kill
+  the launcher along with the game.
+- Guest memory, fibers, static configuration and the OpenXR Vulkan device all
+  belong to the process. DolphinXR crashed when it opened a second Vulkan VR
+  session in the same process.
+
+Every session therefore starts in a fresh process, and the launcher loads no
+game code. While the `:game` process is alive, Home shows *Resume* and Settings
+warns that changes wait for a restart. `adb shell am start -n
+org.wiicompiled.quest/.QuestActivity` still starts the game directly, which is
+what `Run-Quest.ps1` does.
+
+### Extracting the player's disc image
+
+Without `DATA`, Home's main button is **Select disc image** (About has the same
+action for replacing `DATA`). The player picks their own image with Android's
+document picker, and the launcher extracts it the way the PC installer does
+(`Launcher/WiiCompiled.Setup.Windows/InstallerEngine.cs`). Both use nod
+v2.0.0-alpha.10, so both write the same layout:
+
+1. The file name must be a format nod reads: ISO, GCM, GCZ, CISO, WBFS, WIA or RVZ.
+2. The header must be the pinned game ID, and `main.dol` and `StaticR.rel`,
+   read straight from the image, must match the pinned SHA-256s. Gradle
+   reads all three pins from `projects/mkwii/recomp.yml` into `BuildConfig`, so
+   a wrong disc fails in seconds, before anything is written.
+3. The data partition is extracted into `DATA.extracting` next to `DATA`, after a
+   free-space check.
+4. The extracted files are checked against the same pins, as
+   `ValidateExtractedGame` does. Only then is an existing `DATA` renamed away,
+   the new one moved in, and the old one deleted. A failed, cancelled or killed
+   run never costs a working `DATA`.
+
+nod is the one piece of native code the launcher loads: `android/nod-jni` is
+a Rust `cdylib` with three JNI calls (header, read one file, extract). The
+extraction is nodtool's `extract` command, plus progress reporting and
+cancellation. It reads the picker's file descriptor with `pread`, so nod's
+preloader threads each hold their own clone. Wii partition decryption needs
+the common key, and that key lives in the nod crate fetched at build time, not
+in this repository. The PC installer is the same way: it downloads nodtool.
+
+`GameSetupService` runs the job as a `dataSync` foreground service with a
+partial wake lock. A multi-minute extraction then survives the panel being
+closed and the headset being taken off. `DiscChecksTest` covers the acceptance
+rules and their messages.
+
+### No game code in the APK: the game kit
+
+Like the PC installer, which compiles the translated game on the player's machine, the base
+APK contains no translated Mario Kart code. It carries a **game kit** (`assets/game_kit`, about
+105 MB before compression). The kit is everything `libmain.so` links except the game: the
+runtime, aurora, Dawn and the other dependencies, prebuilt and stripped, plus `kit.json`, the
+recipe that compiles and links a player's own translation against them. The player's
+`libmain.so` is built from their disc and loaded from internal private storage (`GameLibrary`),
+the only place Android lets an app load native code it did not install.
+
+The kit is exported from CMake's own build graph, so its flags cannot drift from a normal build:
+
+- `runtime/cmake/PublicProducts.cmake` defines `mkw_quest_kit_probe` on Android: WiiCompiled
+  `WITHOUT_GAME` (no base shards, and the runtime objects `$<FILTER>`ed of the two
+  disc-generated sources, which skip the unity build on Android for that reason), linked with the
+  game's symbols unresolved. The base flavour builds this probe instead of the product.
+- `android/QuestGameKit.psm1` (`Export-QuestGameKit`, run by the `exportBase*QuestGameKit`
+  Gradle tasks) turns the probe's ninja link edge into `kit.json`'s ordered link inputs. It adds
+  `{game:runtime}`, `{game:product}` and `{game:translated}` markers where WiiCompiled had those
+  objects, and translated shards link inside `--start-lib/--end-lib` with archive semantics as
+  `libmkw_base_shared.a` did. It takes the compile flags CMake recorded for one source of each
+  generated kind. The fingerprint hashes the recipe and every file.
+- `Invoke-QuestGameBuild` replays the recipe with ninja. On the development PC, a library built
+  this way had the same 61,975 defined and 785 undefined dynamic symbols, 29,995 translated
+  functions, `NEEDED` list and soname as the CMake-built one, in 2.4 minutes.
+
+`Build-Quest.ps1` refuses a base APK that contains any `libmain*.so` or lacks the kit, and the
+base variant excludes `**/libmain*.so` from packaging, since AGP packages every library left in
+the CMake output directory. The `func_8…` symbols the kit's runtime objects define are
+hand-written HLE overrides (`PPC_NATIVE_OVERRIDE_*` in `hle_stubs.h`), not translated code.
+The Retro Rewind flavour has not moved to the kit yet and still bundles its library.
+
+### Game packages (.wcgame) and Import from computer
+
+A `.wcgame` is a zip holding `game.json`, `libmain.so` and optionally `DATA/…` (the extracted
+disc, written without compression). `game.json` records the profile, game ID, `main.dol` and
+`StaticR.rel` pins, the kit fingerprint, the library's SHA-256 and who built it.
+`android/Build-QuestGame.ps1` builds one on a PC from the translator's output and the kit the
+last APK build exported, and `-Data` includes the game files. `-Install` pushes it into the app's
+`Import` folder. The launcher creates that folder itself so it owns it, and imports the newest
+package the next time it opens, once per package.
+
+Players get the same build from WheelWizard VR: Settings → WiiCompiled → Meta Quest → **Build**.
+WheelWizard asks for the Quest app's APK, whether to include the game files and where to save the
+package, then runs the installed setup:
+
+```
+WiiCompiled-Setup.exe --build-quest --install-dir <install> --quest-apk <app.apk> --output <file.wcgame> [--include-game-files] --progress-json
+```
+
+Setup extracts `assets/game_kit` from the APK into `<install>\QuestBuild\kit`, so the game always
+matches the app it goes to. It then runs the installation's staged copy of `Build-QuestGame.ps1`
+over its own `BuildWorkspace\generated`, `recomp.yml`, the toolkit's ninja and, with
+`--include-game-files`, `GameAssets\DATA`. The Android compiler is not part of the toolkit: the
+first build downloads Google's `android-ndk-r29-windows.zip` (834 MB, SHA-1 pinned in
+`QuestBuildService.Ndk`, under the Android SDK License, so it is never redistributed). It keeps
+only the ~230 MB that a build needs (clang, lld, clang's headers, the aarch64 runtime libraries and
+sysroot) in `<install>\QuestBuild\android-ndk-29.0.14206865`, and deletes the archive.
+`WIICOMPILED_QUEST_NDK_TOOLCHAIN` points it at an existing NDK LLVM directory instead. Besides
+`progress` and the terminal `result`, the stream carries one
+`{"type":"quest-package","path","kitFingerprint","includesGameFiles","sizeBytes"}` line. A setup
+that supports all this says `"questBuild": true` in `--info-json`, and WheelWizard asks older ones
+to update. The package is written as `<file>.partial` and renamed at the end; a failed or
+cancelled build removes it. The kit's `runtimeIncludeFingerprint` must match the installation's
+`runtime/include`, so an installation only builds for the Quest app from the same release.
+
+`GamePackageImport` (Home's **Import from computer**, or the Import folder) stages the library
+and any `DATA` next to their destinations. It accepts them only if `game.json` names this
+profile, the pinned disc, this APK's kit fingerprint, and a library hash matching the bytes, and
+if the game files pass the same checks as an extraction. A package built for another app version
+is refused, and an installed game whose kit fingerprint no longer matches the APK shows as stale
+on Home.
+
+Home's main button is always the next step: **Import from computer** until a game is installed
+(with **Select disc image** beside it while there are no game files), **Select disc image** when
+only the game files are missing, and **Play** once both are present. Building the game on the
+headset itself is the next step of this work. The translator (a self-contained
+`linux-bionic-arm64` .NET build, which needs heap pointer tagging disabled) and Termux's clang
+21.1.8 both ran on a Quest 3. A base translation took 6.7 minutes with a 3.1 GB memory peak, and
+the heaviest shard compiled in 65 seconds with a 480 MB peak.
+
 ### Build system
 
 - `runtime/CMakeLists.txt` recognises `CMAKE_SYSTEM_NAME=Android` on arm64 as
@@ -158,24 +309,37 @@ suggested for `oculus/touch_controller` and `khr/simple_controller`.
 - `android/`: the Gradle project. `app/src/main/cpp/CMakeLists.txt` adds the
   repository's `runtime/` as a subdirectory with those Android choices;
   flavours `base` and `retroRewind` pick the product target and library name.
+- `android/nod-jni`: Gradle's `buildNodJni` task runs `cargo build --release
+  --locked --target aarch64-linux-android` with the NDK's clang as linker and C
+  compiler. `stageNodJni` puts `libnod_jni.so` into the APK's `arm64-v8a`
+  libraries. `-Pcargo=<path>` overrides the cargo binary.
 
 ## Building
 
 Prerequisites on the Windows host (all already present on the machine this
 was developed on): JDK 17, Android SDK with platform 34+, NDK `29.0.14206865`,
-SDK CMake `3.22.1`, `adb`; a translated graph for your own disc (the installer's
-`BuildWorkspace/generated`, produced by the normal Windows pipeline).
+SDK CMake `3.22.1`, `adb`, Rust 1.85+ with `rustup target add aarch64-linux-android`;
+a translated graph for your own disc (the installer's `BuildWorkspace/generated`,
+produced by the normal Windows pipeline).
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File android/Prepare-QuestDependencies.ps1        # SDL3 3.4.4 AAR into android/app/libs
-powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Install             # base game, debug-signed
+powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Install             # the app and its game kit, debug-signed
+powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Install         # your game, against that kit, into Import (or WheelWizard VR's Build for Quest)
 powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Flavor retroRewind  # Retro Rewind (needs translate-mod output)
-adb push DATA /sdcard/Android/data/org.wiicompiled.quest/files/WiiCompiledOpenXRVR/DATA
+adb push MarioKart.iso /sdcard/Download/                                               # then Select disc image in the launcher
 ```
 
+Instead of the disc image, an already extracted partition can be pushed to
+`/sdcard/Android/data/org.wiicompiled.quest/files/WiiCompiledOpenXRVR/DATA`, or included in the
+game package with `Build-QuestGame.ps1 -Data <dir>`. A game package only fits the APK whose kit
+it was built against. After a native or runtime change, run both scripts again; after a
+Kotlin-only change the kit fingerprint stays the same and the installed game keeps working.
+
 `Config.toml`, saves and per-run logs live next to `DATA` under
-`WiiCompiledOpenXRVR`; the activity writes a first `Config.toml` with
-`[vr] enabled = true` and `paths.dvd_root` set. Logs: `adb logcat -s SDL WiiCompiledQuest`
+`WiiCompiledOpenXRVR`; the launcher (or the game activity, when started
+directly) writes a first `Config.toml` with `[vr] enabled = true` and
+`paths.dvd_root` set. Logs: `adb logcat -s SDL WiiCompiledQuest WiiCompiledLauncher`
 plus the `Logs/<product>_<stamp>_pid<pid>/console.log` folder the runtime writes.
 
 A CMake-only cross-compile of the native runtime (no game) is the quick
