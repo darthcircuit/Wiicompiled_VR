@@ -32,7 +32,12 @@ enum class OpenXRBeginStatus {
 
 enum class OpenXRSubmissionStatus {
     Success,
+    // GPU work may have touched the compositor image or the shared buffers with no completion
+    // marker to wait on; the session cannot continue.
     Failed,
+    // The eye copy was not submitted and nothing touched the compositor image or the shared
+    // buffers, so the frame may end without a layer and the next one is tried normally.
+    Skipped,
     Timeout,
     ShuttingDown,
 };

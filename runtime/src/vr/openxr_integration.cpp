@@ -39,6 +39,7 @@
 #include "vr/openxr_android.h"
 #include "vr/openxr_vulkan.h"
 #include <time.h>
+#include <unistd.h>
 #define XR_USE_TIMESPEC
 #include <openxr/openxr_platform.h>
 #define MKW_OPENXR_GRAPHICS_BACKEND 1
@@ -434,6 +435,10 @@ public:
             input_.reset();
         }
 
+#if defined(__ANDROID__)
+        // The producer: SDL's main thread, which also carries every guest fiber.
+        game_thread_id_ = static_cast<uint32_t>(gettid());
+#endif
         stop_.store(false, std::memory_order_release);
         {
             std::lock_guard lock(interpolation_mutex_);
@@ -558,6 +563,9 @@ private:
 #else
     static constexpr AuroraBackend kRequiredAuroraBackend = BACKEND_VULKAN;
 #endif
+    // Skipped eye copies tolerated back to back before the session is given up: a few seconds
+    // at the headset's refresh rate.
+    static constexpr uint32_t kMaxConsecutiveSkips = 300;
 
     bool BackendMatchesConfiguredGraphicsApi(const AuroraConfig& aurora_config) {
         if (aurora_config.desiredBackend == BACKEND_AUTO ||
@@ -612,6 +620,21 @@ private:
         return true;
     }
 
+#if defined(__ANDROID__)
+    // Aurora's frame worker publishes its native thread id once it runs; until then there is
+    // nothing to hint. The hint itself may be refused by the runtime, which is only logged.
+    bool RegisterAuroraFrameWorkerThread() {
+        const uint32_t thread_id = aurora_get_frame_worker_native_thread_id();
+        if (thread_id == 0 || runtime_ == nullptr) {
+            return false;
+        }
+        const bool hinted = OpenXRAndroidRegisterThreadId(*runtime_, OpenXRAndroidThreadType::RendererMain, thread_id);
+        RT_LOG(RT_TAG_RUNTIME) << "OpenXR: Android thread hint for Aurora's frame worker "
+                               << (hinted ? "set" : "refused") << std::endl;
+        return true;
+    }
+#endif
+
     static bool ProvideStereoFrame(uint32_t, AuroraStereoFrame* output, void* userdata) {
         auto* self = static_cast<OpenXRIntegration*>(userdata);
         if (self == nullptr || output == nullptr) {
@@ -632,11 +655,25 @@ private:
 
     void PacingThread() noexcept {
 #if defined(__ANDROID__)
+        // The runtime schedules hinted threads onto the fast cores. The game thread and Aurora's
+        // frame worker, which submits the GPU work, are the ones that matter; this thread only
+        // paces.
+        bool worker_registered = false;
         if (runtime_ != nullptr) {
-            OpenXRAndroidRegisterThread(*runtime_, OpenXRAndroidThreadType::RendererMain);
+            const bool pacing_hinted =
+                OpenXRAndroidRegisterThread(*runtime_, OpenXRAndroidThreadType::RendererWorker);
+            bool game_hinted = false;
+            if (game_thread_id_ != 0) {
+                game_hinted = OpenXRAndroidRegisterThreadId(*runtime_, OpenXRAndroidThreadType::ApplicationMain,
+                                                            game_thread_id_);
+            }
+            RT_LOG(RT_TAG_RUNTIME) << "OpenXR: Android thread hints: game " << (game_hinted ? "set" : "refused")
+                                   << ", pacing " << (pacing_hinted ? "set" : "refused") << std::endl;
+            worker_registered = RegisterAuroraFrameWorkerThread();
         }
 #endif
         bool fatal = false;
+        uint32_t consecutive_skips = 0;
         bool store_gate_set = false;
         bool store_gate_immersive = false;
         bool presentation_logged = false;
@@ -644,6 +681,11 @@ private:
         uint32_t presentation_log_count = 0;
         bool immersive_submission_logged = false;
         while (!stop_.load(std::memory_order_acquire) && !fatal) {
+#if defined(__ANDROID__)
+            if (!worker_registered) {
+                worker_registered = RegisterAuroraFrameWorkerThread();
+            }
+#endif
             const OpenXREventStatus events = runtime_->PollEvents();
             const bool session_active = runtime_->IsSessionRunning();
             MkwVRPolicySetSessionActive(session_active);
@@ -842,11 +884,26 @@ private:
             if (!backend_->FinishFrame(frame, submit)) {
                 SetError(backend_->LastError());
                 fatal = true;
+            } else if (submission == OpenXRSubmissionStatus::Skipped) {
+                // No GPU work touched the compositor image or the shared buffers, so the frame
+                // ended on the retained layer and the next one is tried normally. A long run of
+                // skips means the copy path is broken for good.
+                ++consecutive_skips;
+                if (consecutive_skips == 1 || consecutive_skips % 60 == 0) {
+                    RT_LOG(RT_TAG_RUNTIME) << "OpenXR: eye copy skipped (" << consecutive_skips
+                                           << " in a row): " << backend_->LastError() << std::endl;
+                }
+                if (consecutive_skips >= kMaxConsecutiveSkips) {
+                    SetError(std::string("Aurora's ") + kGraphicsBackendName +
+                             " stereo copy keeps failing; continuing on the mirror output");
+                    fatal = true;
+                }
             } else if (!submit) {
                 SetError(std::string("Aurora's ") + kGraphicsBackendName +
                          " stereo copy failed; continuing on the mirror output");
                 fatal = true;
             } else {
+                consecutive_skips = 0;
                 ++timing_submissions_;
             }
             if (submit && !fatal && immersive && !immersive_submission_logged) {
@@ -1262,6 +1319,7 @@ private:
     bool prepared_ = false;
     bool provider_registered_ = false;
     bool graphics_retained_ = false;
+    uint32_t game_thread_id_ = 0;
 };
 
 #endif // MKW_OPENXR_GRAPHICS_BACKEND

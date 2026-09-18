@@ -261,6 +261,9 @@ void aurora_store_pipeline_caches();
 // Allows the pipeline compiler to store the caches itself, rate-limited, whenever a first-use
 // burst completes. Off by default; enable it while a stall is acceptable, such as in menus.
 void aurora_set_pipeline_cache_idle_store(bool allowed);
+// The Linux thread id of Aurora's frame worker, or 0 before it runs and where there is none.
+// Android's OpenXR runtime takes it as a scheduling hint (XR_KHR_android_thread_settings).
+uint32_t aurora_get_frame_worker_native_thread_id(void);
 // Absolute schedule for the next sealed frame, on steady_clock: baseNanos anchors the group and
 // intervalNanos is the period, so slot k of N+1 fires at base + k*interval/(N+1). Zeros clear it.
 void aurora_set_present_schedule(uint64_t baseNanos, uint64_t intervalNanos);

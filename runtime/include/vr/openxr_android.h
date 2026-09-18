@@ -35,6 +35,8 @@ enum class OpenXRAndroidThreadType {
     RendererWorker,
 };
 bool OpenXRAndroidRegisterThread(OpenXRRuntime& runtime, OpenXRAndroidThreadType type);
+// The same hint for another thread, named by its Linux thread id (gettid).
+bool OpenXRAndroidRegisterThreadId(OpenXRRuntime& runtime, OpenXRAndroidThreadType type, uint32_t thread_id);
 
 } // namespace mkw::vr
 

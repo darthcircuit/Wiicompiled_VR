@@ -41,6 +41,7 @@ class SettingsPage(
     private val importGame: () -> Unit,
     private val buildGame: () -> Unit,
     private val downloadModPack: () -> Unit,
+    private val resetInstallation: () -> Unit,
 ) {
 
     enum class Tab(val label: Int) {
@@ -275,7 +276,9 @@ class SettingsPage(
                 GameStorage.DiscStatus.Missing -> R.string.about_game_data_missing
             }
             info(R.string.about_game_data, activity.getString(status, disc), stacked = true)
-            action(R.string.about_extract, R.string.about_extract_helper, R.string.home_select_disc, enabled = !GameSetup.isRunning) {
+            // Everything below replaces files the game reads, so nothing starts while it runs.
+            val idle = !GameSetup.isRunning && !gameRunning()
+            action(R.string.about_extract, R.string.about_extract_helper, R.string.home_select_disc, enabled = idle) {
                 selectDiscImage()
             }
             // One row per game this app carries a kit for, so both are visible at once.
@@ -293,13 +296,16 @@ class SettingsPage(
             if (BuildConfig.ON_DEVICE_BUILD) {
                 action(
                     R.string.home_build, R.string.about_build_helper, R.string.home_build,
-                    enabled = !GameSetup.isRunning && GameStorage.discStatus(activity) == GameStorage.DiscStatus.Ready,
+                    enabled = idle && GameStorage.discStatus(activity) == GameStorage.DiscStatus.Ready,
                 ) {
                     buildGame()
                 }
             }
-            action(R.string.home_import, R.string.about_import_helper, R.string.home_import, enabled = !GameSetup.isRunning) {
+            action(R.string.home_import, R.string.about_import_helper, R.string.home_import, enabled = idle) {
                 importGame()
+            }
+            action(R.string.about_reset, R.string.about_reset_helper, R.string.home_reset, enabled = idle) {
+                resetInstallation()
             }
             // Retro Rewind's pack is its own download, and the row says which version is installed.
             if (GameProfile.RetroRewind in GameProfile.available(activity)) {
@@ -314,7 +320,7 @@ class SettingsPage(
                     R.string.about_mod_pack_action,
                     R.string.about_mod_pack_helper,
                     if (installed == null) R.string.home_download_mod_pack else R.string.about_mod_pack_update,
-                    enabled = !GameSetup.isRunning,
+                    enabled = idle,
                 ) {
                     downloadModPack()
                 }
@@ -437,6 +443,10 @@ class SettingsPage(
         ) {
             val initial = read(config)
             var committed = initial
+            // A value the runtime accepts but the slider does not reach (a hand edit) widens the
+            // slider to it, so the bar shows the real value and a nudge changes it by one step.
+            val low = minOf(min, initial)
+            val high = maxOf(max, initial)
             val valueText = TextView(activity).apply {
                 text = format(initial)
                 setTextColor(activity.getColor(R.color.neutral_100))
@@ -444,17 +454,17 @@ class SettingsPage(
                 gravity = Gravity.END or Gravity.CENTER_VERTICAL
                 layoutParams = LinearLayout.LayoutParams(dp(64), LinearLayout.LayoutParams.WRAP_CONTENT)
             }
-            val steps = ((max - min) / step).roundToInt()
+            val steps = ((high - low) / step).roundToInt()
             val seekBar = SeekBar(activity).apply {
                 this.max = steps
-                progress = ((initial.coerceIn(min, max) - min) / step).roundToInt()
+                progress = ((initial.coerceIn(low, high) - low) / step).roundToInt()
                 progressTintList = ColorStateList.valueOf(activity.getColor(R.color.primary_400))
                 thumbTintList = ColorStateList.valueOf(activity.getColor(R.color.primary_300))
                 progressBackgroundTintList = ColorStateList.valueOf(activity.getColor(R.color.neutral_600))
                 layoutParams = LinearLayout.LayoutParams(dp(210), LinearLayout.LayoutParams.WRAP_CONTENT)
             }
             // Rounded so 0.25 + 15 * 0.05 is 1.0 again and an untouched value is not rewritten.
-            fun valueAt(progress: Int) = (min + progress * step).let { Math.round(it * 1e6) / 1e6 }
+            fun valueAt(progress: Int) = (low + progress * step).let { Math.round(it * 1e6) / 1e6 }
             fun commitValue(value: Double) {
                 if (value != committed) {
                     committed = value

@@ -46,6 +46,8 @@ The app opens on a 2D launcher panel modelled on the PC launcher (WheelWizard VR
 still missing (the disc files, the game itself, or Retro Rewind's pack), and
 **Settings** edits `Config.toml` (VR camera, render scale, virtual screen,
 resolution, controllers, audio), with an **Other** tab for the files and the
-games built from them and an **About** tab carrying the credits. The game itself is `QuestActivity`, in its own
+games built from them, with a **Reset installation** action that removes the game files (and
+on request the built games and the Retro Rewind pack) so they can be set up again, and an
+**About** tab carrying the credits. The game itself is `QuestActivity`, in its own
 `:game` process; `adb shell am start -n org.wiicompiled.quest/.QuestActivity`
 still starts it directly.

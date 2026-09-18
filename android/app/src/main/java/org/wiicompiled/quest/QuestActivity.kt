@@ -53,6 +53,7 @@ class QuestActivity : SDLActivity() {
     override fun loadLibraries() {
         super.loadLibraries()
         // SDLActivity reports a failed load in its own error dialog and never starts the game.
+        storageFailure?.let { throw UnsatisfiedLinkError(getString(R.string.game_storage_failed, it)) }
         if (GameLibrary.status(this, profile) != GameLibrary.Status.Ready) {
             throw UnsatisfiedLinkError(getString(R.string.game_not_installed))
         }
@@ -63,8 +64,18 @@ class QuestActivity : SDLActivity() {
 
     override fun createSDLSurface(context: Context): SDLSurface = QuestSurface(context)
 
+    /** Why the game directory could not be prepared, reported through SDL's own error dialog. */
+    private var storageFailure: String? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
-        GameStorage.prepare(this)
+        try {
+            GameStorage.prepare(this)
+        } catch (e: Exception) {
+            // Storage the app cannot write (a directory adb created first, a full disk) would
+            // otherwise end the game with nothing on screen.
+            Log.e(TAG, "Cannot prepare the game directory", e)
+            storageFailure = e.message ?: e.toString()
+        }
         val resources = unpackRuntimeResources()
 
         Os.setenv("MKW_ANDROID_DATA_DIR", GameStorage.dataRoot(this).absolutePath, true)

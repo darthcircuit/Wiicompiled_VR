@@ -90,6 +90,9 @@ inline void ProcessAuroraEvents(const AuroraEvent* events) {
             }
             break;
         case AURORA_WINDOW_RESIZED:
+#if !defined(__ANDROID__)
+            // The Quest's surface is pinned to a size nobody sees; persisting it would only churn
+            // Config.toml on every quit.
             if (aurora_get_display_mode() == AURORA_DISPLAY_MODE_WINDOWED &&
                 event->windowSize.width != 0 && event->windowSize.height != 0) {
                 WindowPlacementPersistence::width = event->windowSize.width;
@@ -97,6 +100,7 @@ inline void ProcessAuroraEvents(const AuroraEvent* events) {
                 WindowPlacementPersistence::sizeDirty = true;
                 WindowPlacementPersistence::changedAt = std::chrono::steady_clock::now();
             }
+#endif
             surfaceChanged = true;
             break;
         case AURORA_DISPLAY_SCALE_CHANGED:

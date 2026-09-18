@@ -122,6 +122,10 @@ const void* OpenXRAndroidInstanceCreateNext() {
 }
 
 bool OpenXRAndroidRegisterThread(OpenXRRuntime& runtime, OpenXRAndroidThreadType type) {
+    return OpenXRAndroidRegisterThreadId(runtime, type, static_cast<uint32_t>(syscall(SYS_gettid)));
+}
+
+bool OpenXRAndroidRegisterThreadId(OpenXRRuntime& runtime, OpenXRAndroidThreadType type, uint32_t thread_id) {
     if (!runtime.HasSession()) {
         return false;
     }
@@ -155,7 +159,6 @@ bool OpenXRAndroidRegisterThread(OpenXRRuntime& runtime, OpenXRAndroidThreadType
         xr_type = XR_ANDROID_THREAD_TYPE_RENDERER_WORKER_KHR;
         break;
     }
-    const auto thread_id = static_cast<uint32_t>(syscall(SYS_gettid));
     XrResult result = set_thread(runtime.Session(), xr_type, thread_id);
     if (XR_FAILED(result) && type == OpenXRAndroidThreadType::RendererWorker) {
         // Some Quest runtime builds advertise the extension but reject the

@@ -105,6 +105,16 @@ void CloseFd(int& fd) noexcept {
     fd = -1;
 }
 
+int DupFd(int fd) noexcept {
+    return fd >= 0 ? ::dup(fd) : -1;
+}
+
+std::string VkFailure(const char* what, VkResult result) {
+    std::ostringstream message;
+    message << what << " (VkResult " << static_cast<int32_t>(result) << ')';
+    return message.str();
+}
+
 } // namespace
 
 class OpenXRVulkanBackend::Impl final {
@@ -131,11 +141,11 @@ public:
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkFormat format = VK_FORMAT_UNDEFINED;
-        // Waits on Dawn's release fence (temporary sync-fd import).
-        VkSemaphore wait_semaphore = VK_NULL_HANDLE;
         // Signalled by this device's copy and exported as the fence Dawn waits on.
         VkSemaphore signal_semaphore = VK_NULL_HANDLE;
         VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // The sync fd of this slot's last copy-out, kept until the next copy replaces it. Dawn
+        // gets a duplicate per frame, so a frame cancelled before encoding cannot lose it.
         int pending_acquire_fd = -1;
         uint32_t width = 0;
         uint32_t height = 0;
@@ -144,7 +154,19 @@ public:
     struct Submission {
         VkFence fence = VK_NULL_HANDLE;
         VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+        // Dawn's release fences are imported here, one semaphore per eye. They belong to the
+        // submission rather than the slot: importing into a semaphore whose previous wait is
+        // still pending is invalid, and only the submission's fence proves that wait completed.
+        std::array<VkSemaphore, kOpenXREyeCount> wait_semaphores{};
         bool busy = false;
+    };
+
+    enum class CopyOutcome {
+        Submitted,
+        // Nothing reached the queue: the shared buffers and the compositor image are untouched.
+        Skipped,
+        // Work may have been queued with no completion marker to wait on.
+        Unsafe,
     };
 
     struct PendingCopy {
@@ -382,7 +404,7 @@ public:
                     eye_slot.width,
                     eye_slot.height,
                     static_cast<int64_t>(aurora_format_),
-                    eye_slot.pending_acquire_fd,
+                    DupFd(eye_slot.pending_acquire_fd),
                     static_cast<int32_t>(eye_slot.layout),
                 };
             }
@@ -401,6 +423,10 @@ public:
             submission_unsafe_ = false;
         }
         if (!aurora_vulkan_set_stereo_targets(frame.xr_frame.serial, targets.data(), target_count)) {
+            // The duplicates were not taken; the slots keep their own descriptors.
+            for (uint32_t eye = 0; eye < target_count; ++eye) {
+                CloseFd(targets[eye].acquireFenceFd);
+            }
             {
                 std::lock_guard lock(submission_mutex_);
                 awaiting_token_ = 0;
@@ -409,13 +435,6 @@ public:
             Fail("Aurora rejected the AHardwareBuffer stereo targets");
             EndActiveFrameWithoutLayers(frame.xr_frame);
             return OpenXRBeginStatus::Error;
-        }
-        {
-            // Aurora now owns the acquire descriptors it accepted.
-            std::lock_guard lock(vk_mutex_);
-            for (uint32_t eye = 0; eye < target_count; ++eye) {
-                slots_[eye][slot].pending_acquire_fd = -1;
-            }
         }
         next_slot_ = (slot + 1) % kSlotCount;
         frame.expects_gpu_submission = true;
@@ -439,8 +458,10 @@ public:
         if (shutting_down_) {
             return OpenXRSubmissionStatus::ShuttingDown;
         }
-        return submission_success_ ? OpenXRSubmissionStatus::Success
-                                   : OpenXRSubmissionStatus::Failed;
+        if (submission_success_) {
+            return OpenXRSubmissionStatus::Success;
+        }
+        return submission_unsafe_ ? OpenXRSubmissionStatus::Failed : OpenXRSubmissionStatus::Skipped;
     }
 
     bool TryCancelPendingFrame(OpenXRBackendFrame& frame) {
@@ -914,6 +935,12 @@ private:
                 vkCreateFence(vk_device_, &fence_info, nullptr, &submission.fence) != VK_SUCCESS) {
                 return Fail("could not allocate the OpenXR copy command buffers");
             }
+            VkSemaphoreCreateInfo semaphore_info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+            for (VkSemaphore& semaphore : submission.wait_semaphores) {
+                if (vkCreateSemaphore(vk_device_, &semaphore_info, nullptr, &semaphore) != VK_SUCCESS) {
+                    return Fail("vkCreateSemaphore failed for an eye copy wait semaphore");
+                }
+            }
         }
         return true;
     }
@@ -925,6 +952,11 @@ private:
             for (Submission& submission : submissions_) {
                 if (submission.fence != VK_NULL_HANDLE) {
                     vkDestroyFence(vk_device_, submission.fence, nullptr);
+                }
+                for (VkSemaphore semaphore : submission.wait_semaphores) {
+                    if (semaphore != VK_NULL_HANDLE) {
+                        vkDestroySemaphore(vk_device_, semaphore, nullptr);
+                    }
                 }
                 submission = {};
             }
@@ -1036,10 +1068,6 @@ private:
             return Fail("vkBindImageMemory failed for an imported eye buffer");
         }
 
-        VkSemaphoreCreateInfo semaphore_info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-        if (vkCreateSemaphore(vk_device_, &semaphore_info, nullptr, &slot.wait_semaphore) != VK_SUCCESS) {
-            return Fail("vkCreateSemaphore failed for the eye wait semaphore");
-        }
         VkExportSemaphoreCreateInfo export_info{VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO};
         export_info.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
         VkSemaphoreCreateInfo exportable{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -1064,9 +1092,6 @@ private:
                     if (slot.signal_semaphore != VK_NULL_HANDLE) {
                         vkDestroySemaphore(vk_device_, slot.signal_semaphore, nullptr);
                     }
-                    if (slot.wait_semaphore != VK_NULL_HANDLE) {
-                        vkDestroySemaphore(vk_device_, slot.wait_semaphore, nullptr);
-                    }
                     if (slot.image != VK_NULL_HANDLE) {
                         vkDestroyImage(vk_device_, slot.image, nullptr);
                     }
@@ -1084,7 +1109,7 @@ private:
 
     // ---- The copy into the compositor image -----------------------------------
 
-    static void OnAuroraSubmitted(uint64_t token, bool success,
+    static void OnAuroraSubmitted(uint64_t token, bool success, bool gpu_work_queued,
                                   const AuroraVulkanStereoRelease* releases, uint32_t release_count,
                                   void* userdata) {
         auto* self = static_cast<Impl*>(userdata);
@@ -1102,7 +1127,7 @@ private:
             return;
         }
 
-        bool copied = false;
+        CopyOutcome outcome = CopyOutcome::Skipped;
         {
             std::lock_guard lock(self->vk_mutex_);
             bool expected = false;
@@ -1111,10 +1136,15 @@ private:
                 expected = token == self->awaiting_token_ && token == self->pending_copy_.token;
             }
             if (expected && success && release_count >= self->pending_copy_.target_count) {
-                copied = self->RecordAndSubmitCopyLocked(owned);
+                outcome = self->RecordAndSubmitCopyLocked(owned);
             } else {
                 for (auto& release : owned) {
                     CloseFd(release.releaseFenceFd);
+                }
+                // Aurora failing after it queued GPU work may have written the shared buffer
+                // with no completion marker to wait on; failing before that touched nothing.
+                if (expected && !success && gpu_work_queued) {
+                    outcome = CopyOutcome::Unsafe;
                 }
             }
             if (!expected) {
@@ -1127,33 +1157,34 @@ private:
                 return;
             }
             self->submitted_token_ = token;
-            self->submission_success_ = copied;
+            self->submission_success_ = outcome == CopyOutcome::Submitted;
             self->submission_arrived_ = true;
-            // A failed Aurora submission may have queued a write into the shared
-            // buffer; a failed copy here may have queued a write into the XR
-            // image. Neither has a trustworthy completion marker.
-            self->submission_unsafe_ = !copied;
+            self->submission_unsafe_ = outcome == CopyOutcome::Unsafe;
         }
         self->submission_cv_.notify_all();
     }
 
-    bool RecordAndSubmitCopyLocked(std::array<AuroraVulkanStereoRelease, kOpenXREyeCount>& releases) {
-        Submission* submission = AcquireSubmissionLocked();
-        if (submission == nullptr) {
+    CopyOutcome RecordAndSubmitCopyLocked(std::array<AuroraVulkanStereoRelease, kOpenXREyeCount>& releases) {
+        const auto close_releases = [&releases] {
             for (auto& release : releases) {
                 CloseFd(release.releaseFenceFd);
             }
-            return false;
+        };
+        CopyOutcome acquire_failure = CopyOutcome::Skipped;
+        Submission* submission = AcquireSubmissionLocked(acquire_failure);
+        if (submission == nullptr) {
+            close_releases();
+            return acquire_failure;
         }
         const PendingCopy copy = pending_copy_;
         VkCommandBuffer cmd = submission->command_buffer;
         VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        if (vkBeginCommandBuffer(cmd, &begin) != VK_SUCCESS) {
-            for (auto& release : releases) {
-                CloseFd(release.releaseFenceFd);
-            }
-            return Fail("vkBeginCommandBuffer failed for the eye copy");
+        const VkResult begun = vkBeginCommandBuffer(cmd, &begin);
+        if (begun != VK_SUCCESS) {
+            close_releases();
+            Fail(VkFailure("vkBeginCommandBuffer failed for the eye copy", begun));
+            return CopyOutcome::Skipped;
         }
 
         std::array<VkSemaphore, kOpenXREyeCount> waits{};
@@ -1168,21 +1199,24 @@ private:
             AuroraVulkanStereoRelease& release = releases[eye];
 
             if (release.releaseFenceFd >= 0) {
+                const VkSemaphore wait_semaphore = submission->wait_semaphores[eye];
                 VkImportSemaphoreFdInfoKHR import{VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR};
-                import.semaphore = slot.wait_semaphore;
+                import.semaphore = wait_semaphore;
                 import.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT;
                 import.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
                 import.fd = release.releaseFenceFd;
-                if (pfn_import_semaphore_fd_(vk_device_, &import) == VK_SUCCESS) {
+                const VkResult imported = pfn_import_semaphore_fd_(vk_device_, &import);
+                if (imported == VK_SUCCESS) {
                     // Ownership of the descriptor moved to Vulkan.
                     release.releaseFenceFd = -1;
-                    waits[wait_count] = slot.wait_semaphore;
+                    waits[wait_count] = wait_semaphore;
                     wait_stages[wait_count] = VK_PIPELINE_STAGE_TRANSFER_BIT;
                     ++wait_count;
                 } else {
-                    CloseFd(release.releaseFenceFd);
+                    close_releases();
                     vkEndCommandBuffer(cmd);
-                    return Fail("vkImportSemaphoreFdKHR rejected Dawn's release fence");
+                    Fail(VkFailure("vkImportSemaphoreFdKHR rejected Dawn's release fence", imported));
+                    return CopyOutcome::Skipped;
                 }
             }
 
@@ -1260,8 +1294,10 @@ private:
             slot.layout = VK_IMAGE_LAYOUT_GENERAL;
             signals[signal_count++] = slot.signal_semaphore;
         }
-        if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
-            return Fail("vkEndCommandBuffer failed for the eye copy");
+        const VkResult ended = vkEndCommandBuffer(cmd);
+        if (ended != VK_SUCCESS) {
+            Fail(VkFailure("vkEndCommandBuffer failed for the eye copy", ended));
+            return CopyOutcome::Skipped;
         }
 
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -1272,8 +1308,12 @@ private:
         submit.pCommandBuffers = &cmd;
         submit.signalSemaphoreCount = signal_count;
         submit.pSignalSemaphores = signals.data();
-        if (vkQueueSubmit(vk_queue_, 1, &submit, submission->fence) != VK_SUCCESS) {
-            return Fail("vkQueueSubmit failed for the eye copy");
+        const VkResult submitted = vkQueueSubmit(vk_queue_, 1, &submit, submission->fence);
+        if (submitted != VK_SUCCESS) {
+            Fail(VkFailure("vkQueueSubmit failed for the eye copy", submitted));
+            // A memory failure leaves every referenced resource untouched, so the frame merely
+            // has no copy; only a lost device leaves the queue's state unknown.
+            return submitted == VK_ERROR_DEVICE_LOST ? CopyOutcome::Unsafe : CopyOutcome::Skipped;
         }
         submission->busy = true;
 
@@ -1296,22 +1336,27 @@ private:
                 Log(OpenXRLogLevel::Warning, "vkGetSemaphoreFdKHR failed; the eye copy was waited on the CPU");
             }
         }
-        return true;
+        return CopyOutcome::Submitted;
     }
 
-    Submission* AcquireSubmissionLocked() {
+    Submission* AcquireSubmissionLocked(CopyOutcome& failure) {
         Submission& submission = submissions_[next_submission_];
         next_submission_ = (next_submission_ + 1) % kSubmissionRingSize;
         if (submission.busy) {
-            if (vkWaitForFences(vk_device_, 1, &submission.fence, VK_TRUE, kFenceTimeoutNanos) != VK_SUCCESS) {
-                Fail("a previous eye copy did not complete in time");
+            const VkResult waited = vkWaitForFences(vk_device_, 1, &submission.fence, VK_TRUE, kFenceTimeoutNanos);
+            if (waited != VK_SUCCESS) {
+                // An older copy is still outstanding, so the queue's state is unknown.
+                failure = CopyOutcome::Unsafe;
+                Fail(VkFailure("a previous eye copy did not complete in time", waited));
                 return nullptr;
             }
             submission.busy = false;
         }
         vkResetFences(vk_device_, 1, &submission.fence);
-        if (vkResetCommandBuffer(submission.command_buffer, 0) != VK_SUCCESS) {
-            Fail("vkResetCommandBuffer failed");
+        const VkResult reset = vkResetCommandBuffer(submission.command_buffer, 0);
+        if (reset != VK_SUCCESS) {
+            failure = CopyOutcome::Skipped;
+            Fail(VkFailure("vkResetCommandBuffer failed for the eye copy", reset));
             return nullptr;
         }
         return &submission;

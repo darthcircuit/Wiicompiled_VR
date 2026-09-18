@@ -27,6 +27,9 @@
 #ifdef AURORA_ENABLE_GX
 #include "gfx/pipeline_cache.hpp"
 #endif
+#if defined(__ANDROID__)
+#include <unistd.h>
+#endif
 #include "system_info.hpp"
 #include "tracy/Tracy.hpp"
 
@@ -294,6 +297,8 @@ struct FrameWorkerState {
 };
 
 FrameWorkerState g_frameWorker;
+// The worker's Linux thread id, published for the host's scheduling hints (Android).
+std::atomic<uint32_t> g_frameWorkerNativeThreadId{0};
 
 bool frame_worker_requested() noexcept {
 #ifdef AURORA_ENABLE_GX
@@ -343,6 +348,9 @@ void frame_worker_main() noexcept {
     std::lock_guard lock(g_frameWorker.mutex);
     g_frameWorker.threadId = std::this_thread::get_id();
   }
+#if defined(__ANDROID__)
+  g_frameWorkerNativeThreadId.store(static_cast<uint32_t>(gettid()), std::memory_order_release);
+#endif
 
 #ifdef AURORA_ENABLE_GX
   // Owned by the worker for its whole lifetime so the sealed pass vector and
@@ -2523,6 +2531,9 @@ void aurora_set_pipeline_cache_idle_store(bool allowed) {
 #else
   (void)allowed;
 #endif
+}
+uint32_t aurora_get_frame_worker_native_thread_id(void) {
+  return aurora::g_frameWorkerNativeThreadId.load(std::memory_order_acquire);
 }
 void aurora_set_present_schedule(uint64_t baseNanos, uint64_t intervalNanos) {
   aurora::g_presentScheduleBaseNanos.store(baseNanos, std::memory_order_release);

@@ -192,7 +192,8 @@ public:
       m_encoded = true;
       return true;
     }
-    PublishAndClearFrameLocked(frame.frameToken, false);
+    // Nothing was recorded, so the shared buffers are untouched.
+    PublishAndClearFrameLocked(frame.frameToken, false, false);
     return false;
   }
 
@@ -203,7 +204,7 @@ public:
     }
     std::array<AuroraVulkanStereoRelease, AURORA_VULKAN_STEREO_MAX_TARGETS> releases{};
     const bool success = EndAccessLocked(releases);
-    NotifyLocked(frame.frameToken, success, releases);
+    NotifyLocked(frame.frameToken, success, true, releases);
     ClearFrameLocked();
   }
 
@@ -213,14 +214,15 @@ public:
       return;
     }
     const uint64_t token = m_frameToken;
+    const bool encoded = m_encoded;
     std::array<AuroraVulkanStereoRelease, AURORA_VULKAN_STEREO_MAX_TARGETS> releases{};
-    if (m_encoded) {
+    if (encoded) {
       EndAccessLocked(releases);
       for (auto& release : releases) {
         close_fd(release.releaseFenceFd);
       }
     }
-    PublishAndClearFrameLocked(token, false);
+    PublishAndClearFrameLocked(token, false, encoded);
   }
 
   bool CancelBeforeEncode(uint64_t token) noexcept {
@@ -484,20 +486,20 @@ private:
     m_encoded = false;
   }
 
-  void PublishAndClearFrameLocked(uint64_t token, bool success) noexcept {
+  void PublishAndClearFrameLocked(uint64_t token, bool success, bool gpuWorkQueued) noexcept {
     std::array<AuroraVulkanStereoRelease, AURORA_VULKAN_STEREO_MAX_TARGETS> releases{};
     for (auto& release : releases) {
       release = {.releaseFenceFd = -1, .releasedImageLayout = VK_IMAGE_LAYOUT_UNDEFINED};
     }
-    NotifyLocked(token, success, releases);
+    NotifyLocked(token, success, gpuWorkQueued, releases);
     ClearFrameLocked();
   }
 
-  void NotifyLocked(uint64_t token, bool success,
+  void NotifyLocked(uint64_t token, bool success, bool gpuWorkQueued,
                     const std::array<AuroraVulkanStereoRelease, AURORA_VULKAN_STEREO_MAX_TARGETS>&
                         releases) noexcept {
     if (m_callback != nullptr) {
-      m_callback(token, success, releases.data(), m_targetCount, m_userdata);
+      m_callback(token, success, gpuWorkQueued, releases.data(), m_targetCount, m_userdata);
     } else {
       for (auto release : releases) {
         close_fd(release.releaseFenceFd);

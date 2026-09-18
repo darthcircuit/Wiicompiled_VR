@@ -78,11 +78,14 @@ typedef struct {
 /**
  * Fired when Aurora either finishes or abandons the stereo sink. `success`
  * guarantees that the copies were submitted and that every release entry is
- * valid. The callback runs on Aurora's frame worker while its queue-submit
- * mutex is held: it may record and submit work on the OpenXR side's own Vulkan
- * queue, but must not wait for the GPU or re-enter Aurora.
+ * valid. Otherwise `gpuWorkQueued` says whether the copies may have reached
+ * Dawn's queue before the failure (the shared buffers may then be written with
+ * no fence to wait on) or nothing was recorded at all. The callback runs on
+ * Aurora's frame worker while its queue-submit mutex is held: it may record and
+ * submit work on the OpenXR side's own Vulkan queue, but must not wait for the
+ * GPU or re-enter Aurora.
  */
-typedef void (*AuroraVulkanStereoSubmittedCallback)(uint64_t frameToken, bool success,
+typedef void (*AuroraVulkanStereoSubmittedCallback)(uint64_t frameToken, bool success, bool gpuWorkQueued,
                                                     const AuroraVulkanStereoRelease* releases,
                                                     uint32_t releaseCount, void* userdata);
 

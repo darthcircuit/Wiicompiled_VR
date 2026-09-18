@@ -86,6 +86,20 @@ object RetroRewindPack {
             .sortedWith { a, b -> compare(a.version, b.version) }
             .mapNotNull { packRelative(it.path) }
 
+    /**
+     * The updates to apply over an installation holding [installed], each with the pack-relative
+     * paths its version deletes, in the order the PC launcher applies them: an update, then its
+     * deletions, then the next update.
+     */
+    fun steps(installed: String?, updates: List<Update>, deletions: List<Deletion>): List<Pair<Update, List<String>>> {
+        var previous = installed
+        return updates.sortedWith { a, b -> compare(a.version, b.version) }.map { update ->
+            val dropped = deletionsBetween(previous, update.version, deletions)
+            previous = update.version
+            update to dropped
+        }
+    }
+
     /** Dotted numeric comparison, which is all these versions ever are (6.12.7). */
     fun compare(left: String, right: String): Int {
         val a = left.split('.')
@@ -164,16 +178,15 @@ object RetroRewindPack {
             }
 
             // Every update is a partial tree that lands on top of the installed pack, so they are
-            // applied in order and the version is only written once all of them are in.
+            // applied in order, each followed by its own deletions before the next one can put a
+            // file back, and the version is only written once all of them are in.
             val remaining = updatesAfter(installedVersion(context), updates)
             if (remaining.isNotEmpty()) {
                 val deletions = parseDeletions(fetchText(DELETE_URL, cancelled))
-                for (update in remaining) {
+                for ((update, dropped) in steps(installedVersion(context), remaining, deletions)) {
                     Log.i(TAG, "Applying Retro Rewind ${update.version}")
                     download(update.url, pack, progress, cancelled)
-                }
-                for (relative in deletionsBetween(installedVersion(context), remaining.last().version, deletions)) {
-                    File(pack, relative).deleteRecursively()
+                    for (relative in dropped) File(pack, relative).deleteRecursively()
                 }
                 finishing()
                 File(pack, VERSION_FILE).writeText(remaining.last().version)

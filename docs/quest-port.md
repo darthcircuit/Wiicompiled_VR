@@ -76,6 +76,18 @@ session is therefore impossible without a patched Dawn. Instead:
 5. The copy runs on the queue bound to the session before
    `xrReleaseSwapchainImage`, so the compositor sees ordinary same-queue work.
 
+Dawn's release fences are imported into semaphores owned by the copy's
+submission slot, not by the shared buffer: importing into a semaphore whose
+previous wait is still pending is invalid, and only the slot's fence proves
+that wait completed before the semaphore is reused. Each frame hands Dawn a
+duplicate of the buffer's copy-out fence, so a frame cancelled before encoding
+keeps the ordering against the last real reader. A copy that never reached the
+queue (a submit refused for memory, Aurora failing before it recorded anything)
+ends its frame on the retained layer with the `VkResult` in the log, and the
+next frame is tried; only work that may have been queued with no completion
+marker, a lost device above all, ends the session. Three hundred skipped copies
+in a row end it too.
+
 The cost is one extra GPU copy per eye per frame, a few hundred microseconds
 at Quest eye resolutions; the benefit is that stock Dawn is used unchanged
 and the OpenXR device outlives Aurora's, which is exactly the failure DolphinXR
@@ -103,7 +115,11 @@ suggested for `oculus/touch_controller` and `khr/simple_controller`.
 
 - `runtime/src/vr/openxr_android.cpp`: `xrInitializeLoaderKHR` with the
   JavaVM and activity SDL already holds, the `XrInstanceCreateInfoAndroidKHR`
-  chain (`OpenXRConfig::instance_create_next`), and the optional thread hint.
+  chain (`OpenXRConfig::instance_create_next`), and the `XR_KHR_android_thread_settings`
+  hints: the game thread (SDL's main thread, which carries the guest fibers) as
+  application main, Aurora's frame worker as renderer main and the pacing
+  thread as renderer worker, so the runtime keeps the two busy threads on the
+  fast cores. The log says which hints the runtime accepted.
 - `runtime/src/platform/host_platform.cpp` / `runtime_config.h`: the activity
   exports `MKW_ANDROID_DATA_DIR` (external files dir, user reachable) and
   `MKW_ANDROID_RESOURCES_DIR` (unpacked `wii_bootstrap/`, `dsp_coef.bin`,
@@ -324,6 +340,13 @@ on Home.
 Home's main button is always the next step: **Select disc image** while there are no game files,
 **Build on this Quest** once they are there and no game is installed (or the installed one is
 stale), and **Play** once both are present. **Import from computer** sits beside the first two.
+**Reset installation** leads instead when the game files are there but unusable, or when an
+attempt to set them up failed and left none that work; a failed attempt over working files offers
+it as the second button, and Settings → Other always has it. It removes the game files with any
+unfinished extraction or import, and on request the built games with the on-device build
+workspace and the Retro Rewind pack; Config.toml, the saves and the logs stay (`InstallReset`, a
+`GameSetup` task like the others, with progress and cancel). Nothing that replaces files the game
+reads, a reset included, starts while the game process is alive.
 
 ### Building the game on the headset
 

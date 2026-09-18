@@ -13,6 +13,7 @@ import android.text.method.ScrollingMovementMethod
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.widget.CheckBox
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -43,7 +44,7 @@ class LauncherActivity : Activity() {
     private enum class Page { Home, Settings }
 
     /** What Home's main and secondary buttons do. */
-    private enum class Action { Play, Resume, SelectDisc, ImportGame, BuildGame, DownloadModPack }
+    private enum class Action { Play, Resume, SelectDisc, ImportGame, BuildGame, DownloadModPack, Reset }
 
     private lateinit var navHome: View
     private lateinit var navSettings: View
@@ -126,6 +127,7 @@ class LauncherActivity : Activity() {
             importGame = ::importGame,
             buildGame = ::buildGame,
             downloadModPack = ::downloadModPack,
+            resetInstallation = ::resetInstallation,
         )
         savedInstanceState?.getString(KEY_TAB)?.let { name ->
             SettingsPage.Tab.entries.firstOrNull { it.name == name }?.let(settings::select)
@@ -226,12 +228,19 @@ class LauncherActivity : Activity() {
         val importing = task == GameSetup.Task.ImportPackage
         val building = task == GameSetup.Task.BuildGame
         val downloadingPack = task == GameSetup.Task.DownloadModPack
+        val resetting = task == GameSetup.Task.Reset
 
         // Without anything yet, a player with only a headset starts from their disc image, and
         // builds the game once its files are there; a PC-built game can always be imported instead.
         // Retro Rewind also needs its own pack, which neither building nor playing can do without.
+        // Game files that are there but unusable, or an attempt to set them up that failed, lead
+        // with a reset: what the app put on the headset is removed and set up again.
+        val gameFilesTask = task == GameSetup.Task.ExtractDisc || task == GameSetup.Task.ImportPackage || resetting
+        val filesBroken = discStatus == GameStorage.DiscStatus.Incomplete ||
+            (setup is GameSetup.State.Failed && gameFilesTask && discStatus != GameStorage.DiscStatus.Ready)
         mainAction = when {
             running -> Action.Resume
+            filesBroken -> Action.Reset
             discStatus != GameStorage.DiscStatus.Ready -> Action.SelectDisc
             !GameStorage.modContentReady(this, profile) -> Action.DownloadModPack
             gameStatus != GameLibrary.Status.Ready -> Action.BuildGame
@@ -239,6 +248,8 @@ class LauncherActivity : Activity() {
         }
         secondaryAction = when {
             settingUp || running -> null
+            mainAction == Action.Reset -> Action.SelectDisc
+            setup is GameSetup.State.Failed && gameFilesTask -> Action.Reset
             mainAction == Action.ImportGame -> null
             gameStatus != GameLibrary.Status.Ready || mainAction == Action.SelectDisc -> Action.ImportGame
             else -> null
@@ -249,7 +260,7 @@ class LauncherActivity : Activity() {
         playText.text = when {
             setup is GameSetup.State.Checking -> getString(
                 when {
-                    building -> R.string.home_build_preparing
+                    building || resetting -> R.string.home_build_preparing
                     importing -> R.string.home_checking_package
                     else -> R.string.home_checking
                 },
@@ -259,6 +270,7 @@ class LauncherActivity : Activity() {
                     building -> R.string.home_building
                     importing -> R.string.home_importing
                     downloadingPack -> R.string.home_mod_pack_downloading
+                    resetting -> R.string.home_resetting
                     else -> R.string.home_extracting
                 },
                 percent(setup),
@@ -278,6 +290,9 @@ class LauncherActivity : Activity() {
 
         homeStatus.text = when {
             setup is GameSetup.State.Working && building -> buildStatus(setup)
+            setup is GameSetup.State.Working && resetting -> getString(R.string.home_reset_progress, setup.done, setup.total)
+            setup is GameSetup.State.Checking && resetting -> getString(R.string.home_reset_status)
+            setup is GameSetup.State.Done && resetting -> getString(R.string.home_reset_done)
             setup is GameSetup.State.Working -> getString(
                 R.string.home_extract_progress,
                 Formatter.formatShortFileSize(this, setup.done),
@@ -291,7 +306,13 @@ class LauncherActivity : Activity() {
                 },
             )
             settingUp || setup is GameSetup.State.Failed -> ""
-            setup is GameSetup.State.Cancelled -> getString(if (building) R.string.home_build_cancelled else R.string.home_setup_cancelled)
+            setup is GameSetup.State.Cancelled -> getString(
+                when {
+                    building -> R.string.home_build_cancelled
+                    resetting -> R.string.home_reset_cancelled
+                    else -> R.string.home_setup_cancelled
+                },
+            )
             running -> getString(R.string.home_running)
             mainAction == Action.Play && setup is GameSetup.State.Done -> getString(if (building) R.string.home_build_done else R.string.home_setup_done)
             mainAction == Action.Play -> getString(R.string.home_put_on_headset)
@@ -301,9 +322,11 @@ class LauncherActivity : Activity() {
         when {
             settingUp && building -> showBanner(getString(R.string.home_build_running), warning = false)
             settingUp && downloadingPack -> showBanner(getString(R.string.home_mod_pack_running), warning = false)
+            settingUp && resetting -> showBanner(getString(R.string.home_reset_running), warning = false)
             settingUp -> showBanner(null)
             setup is GameSetup.State.Failed && building -> showBanner(getString(R.string.home_build_failed, setup.message), warning = true)
             setup is GameSetup.State.Failed && downloadingPack -> showBanner(getString(R.string.home_mod_pack_failed, setup.message), warning = true)
+            setup is GameSetup.State.Failed && resetting -> showBanner(getString(R.string.home_reset_failed, setup.message), warning = true)
             setup is GameSetup.State.Failed -> showBanner(getString(R.string.home_setup_failed, setup.message), warning = true)
             discStatus == GameStorage.DiscStatus.Incomplete -> showBanner(getString(R.string.home_data_incomplete, disc), warning = true)
             // Only once the disc files are there is the pack the next thing missing; before that a
@@ -365,6 +388,7 @@ class LauncherActivity : Activity() {
         Action.ImportGame -> R.string.home_import
         Action.BuildGame -> R.string.home_build
         Action.DownloadModPack -> R.string.home_download_mod_pack
+        Action.Reset -> R.string.home_reset
     }
 
     private fun perform(action: Action) {
@@ -375,7 +399,60 @@ class LauncherActivity : Activity() {
             Action.ImportGame -> importGame()
             Action.BuildGame -> buildGame()
             Action.DownloadModPack -> downloadModPack()
+            Action.Reset -> resetInstallation()
         }
+    }
+
+    /** The game reads its files while it runs, so nothing that replaces them starts meanwhile. */
+    private fun refuseWhileGameRuns(): Boolean {
+        if (!isGameRunning()) return false
+        Toast.makeText(this, R.string.home_close_game_first, Toast.LENGTH_LONG).show()
+        return true
+    }
+
+    /**
+     * Removes what the app put on the headset so the game can be set up again from scratch: the
+     * game files, and on request the built games and the Retro Rewind pack. Saves and settings are
+     * never touched. The choice is a small form rather than a list dialog, which would hide the
+     * explanation.
+     */
+    private fun resetInstallation() {
+        if (GameSetup.isRunning || refuseWhileGameRuns()) return
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(20.dp(), 12.dp(), 20.dp(), 0)
+        }
+        form.addView(
+            TextView(this).apply {
+                setText(R.string.home_reset_message)
+                setTextColor(getColor(R.color.neutral_300))
+                textSize = 14f
+            },
+        )
+        val choices = listOf(
+            R.string.home_reset_option_game_files to true,
+            R.string.home_reset_option_games to false,
+            R.string.home_reset_option_mod_pack to false,
+        ).map { (label, checked) ->
+            CheckBox(this).apply {
+                setText(label)
+                setTextColor(getColor(R.color.neutral_100))
+                isChecked = checked
+                setPadding(8.dp(), 10.dp(), 0, 10.dp())
+                form.addView(this)
+            }
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.home_reset_title)
+            .setView(form)
+            .setPositiveButton(R.string.home_reset) { _, _ ->
+                val options = InstallReset.Options(choices[0].isChecked, choices[1].isChecked, choices[2].isChecked)
+                if (!options.anything || GameSetup.isRunning || refuseWhileGameRuns()) return@setPositiveButton
+                GameSetupService.startReset(this, options)
+                showPage(Page.Home)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     /**
@@ -383,7 +460,7 @@ class LauncherActivity : Activity() {
      * after saying where it comes from and how big it is.
      */
     private fun downloadModPack() {
-        if (GameSetup.isRunning) return
+        if (GameSetup.isRunning || refuseWhileGameRuns()) return
         val installed = RetroRewindPack.installedVersion(this)
         val message = if (installed == null) {
             getString(R.string.home_mod_pack_message)
@@ -407,7 +484,7 @@ class LauncherActivity : Activity() {
 
     /** Builds the selected game on this headset from DATA, after saying what that takes. */
     private fun buildGame() {
-        if (GameSetup.isRunning || GameStorage.discStatus(this) != GameStorage.DiscStatus.Ready) return
+        if (GameSetup.isRunning || GameStorage.discStatus(this) != GameStorage.DiscStatus.Ready || refuseWhileGameRuns()) return
         if (!GameStorage.modContentReady(this, profile)) {
             confirm(R.string.home_mod_needed_title, R.string.home_mod_needed_message, R.string.home_download_mod_pack) { downloadModPack() }
             return
@@ -438,7 +515,7 @@ class LauncherActivity : Activity() {
 
     /** Opens the document picker for a disc image, asking first when it would replace DATA. */
     private fun selectDiscImage() {
-        if (GameSetup.isRunning) return
+        if (GameSetup.isRunning || refuseWhileGameRuns()) return
         if (GameStorage.discStatus(this) == GameStorage.DiscStatus.Missing) {
             openPicker(REQUEST_DISC_IMAGE)
             return
@@ -450,7 +527,7 @@ class LauncherActivity : Activity() {
 
     /** Opens the document picker for a .wcgame, asking first when it would replace the game. */
     private fun importGame() {
-        if (GameSetup.isRunning) return
+        if (GameSetup.isRunning || refuseWhileGameRuns()) return
         if (GameLibrary.status(this, profile) != GameLibrary.Status.Ready) {
             openPicker(REQUEST_GAME_PACKAGE)
             return
@@ -493,7 +570,8 @@ class LauncherActivity : Activity() {
      * adb pushed belongs to the shell user, so the app cannot always delete it afterwards.
      */
     private fun importDroppedPackage() {
-        if (GameSetup.isRunning) return
+        // Not while the game reads its files; the package is still there at the next resume.
+        if (GameSetup.isRunning || isGameRunning()) return
         val dropped = GameStorage.importDirectory(this)
             .listFiles { file -> file.isFile && file.name.endsWith(".wcgame", ignoreCase = true) }
             ?.maxByOrNull { it.lastModified() }

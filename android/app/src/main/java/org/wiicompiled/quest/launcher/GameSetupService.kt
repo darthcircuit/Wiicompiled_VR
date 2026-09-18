@@ -40,9 +40,11 @@ class GameSetupService : Service() {
         createChannel()
         val task = intent?.getStringExtra(EXTRA_TASK)?.let { name -> GameSetup.Task.entries.firstOrNull { it.name == name } }
             ?: GameSetup.Task.ExtractDisc
-        startForeground(NOTIFICATION_ID, notification(GameSetup.State.Checking(task)), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        // A task already going keeps its own notification rather than the refused one's.
+        val shown = if (GameSetup.isRunning) GameSetup.state else GameSetup.State.Checking(task)
+        startForeground(NOTIFICATION_ID, notification(shown), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         val uri = intent?.data
-        val needsUri = task != GameSetup.Task.BuildGame && task != GameSetup.Task.DownloadModPack
+        val needsUri = task != GameSetup.Task.BuildGame && task != GameSetup.Task.DownloadModPack && task != GameSetup.Task.Reset
         if ((uri == null && needsUri) || !GameSetup.begin(task)) {
             // A task already going keeps the service, and ends it itself.
             if (!GameSetup.isRunning) {
@@ -54,13 +56,18 @@ class GameSetupService : Service() {
         GameSetup.addListener(listener)
         val deleteSource = intent?.getBooleanExtra(EXTRA_DELETE_SOURCE, false) ?: false
         val profile = GameProfile.of(intent?.getStringExtra(EXTRA_PROFILE)) ?: GameProfile.selected(this)
+        val reset = InstallReset.Options(
+            gameFiles = intent?.getBooleanExtra(EXTRA_RESET_GAME_FILES, true) ?: true,
+            games = intent?.getBooleanExtra(EXTRA_RESET_GAMES, false) ?: false,
+            modPack = intent?.getBooleanExtra(EXTRA_RESET_MOD_PACK, false) ?: false,
+        )
 
         val wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WiiCompiled:GameSetup")
         wakeLock.acquire(if (task == GameSetup.Task.BuildGame) BUILD_WAKE_LOCK_TIMEOUT_MS else WAKE_LOCK_TIMEOUT_MS)
         thread(name = "GameSetup") {
             try {
-                GameSetup.run(applicationContext, task, uri, deleteSource, profile)
+                GameSetup.run(applicationContext, task, uri, deleteSource, profile, reset)
             } finally {
                 uri?.let(::releaseReadPermission)
                 if (wakeLock.isHeld) wakeLock.release()
@@ -105,6 +112,7 @@ class GameSetupService : Service() {
                 GameSetup.Task.BuildGame -> R.string.disc_setup_building
                 GameSetup.Task.ExtractDisc -> R.string.disc_setup_extracting
                 GameSetup.Task.DownloadModPack -> R.string.mod_pack_downloading
+                GameSetup.Task.Reset -> R.string.disc_setup_resetting
             }
             builder.setContentText(getString(text, percent)).setProgress(100, percent, false)
         } else {
@@ -121,6 +129,9 @@ class GameSetupService : Service() {
         private const val EXTRA_TASK = "task"
         private const val EXTRA_PROFILE = "profile"
         private const val EXTRA_DELETE_SOURCE = "deleteSource"
+        private const val EXTRA_RESET_GAME_FILES = "resetGameFiles"
+        private const val EXTRA_RESET_GAMES = "resetGames"
+        private const val EXTRA_RESET_MOD_PACK = "resetModPack"
         // Longer than any real task; only a hung run would reach it.
         private const val WAKE_LOCK_TIMEOUT_MS = 60L * 60 * 1000
         private const val BUILD_WAKE_LOCK_TIMEOUT_MS = 3L * 60 * 60 * 1000
@@ -129,6 +140,16 @@ class GameSetupService : Service() {
         fun startModPackDownload(context: Context) {
             val intent = Intent(context, GameSetupService::class.java)
                 .putExtra(EXTRA_TASK, GameSetup.Task.DownloadModPack.name)
+            context.startForegroundService(intent)
+        }
+
+        /** Removes what [options] select, so the game can be set up again ([InstallReset]). */
+        fun startReset(context: Context, options: InstallReset.Options) {
+            val intent = Intent(context, GameSetupService::class.java)
+                .putExtra(EXTRA_TASK, GameSetup.Task.Reset.name)
+                .putExtra(EXTRA_RESET_GAME_FILES, options.gameFiles)
+                .putExtra(EXTRA_RESET_GAMES, options.games)
+                .putExtra(EXTRA_RESET_MOD_PACK, options.modPack)
             context.startForegroundService(intent)
         }
 

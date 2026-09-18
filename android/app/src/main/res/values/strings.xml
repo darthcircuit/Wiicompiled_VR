@@ -77,6 +77,23 @@
     <string name="home_replace_title">Replace the game files?</string>
     <string name="home_replace_message">Your current DATA folder stays until the new disc image has been checked and completely extracted.</string>
     <string name="home_launch_failed">The game could not be started.</string>
+    <string name="home_close_game_first">Close the game first.</string>
+    <string name="home_reset">Reset installation</string>
+    <string name="home_reset_title">Reset the installation?</string>
+    <string name="home_reset_message">Removes what you tick below so it can be set up again from scratch. Your saves and settings stay.</string>
+    <string name="home_reset_option_game_files">Game files (DATA), with any unfinished extraction or import</string>
+    <string name="home_reset_option_games">Built games and the build workspace</string>
+    <string name="home_reset_option_mod_pack">Retro Rewind pack (RetroRewind6)</string>
+    <string name="home_resetting">Resetting %1$d%%</string>
+    <string name="home_reset_status">Counting the files to remove.</string>
+    <string name="home_reset_progress">%1$d of %2$d files removed</string>
+    <string name="home_reset_running">Removing the files you chose. The launcher stays usable meanwhile.</string>
+    <string name="home_reset_done">The installation was reset. Select your disc image to set the game up again.</string>
+    <string name="home_reset_cancelled">Reset cancelled. What was already removed stays removed.</string>
+    <string name="home_reset_failed">The installation could not be reset completely.\n%1$s</string>
+    <string name="about_reset">Reset installation</string>
+    <string name="about_reset_helper">Removes the game files, and if you tick them the built games and the Retro Rewind pack, so they can be set up again. Saves and settings stay.</string>
+    <string name="game_storage_failed">The game folder could not be prepared: %1$s</string>
 
     <!-- Settings shell -->
     <string name="settings_tab_vr">VR</string>
@@ -230,6 +247,7 @@
     <string name="disc_setup_channel">Game file setup</string>
     <string name="disc_setup_notification_title">Setting up the game files</string>
     <string name="disc_setup_checking">Checking the disc image…</string>
+    <string name="disc_setup_resetting">Resetting the installation: %1$d%%</string>
     <string name="disc_setup_extracting">Extracting: %1$d%%</string>
     <string name="disc_setup_building">Building: %1$d%%</string>
     <string name="build_notification_title">Building the game</string>

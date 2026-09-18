@@ -18,13 +18,14 @@ import org.wiicompiled.quest.GameProfile
  *    the package carries it ([GamePackageImport]).
  *  - [Task.BuildGame]: the game library is built on the headset from DATA ([GameBuild]).
  *  - [Task.DownloadModPack]: Retro Rewind's own server provides its pack ([RetroRewindPack]).
+ *  - [Task.Reset]: what the app put on the headset is removed, to be set up again ([InstallReset]).
  *
  * Every task stages its output next to the destination and swaps it in only after it has been
  * checked, so a failed, cancelled or killed run never costs working files.
  */
 object GameSetup {
 
-    enum class Task { ExtractDisc, ImportPackage, BuildGame, DownloadModPack }
+    enum class Task { ExtractDisc, ImportPackage, BuildGame, DownloadModPack, Reset }
 
     sealed interface State {
         data object Idle : State
@@ -88,8 +89,18 @@ object GameSetup {
         }
     }
 
-    /** The whole task, on a worker thread. Always ends in Done, Failed or Cancelled. [uri] is null only for a build. */
-    fun run(context: Context, task: Task, uri: Uri?, deleteSource: Boolean, profile: GameProfile = GameProfile.selected(context)) {
+    /**
+     * The whole task, on a worker thread. Always ends in Done, Failed or Cancelled. [uri] is null
+     * for a build, a pack download and a reset; [reset] says what a reset removes.
+     */
+    fun run(
+        context: Context,
+        task: Task,
+        uri: Uri?,
+        deleteSource: Boolean,
+        profile: GameProfile = GameProfile.selected(context),
+        reset: InstallReset.Options = InstallReset.Options(gameFiles = true, games = false, modPack = false),
+    ) {
         val progress = Progress { done, total ->
             publish(State.Working(task, done, total))
             !cancelRequested
@@ -104,6 +115,8 @@ object GameSetup {
                 GameBuild.run(context, profile, reporter, cancelled = { cancelRequested }, finishing)
             } else if (task == Task.DownloadModPack) {
                 RetroRewindPack.run(context, progress, cancelled = { cancelRequested }, finishing)
+            } else if (task == Task.Reset) {
+                InstallReset.run(context, reset, progress, finishing)
             } else {
                 uri?.let { context.contentResolver.openFileDescriptor(it, "r") }?.use { descriptor ->
                     when (task) {

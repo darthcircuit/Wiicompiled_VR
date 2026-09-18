@@ -61,6 +61,21 @@ class RetroRewindPackTest {
     }
 
     @Test
+    fun appliesEachUpdateBeforeItsOwnDeletions() {
+        val updates = RetroRewindPack.parseUpdates(versions)
+        val deletions = RetroRewindPack.parseDeletions(
+            """
+            6.12.6 RetroRewind6/Assets/gone.brres
+            6.12.7 RetroRewind6/Race/Course/old.szs
+            """.trimIndent()
+        )
+        val steps = RetroRewindPack.steps("6.12.5", RetroRewindPack.updatesAfter("6.12.5", updates), deletions)
+        assertEquals(listOf("6.12.6", "6.12.7"), steps.map { it.first.version })
+        assertEquals(listOf("Assets/gone.brres"), steps[0].second)
+        assertEquals(listOf("Race/Course/old.szs"), steps[1].second)
+    }
+
+    @Test
     fun keepsOnlyPackPathsAndRefusesOnesThatClimbOut() {
         assertEquals("Binaries/Code.pul", RetroRewindPack.packRelative("RetroRewind6/Binaries/Code.pul"))
         assertEquals("Binaries/Code.pul", RetroRewindPack.packRelative("/RetroRewind6\\Binaries\\Code.pul"))
