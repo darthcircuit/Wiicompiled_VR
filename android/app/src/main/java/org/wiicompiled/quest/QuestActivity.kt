@@ -97,13 +97,17 @@ class QuestActivity : SDLActivity() {
 
     /**
      * Copies runtime_resources/ from the APK assets into private storage the
-     * first time this build runs. A stamp file keyed on the version code keeps
-     * every later launch to one existence check.
+     * first time this build runs. A stamp file keyed on the version and the
+     * install time keeps every later launch to one existence check.
      */
     private fun unpackRuntimeResources(): File {
         val target = File(filesDir, "runtime_resources")
         val stamp = File(target, ".version")
-        val expected = "${BuildConfig.VERSION_CODE}:${BuildConfig.VERSION_NAME}"
+        // The version fields stay the same across sideloaded builds, so the install time is what
+        // keeps a rebuilt APK from reusing the previous build's bundled pipeline cache.
+        @Suppress("DEPRECATION")
+        val installedAt = packageManager.getPackageInfo(packageName, 0).lastUpdateTime
+        val expected = "${BuildConfig.VERSION_CODE}:${BuildConfig.VERSION_NAME}:$installedAt"
         if (stamp.isFile && stamp.readText() == expected) {
             return target
         }

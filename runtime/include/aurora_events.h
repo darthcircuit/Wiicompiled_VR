@@ -61,6 +61,10 @@ inline void Flush(bool force = false) {
 [[noreturn]] inline void ExitForAuroraWindowClose() noexcept {
     settings_overlay::ReleaseControllers();
     WindowPlacementPersistence::Flush(true);
+    // Ending the process here skips aurora_shutdown, which is where Dawn's Vulkan pipeline cache
+    // and the queued pipeline recipes would otherwise reach disk. Without this store every
+    // session recompiled what it had compiled after boot prewarm (a long stall on the Quest).
+    aurora_store_pipeline_caches();
 #if defined(_WIN32)
     ::ExitProcess(0);
 #else

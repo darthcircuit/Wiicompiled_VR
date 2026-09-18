@@ -539,7 +539,10 @@ function Invoke-QuestGameBuild {
     }
     $allObjects = @($sources.Keys | ForEach-Object { $objectsOf[$_] } | ForEach-Object { & $escape $_.Substring($build.Length + 1) })
     $rspInputs = ($linkInputs | ForEach-Object { ConvertTo-QuotedArgument $_ }) -join ' '
-    [void]$ninjaText.AppendLine("build libmain.so: link $($allObjects -join ' ')`n  flags = $(& $escape "$build/link.rsp")`n  inputs = $($rspInputs.Replace('$', '$$'))")
+    # The kit's objects and archives keep their names from one kit export to the next, so they are
+    # implicit inputs of the link: a game built against an earlier kit is relinked, not reused.
+    $kitInputs = @($linkInputs | Where-Object { $_.StartsWith($kit) } | ForEach-Object { & $escape $_ })
+    [void]$ninjaText.AppendLine("build libmain.so: link $($allObjects -join ' ') | $($kitInputs -join ' ')`n  flags = $(& $escape "$build/link.rsp")`n  inputs = $($rspInputs.Replace('$', '$$'))")
     [IO.File]::WriteAllText("$build/build.ninja", $ninjaText.ToString(), (New-Object Text.UTF8Encoding $false))
 
     # Ninja's progress goes to the console, not into this function's return value; its [n/N]

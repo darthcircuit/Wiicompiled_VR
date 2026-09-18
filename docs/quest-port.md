@@ -518,6 +518,7 @@ Bring-up fixes that only a device could reveal:
 | Link error on `Android_LockActivityMutex` | SDL's activity mutex is not exported | Aurora-owned mutex plus the `QuestSurface` bracket (above) |
 | Crypto++ `cpu-features.h` not found | The NDK ships cpu-features as source | Compiled into `mkw_cryptopp` on Android |
 | Exploded racers and menu characters; smeared movie panels in the menus; then, once those were fixed, damaged eyes and slightly misplaced detail on characters | The Adreno 740 driver reads the wrong bytes when the shader multiplies an index by a stride that is not a multiple of 4. That covers the vertex fetch (`ubuf.vtx_start + vidx * stride + offset`) and indexed array reads (`array_start + index * stride`, e.g. 6-byte S16 normals). GX packs both byte-tight, so skinned models (a 1-byte `PNMTXIDX` first, stride 7) broke everywhere | Android pads every uploaded vertex and every indexed-array element to a 4-byte stride (`padded_upload_stride` in `lib/gx/gx.cpp`). Offsets inside a vertex or element are unchanged, and desktop is unchanged. **Fixed, headset-verified 2026-09-16** at character select and a Grand Prix start |
+| Every launch recompiled every shader: a 14 to 34 s prewarm, and the Dawn blob cache reporting exactly one miss and no stores | Dawn's monolithic Vulkan pipeline cache is only written by `PerformIdleTasks`, which `gpu.cpp` resolved through the Windows DLL alone, and the quit path ends the process without `aurora_shutdown`, so nothing compiled after prewarm was kept either | Static Dawn calls it directly; `aurora_store_pipeline_caches` runs at a race exit, when the session loses focus and on the quit path, and the compiler stores idle bursts itself while the headset shows the virtual screen. The unpacked `initial_pipeline_cache.db` is also refreshed per APK install now |
 
 How the explosion was isolated, so the next Adreno rendering bug starts further
 ahead:
@@ -607,8 +608,9 @@ or `EndAccess` errors); a black mirror too points at Aurora itself.
   extension negotiation, Dawn's begin/end layout reporting for AHardwareBuffer
   imports, and swapchain format choice (`R8G8B8A8_SRGB` is expected).
 - **Performance.** The desktop product targets x86-64-v3; nothing has been
-  profiled on the XR2. Expect shader compilation stalls on first run (Aurora's
-  pipeline cache is bundled) and start with `render_scale` below 1.0 if the
+  profiled on the XR2. The first run compiles every bundled pipeline recipe
+  (about half a minute); later runs load Dawn's pipeline cache from `Cache/`
+  next to `DATA`. Start with `render_scale` below 1.0 if the
   compositor reports missed frames. `XR_FB_foveation` is not used yet.
 - **Lifecycle.** Backgrounding (the Quest menu, guardian) pauses the session
   through the ordinary `STOPPING`/`READY` events; SDL's Android surface loss is

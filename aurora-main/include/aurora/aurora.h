@@ -254,6 +254,13 @@ bool aurora_wait_for_frame_worker_for(uint32_t timeoutMicros);
 // worker is fully done. Unlike aurora_wait_for_frame_worker(), this is safe in
 // the gap between aurora_end_frame() and aurora_begin_frame().
 void aurora_quiesce_frame_worker();
+// Persists the renderer's pipeline caches now (Dawn's Vulkan pipeline cache, then the queued
+// pipeline recipes). It holds the GPU device for the store, so a race would see it as a stall:
+// call it at a race exit, when the session loses focus, or before ending the process.
+void aurora_store_pipeline_caches();
+// Allows the pipeline compiler to store the caches itself, rate-limited, whenever a first-use
+// burst completes. Off by default; enable it while a stall is acceptable, such as in menus.
+void aurora_set_pipeline_cache_idle_store(bool allowed);
 // Absolute schedule for the next sealed frame, on steady_clock: baseNanos anchors the group and
 // intervalNanos is the period, so slot k of N+1 fires at base + k*interval/(N+1). Zeros clear it.
 void aurora_set_present_schedule(uint64_t baseNanos, uint64_t intervalNanos);

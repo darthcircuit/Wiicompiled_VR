@@ -913,10 +913,16 @@ void fail_if_device_lost() noexcept {
 }
 
 void serialize_pipeline_caches() noexcept {
-#if defined(WEBGPU_DAWN) && defined(_WIN32)
+#if defined(WEBGPU_DAWN)
+  // Only the Vulkan backend keeps a monolithic VkPipelineCache (toggle above). Dawn writes it to
+  // the blob cache from PerformIdleTasks, and only when a pipeline was compiled since the last
+  // store, so calling this when nothing changed is cheap.
   if (!g_device || g_backendType != wgpu::BackendType::Vulkan) {
     return;
   }
+#if defined(_WIN32)
+  // The Windows product links the Dawn DLL from llvm-mingw, which cannot call the exported C++
+  // symbol directly; resolve its MSVC-mangled name instead.
   using PerformIdleTasksFn = void(*)(const wgpu::Device*);
   static const auto performIdleTasks = []() -> PerformIdleTasksFn {
     const HMODULE dawnModule = GetModuleHandleW(L"webgpu_dawn.dll");
@@ -929,6 +935,10 @@ void serialize_pipeline_caches() noexcept {
   if (performIdleTasks != nullptr) {
     performIdleTasks(&g_device);
   }
+#elif !defined(__MINGW32__)
+  // Static Dawn (Android, Linux): DawnNative.h is included above.
+  dawn::native::PerformIdleTasks(g_device);
+#endif
 #endif
 }
 

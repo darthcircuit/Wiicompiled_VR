@@ -637,6 +637,8 @@ private:
         }
 #endif
         bool fatal = false;
+        bool store_gate_set = false;
+        bool store_gate_immersive = false;
         bool presentation_logged = false;
         VRPresentationMode logged_presentation = VRPresentationMode::Desktop;
         uint32_t presentation_log_count = 0;
@@ -655,6 +657,9 @@ private:
                 session_was_active_ = session_active;
                 if (!session_active) {
                     ResetTrackingOrigin();
+                    // Nothing is displayed while the session is not running (the system menu,
+                    // the headset taken off), so the stall of a cache store is invisible here.
+                    aurora_store_pipeline_caches();
                 }
             }
             if (events == OpenXREventStatus::ExitRequested) {
@@ -705,6 +710,19 @@ private:
                                            : OpenXRFrameMode::VirtualScreen;
             presentation.quad_distance_meters = policy.config.hud_distance_meters;
             presentation.quad_width_meters = policy.config.hud_width_meters;
+
+            // Pipeline caches are stored where their stall is invisible: once when a race ends,
+            // and by the compiler itself while the headset shows the virtual screen. Never
+            // mid-race.
+            if (!store_gate_set || immersive != store_gate_immersive) {
+                const bool left_race = store_gate_set && store_gate_immersive && !immersive;
+                store_gate_set = true;
+                store_gate_immersive = immersive;
+                aurora_set_pipeline_cache_idle_store(!immersive);
+                if (left_race) {
+                    aurora_store_pipeline_caches();
+                }
+            }
 
             // Updating this on the owner thread also confines retained replay to
             // validated race content. The provider checks policy tags again.
@@ -841,6 +859,7 @@ private:
         }
 
         SetInterpolationActive(false);
+        aurora_set_pipeline_cache_idle_store(false);
         running_.store(false, std::memory_order_release);
         MkwVRPolicySetSessionActive(false);
         if (!stop_.load(std::memory_order_acquire)) {

@@ -93,6 +93,11 @@ static std::mutex g_pipelineCacheWriterMutex;
 static std::deque<PipelineCacheWrite> g_pipelineCacheWriteQueue;
 static absl::flat_hash_set<PipelineRef> g_pipelineCachePendingWrites;
 static bool g_pipelineCacheWriterStop = false;
+// Set while the writer thread is alive and while it is inside a write transaction, both under
+// g_pipelineCacheWriterMutex, so a flush can wait for the queue to reach the database.
+static bool g_pipelineCacheWriterRunning = false;
+static bool g_pipelineCacheWriterBusy = false;
+static std::condition_variable g_pipelineCacheWriterIdleCv;
 static int g_sdlVfsRegisterResult = SQLITE_ERROR;
 
 static SdlVfsSqliteFile* sdl_vfs_file(sqlite3_file* file) {
@@ -909,10 +914,13 @@ static void pipeline_cache_writer() {
       g_pipelineCacheWriterCv.wait(lock,
                                    [] { return g_pipelineCacheWriterStop || !g_pipelineCacheWriteQueue.empty(); });
       if (g_pipelineCacheWriterStop && g_pipelineCacheWriteQueue.empty()) {
+        g_pipelineCacheWriterRunning = false;
+        g_pipelineCacheWriterIdleCv.notify_all();
         return;
       }
       batch.swap(g_pipelineCacheWriteQueue);
       g_pipelineCachePendingWrites.clear();
+      g_pipelineCacheWriterBusy = true;
     }
 
     bool writeFailed = false;
@@ -935,6 +943,15 @@ static void pipeline_cache_writer() {
       }
     }
 
+    {
+      std::lock_guard lock{g_pipelineCacheWriterMutex};
+      g_pipelineCacheWriterBusy = false;
+      if (writeFailed) {
+        g_pipelineCacheWriterRunning = false;
+      }
+      g_pipelineCacheWriterIdleCv.notify_all();
+    }
+
     if (writeFailed) {
       pipeline_cache_abort();
       return;
@@ -948,21 +965,48 @@ static std::atomic_bool g_prewarmActive{false};
 static std::chrono::steady_clock::time_point g_prewarmStart{};
 static uint32_t g_prewarmCount = 0;
 
+// Storing the monolithic Vulkan pipeline cache holds the device lock for the whole
+// vkGetPipelineCacheData, compression and database write, a visible stall mid-race. Outside boot
+// prewarm it therefore runs only at moments the host declares safe: on request, through
+// store_pipeline_caches at a race exit and before the process ends, and, while the host allows
+// idle stores in menus, when a first-use burst drains, at most once per interval. Dawn skips the
+// store when no pipeline was created since the last one, but a creation served from the cache
+// still counts, so every store rewrites the whole blob; the interval keeps that rare.
+static std::mutex g_storeMutex;
+static std::atomic_bool g_idleStoreAllowed{false};
+static std::chrono::steady_clock::time_point g_lastStore{};
+constexpr auto kIdleStoreInterval = std::chrono::seconds(120);
+
 static void note_pipeline_queue_drained() {
-  if (!g_prewarmActive.exchange(false, std::memory_order_acq_rel)) {
+  if (g_prewarmActive.exchange(false, std::memory_order_acq_rel)) {
+    {
+      std::lock_guard lock{g_storeMutex};
+      webgpu::serialize_pipeline_caches();
+      g_lastStore = std::chrono::steady_clock::now();
+    }
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - g_prewarmStart);
+    const auto stats = webgpu::blob_cache_stats();
+    Log.info("Pipeline prewarm finished: {} pipelines in {:.1f} s (Dawn blob cache: {}/{} hits, {} stores, {:.1f} MiB "
+             "loaded)",
+             g_prewarmCount, elapsed.count() / 1000.0, stats.hits, stats.lookups, stats.stores,
+             static_cast<double>(stats.hitBytes) / (1024.0 * 1024.0));
     return;
   }
-  // Persist the monolithic Vulkan pipeline cache once after boot prewarm only; doing it on
-  // every drained burst stalls the device lock mid-race. Later first-use compiles are
-  // covered by the shutdown serialize.
+  if (!g_idleStoreAllowed.load(std::memory_order_relaxed)) {
+    return;
+  }
+  // A store in progress on another worker covers this burst too.
+  std::unique_lock lock{g_storeMutex, std::try_to_lock};
+  if (!lock.owns_lock()) {
+    return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (now - g_lastStore < kIdleStoreInterval) {
+    return;
+  }
+  g_lastStore = now;
   webgpu::serialize_pipeline_caches();
-  const auto elapsed =
-      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - g_prewarmStart);
-  const auto stats = webgpu::blob_cache_stats();
-  Log.info("Pipeline prewarm finished: {} pipelines in {:.1f} s (Dawn blob cache: {}/{} hits, {} stores, {:.1f} MiB "
-           "loaded)",
-           g_prewarmCount, elapsed.count() / 1000.0, stats.hits, stats.lookups, stats.stores,
-           static_cast<double>(stats.hitBytes) / (1024.0 * 1024.0));
 }
 
 static void compile_pending_pipeline(PendingPipeline pending) {
@@ -1130,8 +1174,26 @@ static void start_pipeline_cache_writer() {
     return;
   }
 
-  g_pipelineCacheWriterStop = false;
+  {
+    std::lock_guard lock{g_pipelineCacheWriterMutex};
+    g_pipelineCacheWriterStop = false;
+    g_pipelineCacheWriterRunning = true;
+    g_pipelineCacheWriterBusy = false;
+  }
   g_pipelineCacheWriterThread = std::thread(pipeline_cache_writer);
+}
+
+// Waits, bounded, until every queued recipe row has reached the database: the caller is about to
+// end the process, or wants the store it just made to be complete on disk.
+static void flush_pipeline_cache_writes() {
+  std::unique_lock lock{g_pipelineCacheWriterMutex};
+  if (!g_pipelineCacheWriterRunning) {
+    return;
+  }
+  g_pipelineCacheWriterCv.notify_one();
+  g_pipelineCacheWriterIdleCv.wait_for(lock, std::chrono::seconds(2), [] {
+    return !g_pipelineCacheWriterRunning || (g_pipelineCacheWriteQueue.empty() && !g_pipelineCacheWriterBusy);
+  });
 }
 
 static void stop_pipeline_cache_writer() {
@@ -1146,8 +1208,30 @@ static void stop_pipeline_cache_writer() {
     g_pipelineCacheWriterStop = false;
   }
 
+  g_pipelineCacheWriterRunning = false;
+  g_pipelineCacheWriterBusy = false;
   g_pipelineCacheWriteQueue.clear();
   g_pipelineCachePendingWrites.clear();
+}
+
+void store_pipeline_caches() {
+  const uint64_t storesBefore = webgpu::blob_cache_stats().stores;
+  const auto start = std::chrono::steady_clock::now();
+  {
+    std::lock_guard lock{g_storeMutex};
+    webgpu::serialize_pipeline_caches();
+    g_lastStore = std::chrono::steady_clock::now();
+  }
+  flush_pipeline_cache_writes();
+  const uint64_t stored = webgpu::blob_cache_stats().stores - storesBefore;
+  if (stored != 0) {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    Log.info("Stored the pipeline caches in {} ms: {} new Dawn blob cache entries", elapsed.count(), stored);
+  }
+}
+
+void set_pipeline_cache_idle_store(bool allowed) noexcept {
+  g_idleStoreAllowed.store(allowed, std::memory_order_relaxed);
 }
 
 template <>
@@ -1163,6 +1247,8 @@ PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, New
 void initialize_pipeline_cache() {
   g_pipelineCacheBroken = false;
   g_pipelineCacheWriterStop = false;
+  g_idleStoreAllowed.store(false, std::memory_order_relaxed);
+  g_lastStore = {};
   g_pipelineFrameActive = false;
   g_pipelineThreadEnd = false;
   g_activeBackgroundPipelineWorkers = 0;

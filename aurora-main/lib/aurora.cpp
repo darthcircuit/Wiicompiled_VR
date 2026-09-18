@@ -24,6 +24,9 @@
 #include <magic_enum.hpp>
 
 #include "android_debug.hpp"
+#ifdef AURORA_ENABLE_GX
+#include "gfx/pipeline_cache.hpp"
+#endif
 #include "system_info.hpp"
 #include "tracy/Tracy.hpp"
 
@@ -2509,6 +2512,18 @@ bool aurora_wait_for_frame_worker_for(uint32_t timeoutMicros) {
   return aurora::wait_for_frame_worker_for(std::chrono::microseconds(timeoutMicros));
 }
 void aurora_quiesce_frame_worker() { aurora::quiesce_frame_worker(); }
+void aurora_store_pipeline_caches() {
+#ifdef AURORA_ENABLE_GX
+  aurora::gfx::store_pipeline_caches();
+#endif
+}
+void aurora_set_pipeline_cache_idle_store(bool allowed) {
+#ifdef AURORA_ENABLE_GX
+  aurora::gfx::set_pipeline_cache_idle_store(allowed);
+#else
+  (void)allowed;
+#endif
+}
 void aurora_set_present_schedule(uint64_t baseNanos, uint64_t intervalNanos) {
   aurora::g_presentScheduleBaseNanos.store(baseNanos, std::memory_order_release);
   aurora::g_presentScheduleIntervalNanos.store(intervalNanos, std::memory_order_release);
