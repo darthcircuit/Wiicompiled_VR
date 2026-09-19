@@ -68,7 +68,10 @@ void BeginNextAuroraFrameWithRetry(std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     uint32_t attempts = 0;
     while (std::chrono::steady_clock::now() < deadline) {
-        UpdateAuroraAndProcessEvents();
+        // SDL is pumped by the window's thread; the GX thread only retries the begin.
+        if (!GxThread::IsGxThread()) {
+            UpdateAuroraAndProcessEvents();
+        }
         ++attempts;
         if (BeginAuroraFrame()) {
             g_auroraFrameActive.store(true, std::memory_order_release);

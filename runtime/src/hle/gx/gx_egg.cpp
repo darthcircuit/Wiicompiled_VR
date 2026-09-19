@@ -79,10 +79,10 @@ extern "C" void EGG__LightTexture__SetupTevFinish_HLE_8022e2bc(CpuContext* ctx) 
     if (stageCount != 0) {
         uint32_t remainder = tevCount % stageCount;
         if (remainder > 0) {
-            const GXColor black{0, 0, 0, 255};
+            constexpr uint32_t kBlack = 0x000000FFu;
             while (remainder < stageCount) {
-                GXSetTevColor(static_cast<GXTevRegID>(remainder + 1), black);
-                GXSetTevKColor(static_cast<GXTevKColorID>(remainder), black);
+                GxThread::Post(&GX__SetTevColor_gx, remainder + 1, kBlack);
+                GxThread::Post(&GX__SetTevKColor_gx, remainder, kBlack);
                 ++remainder;
             }
 

@@ -54,6 +54,8 @@
 #include "abi_bridge.h"
 #include "guest_flat_memory.h"
 #include "gx_guest_write.h"
+#include "gx_thread.h"
+#include <aurora/imgui.h>
 #include "memory.h"
 #include "system_bridge.h"
 #include "ppc_runtime.h"
@@ -97,6 +99,14 @@ void ServiceGuestTimingDuringAuroraFrameWait() {
     VI_HLE_ProcessRetracesDeferred(8);
     OS_HLE_ProcessAlarmsDeferred(8);
     Audio_HLE_PollDeferred();
+}
+
+void GxThreadFrameLog(char* buffer, uint32_t bufferSize, double windowSeconds, uint32_t frames) {
+    if (!GxThread::Enabled()) {
+        return;
+    }
+    const std::string line = GxThread::FormatStatsAndReset(windowSeconds, frames);
+    std::snprintf(buffer, bufferSize, "%s", line.c_str());
 }
 
 #if defined(_WIN32)
@@ -1497,6 +1507,19 @@ int RuntimeMain(int argc, char** argv) {
         }
         aurora_set_frame_worker_wait_callback(ServiceGuestTimingDuringAuroraFrameWait);
         GxGuestWrite::InstallAuroraHooks();
+        GxThread::Configure(RuntimeConfigFile::GxThread());
+        GxThread::SetWaitCallback(ServiceGuestTimingDuringAuroraFrameWait);
+        GxThread::Start();
+        if (GxThread::Enabled()) {
+            // The GX thread is aurora's producer: the game thread never waits
+            // inside aurora any more, and it pumps SDL itself (aurora_update).
+            aurora_set_frame_worker_wait_callback(nullptr);
+            aurora_set_host_event_pump(true);
+        }
+        aurora_set_frame_log_callback(GxThreadFrameLog);
+        // The desktop overlay's ImGui frames belong to this thread from the
+        // first frame on; the seal replays a copy of their draw data.
+        aurora_imgui_host_frame_begin();
         UpdateMkwDynamicAspectSurface(auroraInfo.windowSize.native_fb_width,
                                       auroraInfo.windowSize.native_fb_height);
         settings_overlay::InitializeRuntimeSettings();
@@ -1549,6 +1572,7 @@ int RuntimeMain(int argc, char** argv) {
         // Shutdown fiber system
         Fiber::GuestFiberManager::Shutdown();
         WindowPlacementPersistence::Flush(true);
+        GxThread::Stop();
         mkw::vr::OpenXRShutdownBeforeAurora();
         aurora_shutdown();
         DiscordPresence::Shutdown();
@@ -1568,6 +1592,7 @@ int RuntimeMain(int argc, char** argv) {
         SetRuntimeExitCodeImpl(1);
         Fiber::GuestFiberManager::Shutdown();
         WindowPlacementPersistence::Flush(true);
+        GxThread::Stop();
         mkw::vr::OpenXRShutdownBeforeAurora();
         aurora_shutdown();
         DiscordPresence::Shutdown();
@@ -1581,6 +1606,7 @@ int RuntimeMain(int argc, char** argv) {
         SetRuntimeExitCodeImpl(1);
         Fiber::GuestFiberManager::Shutdown();
         WindowPlacementPersistence::Flush(true);
+        GxThread::Stop();
         mkw::vr::OpenXRShutdownBeforeAurora();
         aurora_shutdown();
         DiscordPresence::Shutdown();

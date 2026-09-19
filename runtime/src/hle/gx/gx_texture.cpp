@@ -250,9 +250,8 @@ extern "C" void GX__InitTexObj_801707f8(uint32_t oa, uint32_t da, uint32_t w, ui
                 oa, da, w, h, f, ws, wt, m, cpu ? cpu->pc : 0u, cpu ? cpu->lr : 0u);
     }
     const uint32_t canonicalDataAddr = CanonicalizeGxMainRamAddress(da);
-    std::lock_guard<std::mutex> guard(g_texObjMutex); GXTexObj* obj = CreateHostTexObj(oa); TexObjMeta& meta = GetTexObjMeta(oa);
+    std::lock_guard<std::mutex> guard(g_texObjMutex); TexObjMeta& meta = GetTexObjMeta(oa);
     meta.dataAddr=canonicalDataAddr; meta.width=(u16)w; meta.height=(u16)h; meta.format=f; meta.wrapS=ws; meta.wrapT=wt; meta.mipmap=(m!=0); meta.userData=0; meta.needsUpload=true;
-    GXInitTexObj(obj, GuestToHostPtr(da), (u16)w, (u16)h, (GXTexFmt)f, (GXTexWrapMode)ws, (GXTexWrapMode)wt, (GXBool)m); MarkHostTexObjConstructed(oa);
     // Also write to guest memory so reads work
     WriteGuestTexObj(oa, canonicalDataAddr, (u16)w, (u16)h, f, ws, wt, m != 0, false, 0);
 }
@@ -291,9 +290,8 @@ extern "C" void GX__InitTexObjCI_80170a04(uint32_t oa, uint32_t da, uint32_t w, 
                 oa, da, w, h, f, ws, wt, m, tl, cpu ? cpu->pc : 0u, cpu ? cpu->lr : 0u);
     }
     const uint32_t canonicalDataAddr = CanonicalizeGxMainRamAddress(da);
-    std::lock_guard<std::mutex> guard(g_texObjMutex); GXTexObj* obj = CreateHostTexObj(oa); TexObjMeta& meta = GetTexObjMeta(oa);
+    std::lock_guard<std::mutex> guard(g_texObjMutex); TexObjMeta& meta = GetTexObjMeta(oa);
     meta.dataAddr=canonicalDataAddr; meta.width=(u16)w; meta.height=(u16)h; meta.format=f; meta.wrapS=ws; meta.wrapT=wt; meta.mipmap=(m!=0); meta.tlut=tl; meta.userData=0; meta.needsUpload=true;
-    GXInitTexObjCI(obj, GuestToHostPtr(da), (u16)w, (u16)h, (GXCITexFmt)f, (GXTexWrapMode)ws, (GXTexWrapMode)wt, (GXBool)m, tl); MarkHostTexObjConstructed(oa);
     // Also write to guest memory so reads work
     WriteGuestTexObj(oa, canonicalDataAddr, (u16)w, (u16)h, f, ws, wt, m != 0, true, tl);
     // GXInitTexObjCI clears bit1 in the flags byte; keep guest memory consistent.
@@ -306,10 +304,9 @@ extern "C" void GX__InitTexObjCI_80170a04(uint32_t oa, uint32_t da, uint32_t w, 
 PPC_NATIVE_OVERRIDE_VOID(80170a04, GX__InitTexObjCI_80170a04, (uint32_t oa, uint32_t da, uint32_t w, uint32_t h, uint32_t f, uint32_t ws, uint32_t wt, uint32_t m, uint32_t tl), (oa, da, w, h, f, ws, wt, m, tl));
 
 extern "C" void GX__InitTexObjLOD_80170a4c(uint32_t oa, uint32_t mif, uint32_t maf, float mil, float mal, float lb, uint32_t bc, uint32_t el, uint32_t ma) {
-    std::lock_guard<std::mutex> guard(g_texObjMutex); GXTexObj* obj = GetHostTexObj(oa); TexObjMeta& meta = GetTexObjMeta(oa);
+    std::lock_guard<std::mutex> guard(g_texObjMutex); TexObjMeta& meta = GetTexObjMeta(oa);
     float fmal = std::isfinite(mal) && mal >= 0.f ? mal : 0.f, fmil = std::isfinite(mil) && mil >= 0.f ? std::min(mil, fmal) : 0.f;
     meta.minFilter=mif; meta.magFilter=maf; meta.minLod=fmil; meta.maxLod=fmal; meta.lodBias=lb; meta.biasClamp=(bc!=0); meta.edgeLod=(el!=0); meta.maxAniso=ma;
-    GXInitTexObjLOD(obj, (GXTexFilter)mif, (GXTexFilter)maf, fmil, fmal, lb, (GXBool)bc, (GXBool)el, (GXAnisotropy)ma);
     // Also write LOD info to guest memory
     WriteGuestTexObjLOD(oa, mif, maf, fmil, fmal, lb, bc != 0, el != 0, ma);
 }
@@ -317,7 +314,6 @@ PPC_NATIVE_OVERRIDE_VOID(80170a4c, GX__InitTexObjLOD_80170a4c, (uint32_t oa, uin
 
 extern "C" void GX__InitTexObjWrapMode_80170b50(uint32_t oa, uint32_t ws, uint32_t wt) {
     std::lock_guard<std::mutex> guard(g_texObjMutex);
-    GXTexObj* obj = GetHostTexObj(oa);
     TexObjMeta& meta = GetTexObjMeta(oa);
     meta.wrapS = ws;
     meta.wrapT = wt;
@@ -327,16 +323,13 @@ extern "C" void GX__InitTexObjWrapMode_80170b50(uint32_t oa, uint32_t ws, uint32
         Memory::Write32(oa + 0x00, word0);
     } catch (...) {
     }
-    GXInitTexObjWrapMode(obj, (GXTexWrapMode)ws, (GXTexWrapMode)wt);
 }
 PPC_NATIVE_OVERRIDE_VOID(80170b50, GX__InitTexObjWrapMode_80170b50, (uint32_t oa, uint32_t ws, uint32_t wt), (oa, ws, wt));
 
 extern "C" void GX__InitTexObjTlut_80170b64(uint32_t oa, uint32_t tl) {
     std::lock_guard<std::mutex> guard(g_texObjMutex);
-    GXTexObj* obj = GetHostTexObj(oa);
     TexObjMeta& meta = GetTexObjMeta(oa);
     meta.tlut = tl;
-    GXInitTexObjTlut(obj, tl);
     // Keep guest GXTexObj coherent for later GXLoadTexObj from memory.
     try {
         Memory::Write32(oa + 0x18, tl);
@@ -365,11 +358,6 @@ extern "C" void GX__InitTexObjFilter_80170b6c(uint32_t oa, uint32_t minFilter, u
         Memory::Write32(oa + 0x00, word0);
     } catch (...) {}
 
-    // Update host texture object if it exists
-    if (GXTexObj* obj = TryGetHostTexObj(oa)) {
-        ApplyHostTexObjLod(obj, meta, (GXTexFilter)minFilter, (GXTexFilter)magFilter, meta.lodBias,
-                           (GXAnisotropy)meta.maxAniso);
-    }
 }
 PPC_NATIVE_OVERRIDE_VOID(80170b6c, GX__InitTexObjFilter_80170b6c, (uint32_t oa, uint32_t minFilter, uint32_t magFilter), (oa, minFilter, magFilter));
 
@@ -395,11 +383,6 @@ extern "C" void GX__InitTexObjLODBias_80170b94(uint32_t oa, float bias) {
         Memory::Write32(oa + 0x00, word0);
     } catch (...) {}
     
-    // Update host texture object if it exists
-    if (GXTexObj* obj = TryGetHostTexObj(oa)) {
-        ApplyHostTexObjLod(obj, meta, (GXTexFilter)meta.minFilter, (GXTexFilter)meta.magFilter,
-                           clampedBias, (GXAnisotropy)meta.maxAniso);
-    }
 }
 PPC_NATIVE_OVERRIDE_VOID(80170b94, GX__InitTexObjLODBias_80170b94, (uint32_t oa, float bias), (oa, bias));
 
@@ -411,11 +394,6 @@ extern "C" void GX__InitTexObjUserData_80170be8(uint32_t oa, uint32_t userData) 
     // The RVL SDK stores this opaque guest pointer verbatim at GXTexObj + 0x10.
     WriteGuest32(oa + 0x10, userData, "GXInitTexObjUserData");
 
-    // Aurora keeps an expanded host-side object, so mirror the pointer when
-    // that representation has already been constructed.
-    if (GXTexObj* obj = TryGetHostTexObj(oa)) {
-        GXInitTexObjUserData(obj, GuestToHostPtr(userData));
-    }
 }
 PPC_NATIVE_OVERRIDE_VOID(80170be8, GX__InitTexObjUserData_80170be8,
               (uint32_t oa, uint32_t userData), (oa, userData));
@@ -450,7 +428,6 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
     static uint32_t s_invalidMetaLogCount = 0;
     static uint32_t s_invalidTidLogCount = 0;
     static uint32_t s_invalidDimLogCount = 0;
-    static uint32_t s_hostExceptionLogCount = 0;
     static uint32_t s_metaLookupLogCount = 0;
     static uint32_t s_unknownFormatLogCount = 0;
     static uint32_t s_invalidDataLogCount = 0;
@@ -471,7 +448,7 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
             RT_LOGF(RT_TAG_GX,
                     "GXLoadTexObj rejected reason=no-metadata oa=0x%08X tid=%u\n", oa, tid);
         }
-        BindUnloadableTexturePlaceholder(tid);
+        GxThread::Post(&GxHostBindPlaceholder_gx, tid);
         return;
     }
 
@@ -481,7 +458,7 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
                     "GXLoadTexObj rejected reason=invalid-meta oa=0x%08X tid=%u data=0x%08X %ux%u\n",
                     oa, tid, meta.dataAddr, meta.width, meta.height);
         }
-        BindUnloadableTexturePlaceholder(tid);
+        GxThread::Post(&GxHostBindPlaceholder_gx, tid);
         return;
     }
     if (!IsReasonableTextureDimensions(meta.width, meta.height)) {
@@ -490,7 +467,7 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
                     "GXLoadTexObj rejected reason=bad-dimensions oa=0x%08X tid=%u %ux%u fmt=0x%X\n",
                     oa, tid, meta.width, meta.height, meta.format);
         }
-        BindUnloadableTexturePlaceholder(tid);
+        GxThread::Post(&GxHostBindPlaceholder_gx, tid);
         return;
     }
     // One gate, two reasons: every aurora-loadable format is also a known one,
@@ -506,7 +483,7 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
                     known ? "unsupported-format" : "unknown-format", oa, tid, meta.format,
                     meta.width, meta.height);
         }
-        BindUnloadableTexturePlaceholder(tid);
+        GxThread::Post(&GxHostBindPlaceholder_gx, tid);
         return;
     }
     const float maxMipLevel = static_cast<float>(ComputeMaxMipLevel(meta.width, meta.height));
@@ -527,7 +504,7 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
                     meta.mipmap ? 1u : 0u, static_cast<uint32_t>(maxLod),
                     cpu ? cpu->pc : 0u, cpu ? cpu->lr : 0u);
         }
-        BindUnloadableTexturePlaceholder(tid);
+        GxThread::Post(&GxHostBindPlaceholder_gx, tid);
         return;
     }
     const GXTexWrapMode wrapS = SanitizeWrapMode(meta.wrapS);
@@ -544,58 +521,140 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
     meta.maxLod = maxLodSafe;
     meta.lodBias = lodBiasSafe;
     
-    // Check if host texture object exists, create if needed
-    GXTexObj* obj = TryGetHostTexObj(oa);
-    const bool isPalette = IsPaletteTexFormat(meta.format);
-    bool needsInit = (obj == nullptr);
-    const auto metaIt = g_TexObjMeta.find(oa);
-    if (!needsInit && metaIt != g_TexObjMeta.end()) {
-        const TexObjMeta& cached = metaIt->second;
-        if (cached.width != meta.width || cached.height != meta.height || cached.format != meta.format ||
-            cached.wrapS != meta.wrapS || cached.wrapT != meta.wrapT || cached.mipmap != meta.mipmap ||
-            cached.minFilter != meta.minFilter || cached.magFilter != meta.magFilter ||
-            cached.minLod != meta.minLod || cached.maxLod != meta.maxLod ||
-            cached.lodBias != meta.lodBias || cached.biasClamp != meta.biasClamp ||
-            cached.edgeLod != meta.edgeLod || cached.maxAniso != meta.maxAniso ||
-            cached.tlut != meta.tlut || cached.userData != meta.userData) {
-            needsInit = true;
+    // The sanitized meta is what the GX thread builds the aurora object from
+    // and what the next load compares against. The upload flag is consumed
+    // here so a guest write re-uploads exactly once.
+    GxTexObjLoad load{};
+    load.objAddr = oa;
+    load.tid = tid;
+    load.upload = meta.needsUpload;
+    meta.needsUpload = false;
+    load.meta = meta;
+    // Write through GetTexObjMeta so the DCStoreRange interval index is
+    // told this entry's backing may have moved.
+    GetTexObjMeta(oa) = meta;
+    GxThread::Post(&GxHostLoadTexObj_gx, load);
+    try { uint32_t gd = Memory::Read32(kGXDataPtrAddr); if (gd) { Memory::Write32(gd + 0x5FCu, Memory::Read32(gd + 0x5FCu) | 1u); Memory::Write16(gd + 2, 0); } } catch (...) {}
+}
+PPC_NATIVE_OVERRIDE_VOID(80170f2c, GX__LoadTexObj_80170f2c, (uint32_t oa, uint32_t tid), (oa, tid));
+
+extern "C" void GX__LoadTexObjPreLoaded_80170dc8(uint32_t oa, uint32_t tid) { GX__LoadTexObj_80170f2c(oa, tid); }
+PPC_NATIVE_OVERRIDE_VOID(80170dc8, GX__LoadTexObjPreLoaded_80170dc8, (uint32_t oa, uint32_t tid), (oa, tid));
+
+// ============================================================================
+// GX-thread side: aurora texture and TLUT objects
+// ============================================================================
+// Keyed by guest object address like the meta table. Each load carries the
+// sanitized meta snapshot; an object is (re)built when it differs from what
+// the aurora object was last built from, exactly as the single-threaded
+// path compared the cached meta before this split.
+
+namespace aurora::gfx {
+struct TextureRef;
+using TextureHandle = std::shared_ptr<TextureRef>;
+} // namespace aurora::gfx
+
+namespace {
+struct HostGXTlutObj {
+    alignas(GXTlutObj) std::byte publicStorage[sizeof(GXTlutObj)]{};
+    aurora::gfx::TextureHandle ref;
+};
+
+struct HleTlutObj {
+    static constexpr size_t kTlutObjStorageSize =
+        (sizeof(GXTlutObj) >= sizeof(HostGXTlutObj)) ? sizeof(GXTlutObj) : sizeof(HostGXTlutObj);
+    static constexpr size_t kTlutObjStorageAlign =
+        (alignof(GXTlutObj) >= alignof(HostGXTlutObj)) ? alignof(GXTlutObj) : alignof(HostGXTlutObj);
+    using Storage = std::aligned_storage_t<kTlutObjStorageSize, kTlutObjStorageAlign>;
+    Storage storage{};
+    bool storageLive = false;
+    bool constructed = false;
+    HleTlutObj() = default;
+    ~HleTlutObj() { Destroy(); }
+    HostGXTlutObj* HostObj() { return reinterpret_cast<HostGXTlutObj*>(&storage); }
+    GXTlutObj* PublicPtr() { return reinterpret_cast<GXTlutObj*>(HostObj()->publicStorage); }
+    void EnsureStorageLive() {
+        if (!storageLive) {
+            new (&storage) HostGXTlutObj();
+            storageLive = true;
         }
     }
-    bool tlutChanged = false;
+    void Destroy() {
+        if (storageLive) {
+            GXDestroyTlutObj(PublicPtr());
+            std::destroy_at(HostObj());
+            std::memset(&storage, 0, sizeof(storage));
+            storageLive = false;
+            constructed = false;
+        }
+    }
+};
+
+struct GxHostTexObjEntry {
+    HleTexObj host;
+    TexObjMeta cached;
+};
+struct GxHostTlutObjEntry {
+    HleTlutObj host;
+    TlutObjMeta cached;
+};
+std::unordered_map<uint32_t, GxHostTexObjEntry> g_gxHostTexObjs;
+std::map<uint32_t, GxHostTlutObjEntry> g_gxHostTlutObjs;
+
+bool SameTexObjBuildMeta(const TexObjMeta& cached, const TexObjMeta& meta) {
+    return cached.width == meta.width && cached.height == meta.height && cached.format == meta.format &&
+           cached.wrapS == meta.wrapS && cached.wrapT == meta.wrapT && cached.mipmap == meta.mipmap &&
+           cached.minFilter == meta.minFilter && cached.magFilter == meta.magFilter &&
+           cached.minLod == meta.minLod && cached.maxLod == meta.maxLod &&
+           cached.lodBias == meta.lodBias && cached.biasClamp == meta.biasClamp &&
+           cached.edgeLod == meta.edgeLod && cached.maxAniso == meta.maxAniso &&
+           cached.tlut == meta.tlut && cached.userData == meta.userData;
+}
+} // namespace
+
+void GxHostBindPlaceholder_gx(uint32_t tid) { BindUnloadableTexturePlaceholder(tid); }
+
+void GxHostLoadTexObj_gx(GxTexObjLoad load) {
+    static uint32_t s_hostExceptionLogCount = 0;
+    const TexObjMeta& meta = load.meta;
+    const uint32_t oa = load.objAddr;
+    const uint32_t tid = load.tid;
+    if (tid >= g_boundTexMaps.size()) {
+        return;
+    }
+    const bool isPalette = IsPaletteTexFormat(meta.format);
+    const uint8_t maxLod = (meta.maxLod > 0.0f) ? ((meta.maxLod > 255.0f) ? 255u : static_cast<uint8_t>(meta.maxLod)) : 0u;
+    const uint32_t size = GXGetTexBufferSize(meta.width, meta.height, meta.format, (GXBool)meta.mipmap, maxLod);
+    GxHostTexObjEntry& entry = g_gxHostTexObjs[oa];
+    GXTexObj* obj = entry.host.constructed ? entry.host.PublicPtr() : nullptr;
+    const bool needsInit = obj == nullptr || !SameTexObjBuildMeta(entry.cached, meta);
     bool textureDataUploaded = false;
     try {
         if (needsInit) {
-            if (!obj) {
-                obj = CreateHostTexObj(oa);
-            }
+            entry.host.Destroy();
+            entry.host.EnsureStorageLive();
+            obj = entry.host.PublicPtr();
             void* dp = GuestToHostPtr(meta.dataAddr, size);
             if (dp) {
                 if (isPalette) {
                     GXInitTexObjCI(obj, dp, meta.width, meta.height, (GXCITexFmt)meta.format,
-                                   wrapS, wrapT,
+                                   (GXTexWrapMode)meta.wrapS, (GXTexWrapMode)meta.wrapT,
                                    meta.mipmap ? GX_TRUE : GX_FALSE, meta.tlut);
                 } else {
                     GXInitTexObj(obj, dp, meta.width, meta.height, (GXTexFmt)meta.format,
-                                 wrapS, wrapT,
+                                 (GXTexWrapMode)meta.wrapS, (GXTexWrapMode)meta.wrapT,
                                  meta.mipmap ? GX_TRUE : GX_FALSE);
                 }
-                ApplyHostTexObjLod(obj, meta, minFilter, magFilter, meta.lodBias, maxAnisoSafe);
+                ApplyHostTexObjLod(obj, meta, (GXTexFilter)meta.minFilter, (GXTexFilter)meta.magFilter,
+                                   meta.lodBias, (GXAnisotropy)meta.maxAniso);
                 GXInitTexObjUserData(obj, GuestToHostPtr(meta.userData));
             }
-            MarkHostTexObjConstructed(oa);
-            // Write through GetTexObjMeta so the DCStoreRange interval index is
-            // told this entry's backing may have moved.
-            GetTexObjMeta(oa) = meta;
-        } else if (isPalette && metaIt != g_TexObjMeta.end() && metaIt->second.tlut != meta.tlut) {
-            GXInitTexObjTlut(obj, meta.tlut);
-            GetTexObjMeta(oa).tlut = meta.tlut;
-            tlutChanged = true;
+            entry.host.constructed = true;
+            entry.cached = meta;
         }
-
         const void* dp = GuestToHostPtr(meta.dataAddr, size);
-        if (dp && meta.needsUpload) {
+        if (dp && load.upload) {
             GXInitTexObjData(obj, dp);
-            meta.needsUpload = false;
             textureDataUploaded = true;
         }
         // Everything the binding contract compares apart from objAddr is the
@@ -607,10 +666,9 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
         newBound.dataAddr = CanonicalizeGxMainRamAddress(meta.dataAddr);
         const BoundTexInfo& oldBound = g_boundTexMaps[tid];
         const bool canSkipHostLoad = GxTextureBindingContract::CanSkipHostLoad(
-            oldBound, newBound, needsInit, tlutChanged, textureDataUploaded);
-
+            oldBound, newBound, needsInit, /*tlutChanged=*/false, textureDataUploaded);
         g_boundTexMaps[tid] = newBound;
-        GetTexObjMeta(oa) = meta;
+        entry.cached = meta;
         if (!canSkipHostLoad) {
             GXLoadTexObj(obj, (GXTexMapID)tid);
         }
@@ -621,7 +679,6 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
                     ex.what(), oa, tid, meta.format, meta.width, meta.height, meta.dataAddr);
         }
         BindUnloadableTexturePlaceholder(tid);
-        return;
     } catch (...) {
         if (s_hostExceptionLogCount++ < 64) {
             RT_LOGF(RT_TAG_GX,
@@ -629,14 +686,39 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
                     oa, tid, meta.format, meta.width, meta.height, meta.dataAddr);
         }
         BindUnloadableTexturePlaceholder(tid);
+    }
+}
+
+void GxHostLoadTlut_gx(GxTlutLoad load) {
+    GxHostTlutObjEntry& entry = g_gxHostTlutObjs[load.objAddr];
+    if (!load.valid) {
+        // GXInitTlutObj refused the descriptor (or the object was never
+        // initialised): load a fresh empty object rather than read entries*2
+        // bytes off an unvalidated pointer, as the soft-fail path always did.
+        static uint32_t s_invalidLogCount = 0;
+        if (s_invalidLogCount++ < 64) {
+            RT_LOGF(RT_TAG_GX, "GXTex: invalid GXTlutObj @0x%08X\n", load.objAddr);
+        }
+        entry.host.Destroy();
+        entry.host.EnsureStorageLive();
+        entry.host.constructed = true;
+        entry.cached = TlutObjMeta{};
+        GXLoadTlut(entry.host.PublicPtr(), (GXTlut)load.tlut);
         return;
     }
-    try { uint32_t gd = Memory::Read32(kGXDataPtrAddr); if (gd) { Memory::Write32(gd + 0x5FCu, Memory::Read32(gd + 0x5FCu) | 1u); Memory::Write16(gd + 2, 0); } } catch (...) {}
+    const bool metaChanged = entry.cached.dataAddr != load.meta.dataAddr ||
+                             entry.cached.format != load.meta.format ||
+                             entry.cached.entries != load.meta.entries;
+    if (!entry.host.constructed || load.rebuild || metaChanged) {
+        entry.host.Destroy();
+        entry.host.EnsureStorageLive();
+        GXInitTlutObj(entry.host.PublicPtr(), GuestToHostPtr(load.meta.dataAddr),
+                      (GXTlutFmt)load.meta.format, load.meta.entries);
+        entry.host.constructed = true;
+        entry.cached = load.meta;
+    }
+    GXLoadTlut(entry.host.PublicPtr(), (GXTlut)load.tlut);
 }
-PPC_NATIVE_OVERRIDE_VOID(80170f2c, GX__LoadTexObj_80170f2c, (uint32_t oa, uint32_t tid), (oa, tid));
-
-extern "C" void GX__LoadTexObjPreLoaded_80170dc8(uint32_t oa, uint32_t tid) { GX__LoadTexObj_80170f2c(oa, tid); }
-PPC_NATIVE_OVERRIDE_VOID(80170dc8, GX__LoadTexObjPreLoaded_80170dc8, (uint32_t oa, uint32_t tid), (oa, tid));
 
 // ============================================================================
 // Texture Object Getters
@@ -676,33 +758,59 @@ PPC_NATIVE_OVERRIDE_VOID(80170cbc, GX__GetTexObjLODAll_80170cbc, (uint32_t oa, u
 // ============================================================================
 
 extern "C" void GX__InitTlutObj_80170f80(uint32_t oa, uint32_t da, uint32_t f, uint32_t e) {
-    std::lock_guard<std::mutex> guard(g_tlutObjMutex); GXTlutObj* obj = CreateHostTlutObj(oa); TlutObjMeta& meta = GetTlutObjMeta(oa);
+    std::lock_guard<std::mutex> guard(g_tlutObjMutex); TlutObjMeta& meta = GetTlutObjMeta(oa);
     meta.dataAddr=CanonicalizeGxMainRamAddress(da); meta.format=f; meta.entries=(u16)e; meta.dirty=false;
-    // Leave the object unconstructed on a bad descriptor. A later GXLoadTlut
-    // then takes GetHostTlutObj's soft-fail path and gets a fresh empty object
-    // instead of aurora reading entries*2 bytes off an unvalidated pointer.
-    if (!ValidateTlutData(oa, meta)) return;
-    GXInitTlutObj(obj, GuestToHostPtr(da), (GXTlutFmt)f, (u16)e); MarkHostTlutObjConstructed(oa);
+    // The aurora object is built by the GX thread on the next GXLoadTlut from
+    // this meta; a bad descriptor loads an empty object there instead of
+    // aurora reading entries*2 bytes off an unvalidated pointer.
+    (void)ValidateTlutData(oa, meta);
 }
 PPC_NATIVE_OVERRIDE_VOID(80170f80, GX__InitTlutObj_80170f80, (uint32_t oa, uint32_t da, uint32_t f, uint32_t e), (oa, da, f, e));
 
-extern "C" void GX__LoadTlut_80170fa8(uint32_t oa, uint32_t tl) { std::lock_guard<std::mutex> guard(g_tlutObjMutex); if (tl >= kMaxTluts) { RT_LOGF(RT_TAG_GX, "GXLoadTlut: invalid TLUT index %u (oa=0x%08X)\n", tl, oa); return; } auto metaIt = g_TlutObjMeta.find(oa); if (metaIt != g_TlutObjMeta.end() && metaIt->second.dirty) { if (ValidateTlutData(oa, metaIt->second)) { GXTlutObj* rebuild = CreateHostTlutObj(oa); GXInitTlutObj(rebuild, GuestToHostPtr(metaIt->second.dataAddr), (GXTlutFmt)metaIt->second.format, metaIt->second.entries); MarkHostTlutObjConstructed(oa); } metaIt->second.dirty = false; } GXTlutObj* obj = GetHostTlutObj(oa); GXLoadTlut(obj, (GXTlut)tl); try { uint32_t gd = Memory::Read32(kGXDataPtrAddr); if (gd) Memory::Write16(gd + 2, 0); } catch (...) {} }
+extern "C" void GX__LoadTlut_80170fa8(uint32_t oa, uint32_t tl) {
+    std::lock_guard<std::mutex> guard(g_tlutObjMutex);
+    if (tl >= kMaxTluts) {
+        RT_LOGF(RT_TAG_GX, "GXLoadTlut: invalid TLUT index %u (oa=0x%08X)\n", tl, oa);
+        return;
+    }
+    GxTlutLoad load{};
+    load.objAddr = oa;
+    load.tlut = tl;
+    auto metaIt = g_TlutObjMeta.find(oa);
+    if (metaIt != g_TlutObjMeta.end()) {
+        TlutObjMeta& meta = metaIt->second;
+        load.valid = ValidateTlutData(oa, meta);
+        // A guest write over the palette (DCStoreRange) marks it dirty; the
+        // rebuild travels with this load and the flag is consumed once.
+        load.rebuild = meta.dirty && load.valid;
+        meta.dirty = false;
+        load.meta = meta;
+    }
+    GxThread::Post(&GxHostLoadTlut_gx, load);
+    try { uint32_t gd = Memory::Read32(kGXDataPtrAddr); if (gd) Memory::Write16(gd + 2, 0); } catch (...) {}
+}
 PPC_NATIVE_OVERRIDE_VOID(80170fa8, GX__LoadTlut_80170fa8, (uint32_t oa, uint32_t tl), (oa, tl));
 
 // ============================================================================
 // Texture Invalidation and Coordinate Control
 // ============================================================================
 
-extern "C" void GX__InvalidateTexAll_80171110() {
+static void GX__InvalidateTexAll_80171110_gx() {
     // Real GX invalidates its internal texture cache here. Aurora forwards the
     // invalidate to the renderer, which keeps unchanged source uploads hot but
     // revalidates reused guest buffers before serving cached texture handles.
     GXInvalidateTexAll();
 }
-PPC_NATIVE_OVERRIDE_VOID(80171110, GX__InvalidateTexAll_80171110, (), ());
+GX_DEFERRED_OVERRIDE_VOID(80171110, GX__InvalidateTexAll_80171110, (), ());
 
-extern "C" void GX__SetTexCoordScaleManually_80171180(uint32_t c, uint32_t en, uint32_t ss, uint32_t ts) { GXSetTexCoordScaleManually((GXTexCoordID)c, (GXBool)en, (u16)ss, (u16)ts); try{ uint32_t gd=Memory::Read32(kGXDataPtrAddr); if(gd){ Memory::Write32(gd+0x5E4u, (Memory::Read32(gd+0x5E4u)&~(1u<<c))|((en&1u)<<c)); if(en){ uint32_t sa=gd+0x108u+c*4u, ta=gd+0x128u+c*4u; Memory::Write32(sa, (Memory::Read32(sa)&0xFFFF0000u)|((ss-1)&0xFFFFu)); Memory::Write32(ta, (Memory::Read32(ta)&0xFFFF0000u)|((ts-1)&0xFFFFu)); Memory::Write16(gd+2, 0); } } }catch(...){} }
+static void GX__SetTexCoordScaleManually_gx(uint32_t c, uint32_t en, uint32_t ss, uint32_t ts) {
+    GXSetTexCoordScaleManually((GXTexCoordID)c, (GXBool)en, (u16)ss, (u16)ts);
+}
+extern "C" void GX__SetTexCoordScaleManually_80171180(uint32_t c, uint32_t en, uint32_t ss, uint32_t ts) { GxThread::Post(&GX__SetTexCoordScaleManually_gx, c, en, ss, ts); try{ uint32_t gd=Memory::Read32(kGXDataPtrAddr); if(gd){ Memory::Write32(gd+0x5E4u, (Memory::Read32(gd+0x5E4u)&~(1u<<c))|((en&1u)<<c)); if(en){ uint32_t sa=gd+0x108u+c*4u, ta=gd+0x128u+c*4u; Memory::Write32(sa, (Memory::Read32(sa)&0xFFFF0000u)|((ss-1)&0xFFFFu)); Memory::Write32(ta, (Memory::Read32(ta)&0xFFFF0000u)|((ts-1)&0xFFFFu)); Memory::Write16(gd+2, 0); } } }catch(...){} }
 PPC_NATIVE_OVERRIDE_VOID(80171180, GX__SetTexCoordScaleManually_80171180, (uint32_t c, uint32_t en, uint32_t ss, uint32_t ts), (c, en, ss, ts));
 
-extern "C" void GX__SetTexCoordBias_801711fc(uint32_t c, uint32_t se, uint32_t te) { GXSetTexCoordBias((GXTexCoordID)c, (GXBool)se, (GXBool)te); try{ uint32_t gd=Memory::Read32(kGXDataPtrAddr); if(gd){ uint32_t sa=gd+0x108u+c*4u, ta=gd+0x128u+c*4u; Memory::Write32(sa, (Memory::Read32(sa)&0xFFFEFFFFu)|((se&1u)<<16)); Memory::Write32(ta, (Memory::Read32(ta)&0xFFFEFFFFu)|((te&1u)<<16)); if(Memory::Read32(gd+0x5E4u)&(1u<<c)) Memory::Write16(gd+2, 0); } }catch(...){} }
+static void GX__SetTexCoordBias_gx(uint32_t c, uint32_t se, uint32_t te) {
+    GXSetTexCoordBias((GXTexCoordID)c, (GXBool)se, (GXBool)te);
+}
+extern "C" void GX__SetTexCoordBias_801711fc(uint32_t c, uint32_t se, uint32_t te) { GxThread::Post(&GX__SetTexCoordBias_gx, c, se, te); try{ uint32_t gd=Memory::Read32(kGXDataPtrAddr); if(gd){ uint32_t sa=gd+0x108u+c*4u, ta=gd+0x128u+c*4u; Memory::Write32(sa, (Memory::Read32(sa)&0xFFFEFFFFu)|((se&1u)<<16)); Memory::Write32(ta, (Memory::Read32(ta)&0xFFFEFFFFu)|((te&1u)<<16)); if(Memory::Read32(gd+0x5E4u)&(1u<<c)) Memory::Write16(gd+2, 0); } }catch(...){} }
 PPC_NATIVE_OVERRIDE_VOID(801711fc, GX__SetTexCoordBias_801711fc, (uint32_t c, uint32_t se, uint32_t te), (c, se, te));

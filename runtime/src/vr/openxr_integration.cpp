@@ -7,6 +7,7 @@
 #include "vr/openxr_integration.h"
 
 #include "runtime_config.h"
+#include "gx_thread.h"
 #include "runtime_log.h"
 #include "vr/mkw_vr_first_person.h"
 #include "vr/mkw_vr_policy.h"
@@ -473,6 +474,9 @@ public:
 
     void Shutdown() noexcept {
         teardown_requested_.store(false, std::memory_order_release);
+        // Called on the game thread: aurora's producer (the GX thread) must be
+        // idle before the frame worker is quiesced.
+        GxThread::Drain();
         // Stop idle replays before draining; no new worker job may race provider removal.
         {
             std::lock_guard lock(interpolation_mutex_);
@@ -637,6 +641,16 @@ private:
                                << (hinted ? "set" : "refused") << std::endl;
         return true;
     }
+    bool RegisterGxThread() {
+        const uint32_t thread_id = GxThread::NativeThreadId();
+        if (thread_id == 0 || runtime_ == nullptr) {
+            return false;
+        }
+        const bool hinted = OpenXRAndroidRegisterThreadId(*runtime_, OpenXRAndroidThreadType::RendererWorker, thread_id);
+        RT_LOG(RT_TAG_RUNTIME) << "OpenXR: Android thread hint for the GX thread "
+                               << (hinted ? "set" : "refused") << std::endl;
+        return true;
+    }
 #endif
 
     // Asks the runtime for the configured performance level in both domains. Standalone
@@ -689,6 +703,7 @@ private:
         // frame worker, which submits the GPU work, are the ones that matter; this thread only
         // paces.
         bool worker_registered = false;
+        bool gx_registered = false;
         if (runtime_ != nullptr) {
             const bool pacing_hinted =
                 OpenXRAndroidRegisterThread(*runtime_, OpenXRAndroidThreadType::RendererWorker);
@@ -700,6 +715,7 @@ private:
             RT_LOG(RT_TAG_RUNTIME) << "OpenXR: Android thread hints: game " << (game_hinted ? "set" : "refused")
                                    << ", pacing " << (pacing_hinted ? "set" : "refused") << std::endl;
             worker_registered = RegisterAuroraFrameWorkerThread();
+            gx_registered = RegisterGxThread();
         }
 #endif
         ApplyPerformanceLevel();
@@ -715,6 +731,9 @@ private:
 #if defined(__ANDROID__)
             if (!worker_registered) {
                 worker_registered = RegisterAuroraFrameWorkerThread();
+            }
+            if (!gx_registered) {
+                gx_registered = RegisterGxThread();
             }
 #endif
             const OpenXREventStatus events = runtime_->PollEvents();

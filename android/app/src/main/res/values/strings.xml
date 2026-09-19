@@ -188,6 +188,8 @@
     <string name="graphics_bloom_helper">Bloom\'s bright glow reads poorly in a headset, so it starts off.</string>
     <string name="graphics_skip_unready">Prevent shader stutters</string>
     <string name="graphics_skip_unready_helper">Skips a draw for a moment while its shader compiles instead of pausing the game.</string>
+    <string name="graphics_gx_thread">Graphics thread</string>
+    <string name="graphics_gx_thread_helper">Prepares the drawing on a second CPU core so busy scenes keep their speed. Turn off only to compare against the single-threaded path. Takes effect on the next launch.</string>
 
     <!-- Controls tab -->
     <string name="section_controls">Controllers</string>

@@ -218,6 +218,17 @@ void aurora_end_frame();
 // Seal the current frame with an opaque application safety tag. Aurora rejects
 // an immersive provider packet unless its contentTag matches this exact frame.
 void aurora_end_frame_tagged(uint64_t contentTag);
+// aurora_end_frame_tagged() plus the host-owned ImGui frame to present with it (the handle from
+// aurora_imgui_host_frame_end(), which this call consumes; NULL presents no host ImGui frame).
+void aurora_end_frame_ex(uint64_t contentTag, void* imguiFrame);
+// When the host pumps SDL events itself (aurora_update() on the window's thread) and drives
+// begin/end frame from another thread, this stops those calls from pumping events.
+void aurora_set_host_event_pump(bool hostPumps);
+typedef void (*AuroraFrameLogCallback)(char* buffer, uint32_t bufferSize, double windowSeconds,
+                                       uint32_t frames);
+// Called with each five-second frame-rate log window (where that log is enabled); a non-empty
+// buffer is logged as one extra line.
+void aurora_set_frame_log_callback(AuroraFrameLogCallback callback);
 /**
  * Relocates the immersive camera for the frame about to be sealed.
  *

@@ -47,6 +47,7 @@ struct RuntimeUserConfig {
     std::optional<bool> textureReplacements;
     std::optional<bool> textureDumps;
     std::optional<bool> showFps;
+    std::optional<bool> gxThread;
     std::optional<uint32_t> disabledPostProcessingPaths;
     std::optional<bool> vrEnabled;
     std::optional<bool> vrRequired;
@@ -410,6 +411,10 @@ inline void EnsureConfigFile() {
               "skip_unready_pipelines = true\n"
               "disable_copy_filter = true\n"
               "show_fps = true\n"
+              "# Run the host side of the GX pipeline (state tracking, FIFO parsing,\n"
+              "# texture uploads) on its own thread. On by default on the Quest, where\n"
+              "# the game thread is the bottleneck; opt-in elsewhere.\n"
+              "# gx_thread = true\n"
               "# Dolphin-style custom textures. When enabled, the renderer indexes\n"
               "# texture_replacements/ next to this file at startup and substitutes\n"
               "# any tex1_<W>x<H>_<hash>[_<tlut hash>]_<format>.dds or .png it finds\n"
@@ -641,6 +646,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.skipUnreadyPipelines = FindConfigValue<bool>(document, "video", "skip_unready_pipelines");
     config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
     config.showFps = FindConfigValue<bool>(document, "video", "show_fps");
+    config.gxThread = FindConfigValue<bool>(document, "video", "gx_thread");
     config.textureReplacements = FindConfigValue<bool>(document, "video", "texture_replacements");
     config.textureDumps = FindConfigValue<bool>(document, "video", "texture_dumps");
     if (auto value = FindConfigUint(document, "video", "disabled_post_processing_paths");
@@ -1292,6 +1298,16 @@ inline bool DisableCopyFilter(bool fallback = true) {
 
 inline bool ShowFps(bool fallback = true) {
     return Get().showFps.value_or(fallback);
+}
+
+// Runs the host side of the GX pipeline on its own thread (gx_thread.h). On by
+// default on the Quest, where the game thread is the bottleneck; opt-in elsewhere.
+inline bool GxThread() {
+#if defined(__ANDROID__)
+    return Get().gxThread.value_or(true);
+#else
+    return Get().gxThread.value_or(false);
+#endif
 }
 
 inline bool TextureReplacements(bool fallback = false) {

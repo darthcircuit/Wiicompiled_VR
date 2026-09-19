@@ -29,6 +29,30 @@ namespace {
         std::memcpy(g_projectionVector, projV, sizeof(g_projectionVector));
     }
 
+    // The SDK copies matrices into the FIFO at call time, so immediate loads
+    // are snapshotted on the game thread; indexed loads read guest memory when
+    // the GX thread reaches them, as the GP does.
+    struct GxMtxSnapshot {
+        float m[16];
+    };
+
+    static void GX__SetViewportJitter_gx(float l, float t, float w, float h, float nz, float fz, uint32_t f) {
+        GXSetViewportJitter(l, t, w, h, nz, fz, f);
+    }
+    static void GX__SetViewport_gx(float l, float t, float w, float h, float nz, float fz) {
+        GXSetViewport(l, t, w, h, nz, fz);
+    }
+    static void GX__SetZScaleOffset_gx(float s, float o) { GXSetZScaleOffset(s, o); }
+    static void GX__SetScissorBoxOffset_gx(int32_t xo, int32_t yo) { GXSetScissorBoxOffset(xo, yo); }
+    static void GX__SetScissor_gx(uint32_t l, uint32_t t, uint32_t w, uint32_t h) { GXSetScissor(l, t, w, h); }
+    static void GX__SetProjection_gx(GxMtxSnapshot proj, uint32_t pt) {
+        GXSetProjection(proj.m, (GXProjectionType)pt);
+    }
+    static void GX__LoadPosMtxImm_gx(GxMtxSnapshot mtx, uint32_t id) { GXLoadPosMtxImm((float(*)[4])mtx.m, id); }
+    static void GX__LoadNrmMtxImm_gx(GxMtxSnapshot mtx, uint32_t id) { GXLoadNrmMtxImm((float(*)[4])mtx.m, id); }
+    static void GX__LoadTexMtxImm_gx(GxMtxSnapshot mtx, uint32_t id, uint32_t t) {
+        GXLoadTexMtxImm(mtx.m, id, (GXTexMtxType)t);
+    }
 }
 
 // ============================================================================
@@ -40,13 +64,13 @@ namespace {
 // transform double-transformed menu viewports and broke 640x480 overscan, so it was removed.
 extern "C" void GX__SetViewportJitter_80173378(float l, float t, float w, float h, float nz, float fz, uint32_t f) {
     g_viewportState[0]=l; g_viewportState[1]=t; g_viewportState[2]=w; g_viewportState[3]=h; g_viewportState[4]=nz; g_viewportState[5]=fz;
-    GXSetViewportJitter(l, t, w, h, nz, fz, f);
+    GxThread::Post(&GX__SetViewportJitter_gx, l, t, w, h, nz, fz, f);
 }
 PPC_NATIVE_OVERRIDE_VOID(80173378, GX__SetViewportJitter_80173378, (float l, float t, float w, float h, float nz, float fz, uint32_t f), (l, t, w, h, nz, fz, f));
 
 extern "C" void GX__SetViewport_801733b4(float l, float t, float w, float h, float nz, float fz) {
     g_viewportState[0]=l; g_viewportState[1]=t; g_viewportState[2]=w; g_viewportState[3]=h; g_viewportState[4]=nz; g_viewportState[5]=fz;
-    GXSetViewport(l, t, w, h, nz, fz);
+    GxThread::Post(&GX__SetViewport_gx, l, t, w, h, nz, fz);
 }
 PPC_NATIVE_OVERRIDE_VOID(801733b4, GX__SetViewport_801733b4, (float l, float t, float w, float h, float nz, float fz), (l, t, w, h, nz, fz));
 
@@ -66,7 +90,7 @@ extern "C" void GX__GetViewportv_801733e0(uint32_t oa) {
 PPC_NATIVE_OVERRIDE_VOID(801733e0, GX__GetViewportv_801733e0, (uint32_t oa), (oa));
 
 extern "C" void GX__SetZScaleOffset_80173400(float s, float o) {
-    GXSetZScaleOffset(s, o);
+    GxThread::Post(&GX__SetZScaleOffset_gx, s, o);
     try {
         const uint32_t gd = Memory::Read32(kGXDataPtrAddr);
         if (gd) {
@@ -80,7 +104,7 @@ extern "C" void GX__SetZScaleOffset_80173400(float s, float o) {
 PPC_NATIVE_OVERRIDE_VOID(80173400, GX__SetZScaleOffset_80173400, (float s, float o), (s, o));
 
 extern "C" void GX__SetScissorBoxOffset_801734e0(int32_t xo, int32_t yo) {
-    GXSetScissorBoxOffset(xo, yo);
+    GxThread::Post(&GX__SetScissorBoxOffset_gx, xo, yo);
     try {
         const uint32_t gd = Memory::Read32(kGXDataPtrAddr);
         if (gd) Memory::Write16(gd + 2, 0);
@@ -104,7 +128,7 @@ extern "C" void GX__SetScissor_80173430(uint32_t l, uint32_t t, uint32_t w, uint
     // No viewport replay here: aurora recomputes viewport and scissor together
     // on every scissor change (set_logical_scissor -> apply_logical_render_state),
     // so re-issuing the current viewport would be duplicate work.
-    GXSetScissor(l, t, w, h);
+    GxThread::Post(&GX__SetScissor_gx, l, t, w, h);
 }
 PPC_NATIVE_OVERRIDE_VOID(80173430, GX__SetScissor_80173430, (uint32_t l, uint32_t t, uint32_t w, uint32_t h), (l, t, w, h));
 
@@ -113,10 +137,10 @@ PPC_NATIVE_OVERRIDE_VOID(80173430, GX__SetScissor_80173430, (uint32_t l, uint32_
 // ============================================================================
 
 extern "C" void GX__SetProjection_8017301c(uint32_t ma, uint32_t pt) {
-    const uint32_t* raw=(const uint32_t*)GuestToHostPtr(ma, 64); float m[16];
-    SwapBeF32ArrayToHost(raw, m, 16);
-    GXSetProjection(m, (GXProjectionType)pt);
-    UpdateProjectionVectorFromMatrix(m, (GXProjectionType)pt);
+    const uint32_t* raw=(const uint32_t*)GuestToHostPtr(ma, 64); GxMtxSnapshot proj{};
+    SwapBeF32ArrayToHost(raw, proj.m, 16);
+    UpdateProjectionVectorFromMatrix(proj.m, (GXProjectionType)pt);
+    GxThread::Post(&GX__SetProjection_gx, proj, pt);
 }
 PPC_NATIVE_OVERRIDE_VOID(8017301c, GX__SetProjection_8017301c, (uint32_t ma, uint32_t pt), (ma, pt));
 
@@ -124,10 +148,10 @@ extern "C" void GX__SetProjectionv_80173080(uint32_t pa) {
     const uint32_t* raw=(const uint32_t*)GuestToHostPtr(pa, 28); float v[7];
     SwapBeF32ArrayToHost(raw, v, 7);
     GXProjectionType pt=(v[0]!=0.f)?GX_ORTHOGRAPHIC:GX_PERSPECTIVE;
-    float m[16]={0.f}; m[0]=v[1]; m[5]=v[3]; m[10]=v[5]; m[11]=v[6];
+    GxMtxSnapshot proj{}; float* m = proj.m; m[0]=v[1]; m[5]=v[3]; m[10]=v[5]; m[11]=v[6];
     if(pt==GX_PERSPECTIVE){ m[2]=v[2]; m[6]=v[4]; m[14]=-1.f; } else { m[3]=v[2]; m[7]=v[4]; m[15]=1.f; }
-    GXSetProjection(m, pt);
     UpdateProjectionVectorFromProjV(v);
+    GxThread::Post(&GX__SetProjection_gx, proj, static_cast<uint32_t>(pt));
 }
 PPC_NATIVE_OVERRIDE_VOID(80173080, GX__SetProjectionv_80173080, (uint32_t pa), (pa));
 
@@ -144,27 +168,28 @@ PPC_NATIVE_OVERRIDE_VOID(801730cc, GX__GetProjectionv_801730cc, (uint32_t pa), (
 // ============================================================================
 
 extern "C" void GX__LoadPosMtxImm_8017310c(uint32_t ma, uint32_t id) {
-    const uint32_t* raw=(const uint32_t*)GuestToHostPtr(ma); float m[12];
-    SwapBeF32ArrayToHost(raw, m, 12);
-    GXLoadPosMtxImm((float(*)[4])m, id);
+    const uint32_t* raw=(const uint32_t*)GuestToHostPtr(ma); GxMtxSnapshot mtx{};
+    SwapBeF32ArrayToHost(raw, mtx.m, 12);
+    GxThread::Post(&GX__LoadPosMtxImm_gx, mtx, id);
 }
 PPC_NATIVE_OVERRIDE_VOID(8017310c, GX__LoadPosMtxImm_8017310c, (uint32_t ma, uint32_t id), (ma, id));
 
-extern "C" void GX__LoadPosMtxIndx_8017315c(uint32_t mi, uint32_t id) {
+static void GX__LoadPosMtxIndx_8017315c_gx(uint32_t mi, uint32_t id) {
     const auto& arr=g_hleGxState.vtxArray[GX_POS_MTX_ARRAY];
     if(arr.base==0||arr.stride==0) return;
     const uint32_t* raw=(const uint32_t*)GuestToHostPtr(arr.base+mi*arr.stride, 48);
     if(raw){ float m[12]; SwapBeF32ArrayToHost(raw,m,12); GXLoadPosMtxImm((float(*)[4])m,id); }
 }
-PPC_NATIVE_OVERRIDE_VOID(8017315c, GX__LoadPosMtxIndx_8017315c, (uint32_t mi, uint32_t id), (mi, id));
+GX_DEFERRED_OVERRIDE_VOID(8017315c, GX__LoadPosMtxIndx_8017315c, (uint32_t mi, uint32_t id), (mi, id));
 
 extern "C" void GX__LoadNrmMtxImm_80173188(uint32_t ma, uint32_t id) {
-    const uint32_t* raw=(const uint32_t*)GuestToHostPtr(ma, 48); float m[12];
-    SwapBeF32ArrayToHost(raw, m, 12); GXLoadNrmMtxImm((float(*)[4])m, id);
+    const uint32_t* raw=(const uint32_t*)GuestToHostPtr(ma, 48); GxMtxSnapshot mtx{};
+    SwapBeF32ArrayToHost(raw, mtx.m, 12);
+    GxThread::Post(&GX__LoadNrmMtxImm_gx, mtx, id);
 }
 PPC_NATIVE_OVERRIDE_VOID(80173188, GX__LoadNrmMtxImm_80173188, (uint32_t ma, uint32_t id), (ma, id));
 
-extern "C" void GX__LoadNrmMtxIndx3x3_801731e0(uint32_t mi, uint32_t id) {
+static void GX__LoadNrmMtxIndx3x3_801731e0_gx(uint32_t mi, uint32_t id) {
     const auto& arr=g_hleGxState.vtxArray[GX_NRM_MTX_ARRAY];
     if(arr.base==0||arr.stride==0) return;
     const uint32_t* raw=(const uint32_t*)GuestToHostPtr(arr.base+mi*arr.stride, 36);
@@ -180,14 +205,15 @@ extern "C" void GX__LoadNrmMtxIndx3x3_801731e0(uint32_t mi, uint32_t id) {
         GXLoadNrmMtxImm((float(*)[4])m, id);
     }
 }
-PPC_NATIVE_OVERRIDE_VOID(801731e0, GX__LoadNrmMtxIndx3x3_801731e0, (uint32_t mi, uint32_t id), (mi, id));
+GX_DEFERRED_OVERRIDE_VOID(801731e0, GX__LoadNrmMtxIndx3x3_801731e0, (uint32_t mi, uint32_t id), (mi, id));
 
 extern "C" void GX__LoadTexMtxImm_80173234(uint32_t ma, uint32_t id, uint32_t t) {
     size_t c=(t==(uint32_t)GX_MTX3x4)?12:8;
-    const uint32_t* raw=(const uint32_t*)GuestToHostPtr(ma,c*4); float l[12]={};
-    SwapBeF32ArrayToHost(raw,l,c); GXLoadTexMtxImm(l, id, (GXTexMtxType)t);
+    const uint32_t* raw=(const uint32_t*)GuestToHostPtr(ma,c*4); GxMtxSnapshot mtx{};
+    SwapBeF32ArrayToHost(raw, mtx.m, c);
+    GxThread::Post(&GX__LoadTexMtxImm_gx, mtx, id, t);
 }
 PPC_NATIVE_OVERRIDE_VOID(80173234, GX__LoadTexMtxImm_80173234, (uint32_t ma, uint32_t id, uint32_t t), (ma, id, t));
 
-extern "C" void GX__SetCurrentMtx_80173214(uint32_t id) { GXSetCurrentMtx(id); }
-PPC_NATIVE_OVERRIDE_VOID(80173214, GX__SetCurrentMtx_80173214, (uint32_t id), (id));
+static void GX__SetCurrentMtx_80173214_gx(uint32_t id) { GXSetCurrentMtx(id); }
+GX_DEFERRED_OVERRIDE_VOID(80173214, GX__SetCurrentMtx_80173214, (uint32_t id), (id));

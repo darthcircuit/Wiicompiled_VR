@@ -2143,9 +2143,9 @@ void ReleaseControllers() noexcept {
 }
 
 void Draw() noexcept {
-    // Wait for the frame worker's DONE phase: it has replayed the previous frame's ImGui draw lists
-    // and started the next ImGui frame, so all overlay callers can now safely issue ImGui commands.
-    aurora_wait_for_frame_worker();
+    // The overlay draws into the game thread's own ImGui frame
+    // (aurora_imgui_host_frame_begin); the worker replays a copy of the draw
+    // data, so there is nothing to wait for here.
     // Explain fallback without interrupting gameplay or capturing input.
     static std::string shownXrError;
     static double xrNoticeUntil = 0.0;

@@ -69,6 +69,9 @@ AuroraConfig g_config;
 uint32_t g_sdlCustomEventsStart;
 char g_gameName[4];
 std::atomic<AuroraFrameWorkerWaitCallback> g_frameWorkerWaitCallback{nullptr};
+// aurora_set_host_event_pump(): the host pumps SDL itself, from the window's thread.
+std::atomic_bool g_hostEventPump{false};
+std::atomic<AuroraFrameLogCallback> g_frameLogCallback{nullptr};
 // Presentation schedule for the frame being sealed, set by the producer. Jobs carry absolute
 // deadlines derived from it, so the presenter cannot drift. Zero means present when ready.
 std::atomic<uint64_t> g_presentScheduleBaseNanos{0};
@@ -266,7 +269,8 @@ enum class ImGuiFramePolicy {
 bool begin_frame_impl(bool pumpEvents, ImGuiFramePolicy imguiPolicy = ImGuiFramePolicy::Immediate,
                       bool* imguiNewFrameOwed = nullptr) noexcept;
 bool begin_frame_render_state_impl(ImGuiFramePolicy imguiPolicy, bool* imguiNewFrameOwed) noexcept;
-void end_frame_impl(bool pumpEvents, bool drainFifo, uint64_t contentTag, const StereoSceneAnchor& sceneAnchor) noexcept;
+void end_frame_impl(bool pumpEvents, bool drainFifo, uint64_t contentTag, const StereoSceneAnchor& sceneAnchor,
+                    imgui::HostFramePtr hostImGuiFrame) noexcept;
 
 // The two publication points of a frame-worker cycle, cleared together under `mutex`. Sealed:
 // producer-shared renderer state is free again. Done: slots encoded, presented, ImGui restarted.
@@ -288,6 +292,7 @@ struct FrameWorkerState {
   // belong to that exact queued frame, not to the producer's next frame.
   uint64_t contentTag = AURORA_STEREO_CONTENT_TAG_UNKNOWN;
   StereoSceneAnchor sceneAnchor{};
+  imgui::HostFramePtr hostImGuiFrame;
   // Readiness is polled thousands of times per frame, so these flags double as a publication
   // barrier. `sealed` is released before `ready`, and both are cleared under `mutex`.
   std::atomic_bool sealed{true};
@@ -338,7 +343,7 @@ bool frame_worker_requested() noexcept {
 
 #ifdef AURORA_ENABLE_GX
 // Returns false when a stop request was observed mid-cycle.
-bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame, uint64_t contentTag,
+bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame, uint64_t contentTag, imgui::HostFramePtr hostImGuiFrame,
                             const StereoSceneAnchor& sceneAnchor) noexcept;
 void run_retained_stereo_frame(gfx::SealedFrame& sealedFrame) noexcept;
 #endif
@@ -361,6 +366,7 @@ void frame_worker_main() noexcept {
   for (;;) {
     uint64_t contentTag = AURORA_STEREO_CONTENT_TAG_UNKNOWN;
     StereoSceneAnchor sceneAnchor{};
+    imgui::HostFramePtr hostImGuiFrame;
     bool stereoOnly = false;
     {
       std::unique_lock lock(g_frameWorker.mutex);
@@ -377,6 +383,7 @@ void frame_worker_main() noexcept {
       g_frameWorker.contentTag = AURORA_STEREO_CONTENT_TAG_UNKNOWN;
       sceneAnchor = g_frameWorker.sceneAnchor;
       g_frameWorker.sceneAnchor = {};
+      hostImGuiFrame = std::move(g_frameWorker.hostImGuiFrame);
       g_frameWorker.jobPending = false;
     }
 
@@ -396,7 +403,7 @@ void frame_worker_main() noexcept {
       g_frameWorker.cv.notify_all();
       continue;
     }
-    if (!run_frame_worker_cycle(sealedFrame, contentTag, sceneAnchor)) {
+    if (!run_frame_worker_cycle(sealedFrame, contentTag, std::move(hostImGuiFrame), sceneAnchor)) {
       break;
     }
 #else
@@ -1556,7 +1563,7 @@ void publish_stereo_screen_aspects(const webgpu::PresentSource& presentSource, c
 // gfx::begin_frame() may already have cleared the display-copy override.
 void encode_presentation_snapshot(const wgpu::CommandEncoder& encoder, const webgpu::PresentSource& presentSource,
                                   const PresentationImage& image, bool includeImGui,
-                                  MirrorPlan plan = MirrorPlan::Mono) {
+                                  MirrorPlan plan = MirrorPlan::Mono, const ImDrawData* hostImGuiData = nullptr) {
   ZoneScoped;
   auto viewport = webgpu::calculate_present_viewport(image.texture.size.width, image.texture.size.height,
                                                      presentSource.size.width, presentSource.size.height);
@@ -1635,7 +1642,11 @@ void encode_presentation_snapshot(const wgpu::CommandEncoder& encoder, const web
     const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
     pass.SetViewport(0.f, 0.f, static_cast<float>(image.texture.size.width),
                      static_cast<float>(image.texture.size.height), 0.f, 1.f);
-    imgui::render(pass);
+    if (hostImGuiData != nullptr) {
+      imgui::render(pass, hostImGuiData);
+    } else {
+      imgui::render(pass);
+    }
     pass.End();
   }
 }
@@ -1678,7 +1689,7 @@ bool begin_frame_impl(bool pumpEvents, ImGuiFramePolicy imguiPolicy, bool* imgui
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
   webgpu::fail_if_device_lost();
-  if (pumpEvents) {
+  if (pumpEvents && !g_hostEventPump.load(std::memory_order_acquire)) {
     window::pump_events();
   }
   const bool surfaceReconfigurePending = g_surfaceReconfigurePending.load(std::memory_order_acquire);
@@ -1735,7 +1746,9 @@ bool begin_frame_render_state_impl(ImGuiFramePolicy imguiPolicy, bool* imguiNewF
   std::lock_guard gpuLock(g_rendererGpuMutex);
   // Note the debt before gfx::begin_frame() can fail: the synchronous path always started the
   // ImGui frame here, and the runtime's retry loop depends on that pairing.
-  if (imguiPolicy == ImGuiFramePolicy::Immediate) {
+  if (imgui::host_frames_active()) {
+    // The host starts its own ImGui frames (imgui::host_frame_begin).
+  } else if (imguiPolicy == ImGuiFramePolicy::Immediate) {
     imgui::new_frame(window::get_window_size());
   } else if (imguiNewFrameOwed != nullptr) {
     *imguiNewFrameOwed = true;
@@ -1771,7 +1784,12 @@ struct SealedFrameContext {
   std::optional<AuroraStereoFrame> stereoInput;
   bool retainStereo = false;
   imgui::StereoOverlay stereoOverlay;
+  imgui::HostFramePtr imguiFrame;
 };
+
+const ImDrawData* host_imgui_data(const SealedFrameContext& ctx) noexcept {
+  return ctx.imguiFrame ? imgui::host_frame_draw_data(*ctx.imguiFrame) : nullptr;
+}
 
 // Worker-owned scene state. A separate buffer generation check protects against
 // synchronous EFB submissions overwriting the retained frame's GPU data.
@@ -1831,7 +1849,7 @@ void run_retained_stereo_frame(gfx::SealedFrame& sealedFrame) noexcept {
 // Phase 1: everything that touches producer-shared renderer state. Needs g_rendererGpuMutex and
 // a FIFO already drained into the recorded pass list.
 void seal_frame_locked(gfx::SealedFrame& sealedFrame, SealedFrameContext& ctx, uint64_t contentTag,
-                       const StereoSceneAnchor& sceneAnchor) {
+                       const StereoSceneAnchor& sceneAnchor, imgui::HostFramePtr hostImGuiFrame) {
   ZoneScopedN("Seal frame");
   // Every pass this cycle encodes, from the seal's probe blits to the final eye, is timed under
   // one frame; encode_sealed_frame resolves it on its last submission.
@@ -1889,7 +1907,12 @@ void seal_frame_locked(gfx::SealedFrame& sealedFrame, SealedFrameContext& ctx, u
   ctx.presentSource = webgpu::current_present_source();
   // ImGui draw lists are built once per frame and replayed by each slot's ImGui pass, which is why
   // the next ImGui frame cannot start until the encode phase is done.
-  imgui::render_frame_data();
+  if (hostImGuiFrame) {
+    // The host closed its own ImGui frame and handed over a copy of the draw data.
+    ctx.imguiFrame = std::move(hostImGuiFrame);
+  } else {
+    imgui::render_frame_data();
+  }
   // The headset panel's draw data follows the same rule on the host's side.
   ctx.stereoOverlay = imgui::latch_stereo_overlay();
   // Drop the sealed frame's lazy RAM-readback requests while the producer is still excluded; it
@@ -1981,7 +2004,7 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
     for (uint32_t interpolatedFrame = 0; interpolatedFrame < ctx.interpolatedFrameCount; ++interpolatedFrame) {
       gfx::render(sealedFrame, encoder, static_cast<int32_t>(interpolatedFrame), false);
       auto image = acquire_presentation_image(interpolatedFrame, ctx.snapshotWidth, ctx.snapshotHeight);
-      encode_presentation_snapshot(encoder, ctx.presentSource, *image, true, mirrorPlan);
+      encode_presentation_snapshot(encoder, ctx.presentSource, *image, true, mirrorPlan, host_imgui_data(ctx));
       presentationJobs.push_back({
           .image = std::move(image),
           .logicalFrame = ctx.logicalFrame,
@@ -2013,7 +2036,7 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
   if (!ctx.replayInterpolatedFrames) {
     for (uint32_t interpolatedFrame = 0; interpolatedFrame < ctx.interpolatedFrameCount; ++interpolatedFrame) {
       auto image = acquire_presentation_image(interpolatedFrame, ctx.snapshotWidth, ctx.snapshotHeight);
-      encode_presentation_snapshot(encoder, ctx.presentSource, *image, true, mirrorPlan);
+      encode_presentation_snapshot(encoder, ctx.presentSource, *image, true, mirrorPlan, host_imgui_data(ctx));
       presentationJobs.push_back({
           .image = std::move(image),
           .logicalFrame = ctx.logicalFrame,
@@ -2053,7 +2076,7 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
   // showing. Black re-clears it below, once the eyes have taken their copy.
   const bool virtualScreenNeedsMono = stereoOutput && !immersiveReplay;
   encode_presentation_snapshot(encoder, ctx.presentSource, *finalImage, true,
-                               virtualScreenNeedsMono ? MirrorPlan::Mono : mirrorPlan);
+                               virtualScreenNeedsMono ? MirrorPlan::Mono : mirrorPlan, host_imgui_data(ctx));
   if (stereoOutput) {
     publish_stereo_screen_aspects(ctx.presentSource, finalImage->texture.size, immersiveReplay);
   }
@@ -2075,7 +2098,8 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
       stereo_overlay::composite_flat(encoder, output.view, output.size, eye);
     }
     if (mirrorPlan == MirrorPlan::Black && !headsetOnly) {
-      encode_presentation_snapshot(encoder, ctx.presentSource, *finalImage, true, MirrorPlan::Black);
+      encode_presentation_snapshot(encoder, ctx.presentSource, *finalImage, true, MirrorPlan::Black,
+                                   host_imgui_data(ctx));
     }
   }
   if (stereoOutput) {
@@ -2231,6 +2255,14 @@ void record_frame_telemetry() {
         if (const std::string gpuTiming = gfx::gpu_timing_report(); !gpuTiming.empty()) {
           Log.info("{}", gpuTiming);
         }
+        if (const auto frameLog = g_frameLogCallback.load(std::memory_order_acquire)) {
+          char extra[512];
+          extra[0] = '\0';
+          frameLog(extra, sizeof(extra), elapsed.count(), windowFrames);
+          if (extra[0] != '\0') {
+            Log.info("{}", extra);
+          }
+        }
         windowStart = now;
         windowFrames = 0;
       }
@@ -2242,7 +2274,7 @@ void record_frame_telemetry() {
 
 // One complete frame-worker cycle. Desktop and headset interpolation both
 // release the producer after sealing, before encoding their extra scene views.
-bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame, uint64_t contentTag,
+bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame, uint64_t contentTag, imgui::HostFramePtr hostImGuiFrame,
                             const StereoSceneAnchor& sceneAnchor) noexcept {
   ZoneScopedN("Frame worker cycle");
   webgpu::fail_if_device_lost();
@@ -2254,7 +2286,7 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame, uint64_t contentTag,
   auto stretchStarted = std::chrono::steady_clock::now();
   {
     std::lock_guard gpuLock(g_rendererGpuMutex);
-    seal_frame_locked(sealedFrame, ctx, contentTag, sceneAnchor);
+    seal_frame_locked(sealedFrame, ctx, contentTag, sceneAnchor, std::move(hostImGuiFrame));
   }
   g_workerSealNs.fetch_add(elapsedNs(stretchStarted), std::memory_order_relaxed);
   stretchStarted = std::chrono::steady_clock::now();
@@ -2311,11 +2343,11 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame, uint64_t contentTag,
 // Synchronous frame submission: seal, encode and present inline on the calling thread. Used when
 // the frame worker is disabled (RenderDoc captures) and on the boot path.
 void end_frame_impl(bool pumpEvents, bool drainFifo, uint64_t contentTag,
-                    const StereoSceneAnchor& sceneAnchor) noexcept {
+                    const StereoSceneAnchor& sceneAnchor, imgui::HostFramePtr hostImGuiFrame) noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
   webgpu::fail_if_device_lost();
-  if (pumpEvents) {
+  if (pumpEvents && !g_hostEventPump.load(std::memory_order_acquire)) {
     window::pump_events();
   }
   gfx::SealedFrame sealedFrame;
@@ -2326,7 +2358,7 @@ void end_frame_impl(bool pumpEvents, bool drainFifo, uint64_t contentTag,
     if (drainFifo) {
       gx::fifo::drain();
     }
-    seal_frame_locked(sealedFrame, ctx, contentTag, sceneAnchor);
+    seal_frame_locked(sealedFrame, ctx, contentTag, sceneAnchor, std::move(hostImGuiFrame));
     presentationJobs = encode_sealed_frame(sealedFrame, ctx);
   }
   publish_presentations(std::move(presentationJobs), ctx.interpolationActive);
@@ -2352,7 +2384,9 @@ bool begin_frame() noexcept {
   ensure_frame_worker_started();
   // SDL needs event pumping on the window-owning producer thread, and the worker passes
   // pumpEvents=false, so keep it here even when the fast path returns early.
-  window::pump_events();
+  if (!g_hostEventPump.load(std::memory_order_acquire)) {
+    window::pump_events();
+  }
   bool waitForSurfacePreparation = false;
 #ifdef AURORA_ENABLE_GX
   // A surface mutation can legitimately fail preparation, and optimistic success would let GX/ImGui
@@ -2402,7 +2436,7 @@ bool begin_frame() noexcept {
   return prepared;
 }
 
-void end_frame(uint64_t contentTag) noexcept {
+void end_frame(uint64_t contentTag, imgui::HostFramePtr hostImGuiFrame) noexcept {
 #ifdef AURORA_ENABLE_GX
   webgpu::fail_if_device_lost();
 #endif
@@ -2413,7 +2447,7 @@ void end_frame(uint64_t contentTag) noexcept {
   g_pendingStereoLocalPlayerCount = 1;
   g_pendingSceneAnchor = {};
   if (!frame_worker_requested()) {
-    end_frame_impl(true, true, contentTag, sceneAnchor);
+    end_frame_impl(true, true, contentTag, sceneAnchor, std::move(hostImGuiFrame));
     return;
   }
 
@@ -2435,6 +2469,7 @@ void end_frame(uint64_t contentTag) noexcept {
     g_frameWorker.ready.store(false, std::memory_order_release);
     g_frameWorker.contentTag = contentTag;
     g_frameWorker.sceneAnchor = sceneAnchor;
+    g_frameWorker.hostImGuiFrame = std::move(hostImGuiFrame);
     g_frameWorker.jobPending = true;
     g_frameWorker.prepareAllowed = false;
   }
@@ -2537,8 +2572,34 @@ AuroraInfo aurora_initialize(int argc, char* argv[], const AuroraConfig* config)
 void aurora_shutdown() { aurora::shutdown(); }
 const AuroraEvent* aurora_update() { return aurora::update(); }
 bool aurora_begin_frame() { return aurora::begin_frame(); }
-void aurora_end_frame() { aurora::end_frame(AURORA_STEREO_CONTENT_TAG_UNKNOWN); }
-void aurora_end_frame_tagged(uint64_t contentTag) { aurora::end_frame(contentTag); }
+void aurora_end_frame() { aurora::end_frame(AURORA_STEREO_CONTENT_TAG_UNKNOWN, {}); }
+void aurora_end_frame_tagged(uint64_t contentTag) { aurora::end_frame(contentTag, {}); }
+void aurora_end_frame_ex(uint64_t contentTag, void* imguiFrame) {
+  aurora::imgui::HostFramePtr frame;
+  if (imguiFrame != nullptr) {
+    auto* holder = static_cast<aurora::imgui::HostFramePtr*>(imguiFrame);
+    frame = std::move(*holder);
+    delete holder;
+  }
+  aurora::end_frame(contentTag, std::move(frame));
+}
+void aurora_set_host_event_pump(bool hostPumps) {
+  aurora::g_hostEventPump.store(hostPumps, std::memory_order_release);
+}
+void aurora_set_frame_log_callback(AuroraFrameLogCallback callback) {
+  aurora::g_frameLogCallback.store(callback, std::memory_order_release);
+}
+extern "C" void aurora_imgui_host_frame_begin(void) {
+#ifdef AURORA_ENABLE_GX
+  // ImGui's WebGPU backend creates its device objects lazily from new_frame.
+  std::lock_guard gpuLock(aurora::g_rendererGpuMutex);
+#endif
+  aurora::imgui::host_frame_begin(aurora::window::get_window_size());
+}
+extern "C" void* aurora_imgui_host_frame_end(void) { return new aurora::imgui::HostFramePtr(aurora::imgui::host_frame_end()); }
+extern "C" void aurora_imgui_host_frame_release(void* imguiFrame) {
+  delete static_cast<aurora::imgui::HostFramePtr*>(imguiFrame);
+}
 void aurora_set_stereo_scene_anchor(const float anchorFromScene[12]) {
   aurora::set_stereo_scene_anchor(anchorFromScene);
 }

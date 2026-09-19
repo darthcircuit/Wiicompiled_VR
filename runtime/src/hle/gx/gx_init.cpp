@@ -13,6 +13,9 @@ extern "C" void GX__InitFifoBase_8016c7c8(uint32_t fa, uint32_t ba, uint32_t s);
 extern "C" void GX__SetGPFifo_8016cb2c(uint32_t fa);
 extern "C" GXFifoObj* GXInit(void* base, u32 size);
 
+static void GX__Init_gx(uint32_t fifoBase, uint32_t fifoSize) { GXInit(GuestToHostPtr(fifoBase, fifoSize), fifoSize); }
+static void GX__Flush_gx() { GXFlush(); }
+
 // ============================================================================
 // GXInit
 // ============================================================================
@@ -28,7 +31,7 @@ extern "C" uint32_t GX__Init_8016b850(uint32_t fifoBase, uint32_t fifoSize)
     constexpr uint32_t kGXDataAddr = 0x803437C0u;
     constexpr uint32_t kGXDataSize = 0x600u;
 
-    GXInit(GuestToHostPtr(fifoBase, fifoSize), fifoSize);
+    GxThread::Post(&GX__Init_gx, fifoBase, fifoSize);
 
     // Initialize GXData structure in guest memory
     try {
@@ -89,19 +92,20 @@ PPC_NATIVE_OVERRIDE(8016b850, GX__Init_8016b850, uint32_t, (uint32_t fifoBase, u
 // FIFO Management
 // ============================================================================
 
-extern "C" void GX__InitFifoBase_8016c7c8(uint32_t fa, uint32_t ba, uint32_t s) { GXInitFifoBase((GXFifoObj*)GuestToHostPtr(fa, sizeof(GXFifoObj)), GuestToHostPtr(ba, s), s); }
+static void GX__InitFifoBase_8016c7c8_gx(uint32_t fa, uint32_t ba, uint32_t s) { GXInitFifoBase((GXFifoObj*)GuestToHostPtr(fa, sizeof(GXFifoObj)), GuestToHostPtr(ba, s), s); }
+extern "C" void GX__InitFifoBase_8016c7c8(uint32_t fa, uint32_t ba, uint32_t s) { GxThread::Post(&GX__InitFifoBase_8016c7c8_gx, fa, ba, s); }
 
-extern "C" void GX__SetCPUFifo_8016c94c(uint32_t fa) { GXSetCPUFifo((GXFifoObj*)GuestToHostPtr(fa, sizeof(GXFifoObj))); }
-PPC_NATIVE_OVERRIDE_VOID(8016c94c, GX__SetCPUFifo_8016c94c, (uint32_t fa), (fa));
+static void GX__SetCPUFifo_8016c94c_gx(uint32_t fa) { GXSetCPUFifo((GXFifoObj*)GuestToHostPtr(fa, sizeof(GXFifoObj))); }
+GX_DEFERRED_OVERRIDE_VOID(8016c94c, GX__SetCPUFifo_8016c94c, (uint32_t fa), (fa));
 
-extern "C" void GX__SetGPFifo_8016cb2c(uint32_t fa) { GXSetGPFifo((GXFifoObj*)GuestToHostPtr(fa, sizeof(GXFifoObj))); }
-PPC_NATIVE_OVERRIDE_VOID(8016cb2c, GX__SetGPFifo_8016cb2c, (uint32_t fa), (fa));
+static void GX__SetGPFifo_8016cb2c_gx(uint32_t fa) { GXSetGPFifo((GXFifoObj*)GuestToHostPtr(fa, sizeof(GXFifoObj))); }
+GX_DEFERRED_OVERRIDE_VOID(8016cb2c, GX__SetGPFifo_8016cb2c, (uint32_t fa), (fa));
 
-extern "C" void __GX__SaveFifo_8016cdbc(uint32_t fa) { GXSaveCPUFifo((GXFifoObj*)GuestToHostPtr(fa, sizeof(GXFifoObj))); }
-PPC_NATIVE_OVERRIDE_VOID(8016cdbc, __GX__SaveFifo_8016cdbc, (uint32_t fa), (fa));
+static void __GX__SaveFifo_8016cdbc_gx(uint32_t fa) { GXSaveCPUFifo((GXFifoObj*)GuestToHostPtr(fa, sizeof(GXFifoObj))); }
+GX_DEFERRED_OVERRIDE_VOID(8016cdbc, __GX__SaveFifo_8016cdbc, (uint32_t fa), (fa));
 
-extern "C" void GX__GetCPUFifo_8016cf10(uint32_t fa) { auto* d=(GXFifoObj*)GuestToHostPtr(fa, sizeof(GXFifoObj)); auto* s=GXGetCPUFifo(); if(d&&s) std::memcpy(d,s,sizeof(GXFifoObj)); }
-PPC_NATIVE_OVERRIDE_VOID(8016cf10, GX__GetCPUFifo_8016cf10, (uint32_t fa), (fa));
+static void GX__GetCPUFifo_8016cf10_gx(uint32_t fa) { auto* d=(GXFifoObj*)GuestToHostPtr(fa, sizeof(GXFifoObj)); auto* s=GXGetCPUFifo(); if(d&&s) std::memcpy(d,s,sizeof(GXFifoObj)); }
+GX_DEFERRED_OVERRIDE_VOID(8016cf10, GX__GetCPUFifo_8016cf10, (uint32_t fa), (fa));
 
 extern "C" void __GX__FifoInit_8016d180()
 {
@@ -181,7 +185,7 @@ extern "C" void GX__BeginDisplayList_80172e00(uint32_t la, uint32_t s) {
         // Mirror the guest fifo-object fields the FIFO write path consumes so
         // HleFifoWrite never has to read them back out of guest memory.
         BeginDisplayListRecording(la, s);
-        GXFlush();
+        GxThread::Post(&GX__Flush_gx);
         GX__GetCPUFifo_8016cf10(0x80344710);
         GX__SetCPUFifo_8016c94c(0x80344090);
     } catch (...) {}
@@ -190,7 +194,7 @@ PPC_NATIVE_OVERRIDE_VOID(80172e00, GX__BeginDisplayList_80172e00, (uint32_t la, 
 
 extern "C" uint32_t GX__EndDisplayList_80172eb4() {
     try {
-        GXFlush();
+        GxThread::Post(&GX__Flush_gx);
         GX__GetCPUFifo_8016cf10(0x80344090);
         const uint8_t wrapped = Memory::Read8(kDlFifoAddr + kDlWrapFlagOffset);
         GX__SetCPUFifo_8016c94c(0x80344710);
@@ -229,5 +233,5 @@ PPC_NATIVE_OVERRIDE(80172EB4, GX__EndDisplayList_80172eb4, uint32_t, (), ());
 // Flush
 // ============================================================================
 
-extern "C" void GX__Flush_8016e654() { GXFlush(); }
+extern "C" void GX__Flush_8016e654() { GxThread::Post(&GX__Flush_gx); }
 PPC_NATIVE_OVERRIDE_VOID(8016e654, GX__Flush_8016e654, (), ());

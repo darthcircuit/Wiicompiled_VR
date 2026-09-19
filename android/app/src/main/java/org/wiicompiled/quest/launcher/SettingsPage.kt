@@ -227,6 +227,11 @@ class SettingsPage(
                 read = { it.bool("video", "skip_unready_pipelines") ?: true },
                 write = { c, value -> c.setBool("video", "skip_unready_pipelines", value) },
             )
+            toggle(
+                R.string.graphics_gx_thread, R.string.graphics_gx_thread_helper,
+                read = { it.bool("video", "gx_thread") ?: true },
+                write = { c, value -> c.setBool("video", "gx_thread", value) },
+            )
         }
     }
 

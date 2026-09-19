@@ -3,6 +3,7 @@
 #include "hle_stubs.h"
 #include "memory.h"
 #include "gx_guest_write.h"
+#include "gx_thread.h"
 #include "ppc_runtime.h"
 #include "aurora_events.h"
 #include "gx_texture_binding_contract.h"
@@ -72,6 +73,7 @@ extern "C" uint32_t OS__GetCurrentThread_801a98b0_hle();
 extern "C" void GX__SetCPUFifo_8016c94c(uint32_t fifoAddr);
 extern "C" void GX__SetDirtyState_8016ee78();
 extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes);
+void GX__CallDisplayList_gx(uint32_t listAddr, uint32_t nbytes);
 
 extern std::atomic_bool g_auroraFrameActive;
 extern std::atomic_bool g_auroraFrameHadWork;
@@ -141,8 +143,6 @@ struct TexObjSlot : TexObjMeta {
     // index vectors can carry slot pointers instead of re-looking-up keys.
     uint32_t objAddr = 0;
 
-    // Aurora-side object. Created lazily by CreateHostTexObj.
-    std::unique_ptr<HleTexObj> host;
 
     // Byte-exact shadow of the last-decoded guest GXTexObj; served without a
     // diff only while guest bytes still match it. Games mutate these structs
@@ -343,18 +343,11 @@ TexObjMeta& GetTexObjMeta(uint32_t addr);
 TexObjMeta ExtractTexObjMetaFromGuest(uint32_t addr);
 bool TryGetOrExtractTexObjMeta(uint32_t addr, TexObjMeta& outMeta);
 TlutObjMeta& GetTlutObjMeta(uint32_t addr);
-GXTexObj* GetHostTexObj(uint32_t addr);
-GXTexObj* TryGetHostTexObj(uint32_t addr);
-GXTexObj* CreateHostTexObj(uint32_t addr);
-void MarkHostTexObjConstructed(uint32_t addr);
 void MarkTexObjsDirtyForRange(uint32_t addr, uint32_t size);
 // Invalidates GPU-only GXCopyTex results when guest CPU writes are made visible
 // over their destination. This is the allocation-reuse generation boundary
 // for copy textures; it must be called for every data-cache store/flush range.
 void InvalidateEfbCopyDestinationsForRange(uint32_t addr, uint32_t size);
-GXTlutObj* CreateHostTlutObj(uint32_t addr);
-void MarkHostTlutObjConstructed(uint32_t addr);
-GXTlutObj* GetHostTlutObj(uint32_t addr);
 void MarkTlutObjsDirtyForRange(uint32_t addr, uint32_t size);
 // One-stop invalidation for DMA-class host-side writes into guest RAM (DVD
 // reads, DCZeroRange, LC stores): texobjs + TLUTs + EFB copies + display
@@ -363,6 +356,50 @@ void MarkTlutObjsDirtyForRange(uint32_t addr, uint32_t size);
 extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
 
 void HleFifoWrite(u32 val, uint32_t sizeBytes);
+// GX-thread side of the write-gather pipe: parses a run of FIFO bytes.
+extern "C" void GxFifoConsumeBytes(const uint8_t* data, uint32_t sizeBytes);
+
+// ---------------------------------------------------------------------------
+// GX thread split. GX_DEFERRED_OVERRIDE_VOID registers a guest-facing front
+// that posts `name_gx` (the aurora work) to the GX thread; see gx_thread.h.
+// ---------------------------------------------------------------------------
+#define GX_COMMA_ARGS(...) , ##__VA_ARGS__
+#define GX_DEFERRED_OVERRIDE_VOID(addr_hex, name, arg_list, call_list) \
+    extern "C" void name arg_list { GxThread::Post(&name##_gx GX_COMMA_ARGS call_list); } \
+    PPC_NATIVE_OVERRIDE_VOID(addr_hex, name, arg_list, call_list)
+
+// Game-thread mirrors of the vertex descriptor state, kept for the GXGet*
+// overrides; the GX thread owns g_hleGxState.
+struct GxGameSideVertexState {
+    GXAttrType vtxDesc[26]{};
+    VtxAttrFmt vtxAttrFmt[8][26]{};
+};
+extern GxGameSideVertexState g_gxGameVertexState;
+
+// Texture objects: the game thread keeps the meta table (guest shadows, dirty
+// flags, getters); the GX thread keeps the aurora objects and rebuilds them
+// from the meta snapshot each load carries.
+struct GxTexObjLoad {
+    TexObjMeta meta;
+    uint32_t objAddr = 0;
+    uint32_t tid = 0;
+    bool upload = false;
+};
+void GxHostLoadTexObj_gx(GxTexObjLoad load);
+void GxHostBindPlaceholder_gx(uint32_t tid);
+struct GxTlutLoad {
+    TlutObjMeta meta;
+    uint32_t objAddr = 0;
+    uint32_t tlut = 0;
+    bool rebuild = false;
+    bool valid = false;
+};
+void GxHostLoadTlut_gx(GxTlutLoad load);
+void GxHostDestroyCopyTex_gx(uint32_t copyAddr);
+// Backs shared by the EGG helpers.
+void GX__SetTevColor_gx(uint32_t id, uint32_t colorWord);
+void GX__SetTevKColor_gx(uint32_t id, uint32_t colorWord);
+void GX__Begin_gx(uint32_t t, uint32_t vf, uint32_t nv);
 void SubmitAttribute(GXAttr attr, float* comps, const VtxAttrFmt& fmt, const u32* rawComps = nullptr);
 void SubmitIndexedAttribute(GXAttr attr, uint32_t index);
 

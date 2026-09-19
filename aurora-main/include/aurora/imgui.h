@@ -25,6 +25,14 @@ ImTextureID aurora_imgui_add_texture(uint32_t width, uint32_t height, const void
 // producer before the frame is sealed, and leave the draw data untouched until the frame worker is
 // done with that frame (aurora_wait_for_frame_worker). Null hides the panel.
 void aurora_imgui_set_stereo_overlay(ImDrawData* drawData, float widthFraction);
+// Host-owned ImGui frames for the desktop overlay. Begin starts the next frame on the calling
+// thread (which must be the window's thread, since the SDL backend reads the window there); end
+// renders it and returns a handle to a private copy of its draw data, which aurora_end_frame_ex()
+// consumes. A handle that is never presented is freed with aurora_imgui_host_frame_release().
+// From the first begin on, aurora no longer starts ImGui frames itself.
+void aurora_imgui_host_frame_begin(void);
+void* aurora_imgui_host_frame_end(void);
+void aurora_imgui_host_frame_release(void* imguiFrame);
 
 #ifdef __cplusplus
 }

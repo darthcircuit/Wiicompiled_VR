@@ -588,7 +588,13 @@ the app:
 | `debug.wiicompiled.vtxpad 0` | Turns the stride padding off, to re-check a driver update |
 | `debug.wiicompiled.validation 1` | Keeps WebGPU validation and robustness on in release builds |
 | `debug.wiicompiled.inject <n>:<button>` | Presses `a`, `b`, `x`, `y`, `start`, `up`, `down`, `left` or `right` for 12 XR frames each time `<n>` changes. As a Wii Remote, `x`/`y`/`start` are 1/2/+, the directions push the Nunchuk stick, and `home`, `c` and `z` also exist. `panel` presses the settings panel's button (left Y, or both thumbsticks as a gamepad), opening or closing it (see `OPENXR.md`) |
-| `debug.wiicompiled.fpslog 1` | Logs the game's rendered frame rate every 5 s, with per-frame averages of the producer's waits for the frame worker's DONE and SEALED phases and of the worker's seal, permit wait, prepare and encode stretches. A second line gives the GPU time per frame from timestamp queries on every pass (`mono` native render, `eyeL`/`eyeR` replays, `screen`, `panel`, `efbcopy`, `palette`, `peek`, plus `passes-span` from the first pass begin to the last pass end and `between-passes` for copies and idle gaps). The compositor's `VrApi` log line gives headset FPS, `GPU%`, `CPU%`, clock levels and app GPU time (`App=`) |
+| `debug.wiicompiled.fpslog 1` | Logs the game's rendered frame rate every 5 s, with per-frame averages of the producer's waits for the frame worker's DONE and SEALED phases and of the worker's seal, permit wait, prepare and encode stretches. A third line reports the GX thread's command ring (records, waits, busy share). A second line gives the GPU time per frame from timestamp queries on every pass (`mono` native render, `eyeL`/`eyeR` replays, `screen`, `panel`, `efbcopy`, `palette`, `peek`, plus `passes-span` from the first pass begin to the last pass end and `between-passes` for copies and idle gaps). The compositor's `VrApi` log line gives headset FPS, `GPU%`, `CPU%`, clock levels and app GPU time (`App=`) |
+
+A `Config.toml` written with `adb push` (or `sed -i` in `adb shell`) belongs
+to the shell user afterwards, and the app then fails every save with EACCES
+(the launcher logs `GameStorage.prepare ... open failed`). `chmod 664` on the
+pushed file gives the app's group write access back; a file the app created
+itself never has the problem.
 
 The injector makes headset tests possible with nobody wearing the headset.
 Keep the display awake, drive the menus, then take a compositor screenshot:
@@ -686,6 +692,36 @@ Dash went from 47 to 51 fps to 50 to 58, and the thread splits into 62% game
 plus mod code, 9% GX HLE, 6% FIFO decode, 4% memory copies, 3.5% dispatch and
 the rest. What remains on such tracks is the game's own code plus the mod's,
 which no host change shrinks; a GX thread could move about 20% of it.
+
+That GX thread exists now (`runtime/include/gx_thread.h`, `[video] gx_thread`,
+on by default on Android and opt-in elsewhere). Every GX HLE override is split
+into a game-thread front, which keeps the guest-visible side effects (GXData
+shadow registers, the getters, display-list recording, the texture meta table),
+and a `_gx` back holding the aurora work and the parser state, posted through
+one ordered 16 MiB command ring; immediate-mode gather-pipe bytes travel as
+8 KiB chunks in call order. The hazard rule follows the hardware: whatever the
+SDK copied into the FIFO at call time (matrices, projection, colours, light
+objects, copy filters, layout quads, texture object registers) is snapshotted
+when posted, and whatever the GP read from memory when it reached the command
+(display lists, vertex arrays, indexed matrices, texture data) is read when the
+GX thread executes it, so `GXDrawDone` drains the ring and the frame's
+schedule, first-person anchor and policy tag are latched into the present
+record on the game thread. The desktop overlay became a game-thread-owned
+ImGui frame whose draw data Aurora copies per sealed frame, which also removed
+the frame-worker join `GXCopyDisp` used to make. With `fpslog` on, a third
+line reports the ring: records and bytes per frame, the game thread's waits
+for ring space and in drains, the GX thread's busy share and any exceptions
+it caught. A texture or matrix that is wrong only with the thread on is a
+hazard-rule violation (a front reading guest memory the game rewrites before
+the GX thread runs, or a back writing guest memory). Measured on the same
+automated Grand Prix start at `render_scale` 0.75, same build, switched by the
+config key: with the thread off the crowded first half minute ran at 52 to
+56 fps before settling at 60; with it on the same stretch ran at 56.5 in the
+window that includes the countdown and 60.0 in every window after, while the
+ring carried 4.5k to 6.2k records (250 to 380 KiB) per frame, the game thread
+waited under 0.1 ms per frame in its two `GXDrawDone` drains and never for
+ring space, and the GX thread was 25 to 40% busy. Retro Rewind's menus were
+unaffected (prewarm 5.2 s, 60 fps).
 
 Verified on device since: the menus on the virtual screen, controller input
 (the user has driven races), and an immersive Grand Prix start with all 12

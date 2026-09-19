@@ -4,6 +4,10 @@
 #include "guest_interrupt_context.h"
 #include "ppc_runtime.h"
 #include "aurora_events.h"
+#include "gx_thread.h"
+#include <aurora/imgui.h>
+#include <algorithm>
+#include <array>
 #include "settings_overlay.h"
 #include "fiber_manager.h"
 #include "platform/host_platform.h"
@@ -47,6 +51,16 @@ extern "C" int32_t OS__RestoreInterrupts_801a65d4(int32_t level);
 // aurora_begin_frame() before GX commands and aurora_end_frame() after.
 std::atomic_bool g_auroraFrameActive{false};
 std::atomic_bool g_auroraFrameHadWork{false};
+
+// GX-thread routine (inline when the thread is off): the aurora frame flags are
+// written only where aurora's producer runs.
+static void GxBeginAuroraFrameIfIdle_gx() {
+    if (!g_auroraFrameActive.load(std::memory_order_acquire)) {
+        if (BeginAuroraFrame()) {
+            g_auroraFrameActive.store(true, std::memory_order_release);
+        }
+    }
+}
 
 namespace {
 
@@ -328,12 +342,10 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
         // Process window events (but don't present - that happens in GXCopyDisp)
         UpdateAuroraAndProcessEvents();
 
-        // Start a new Aurora frame if one isn't already active
-        if (!g_auroraFrameActive.load(std::memory_order_acquire)) {
-            if (BeginAuroraFrame()) {
-                g_auroraFrameActive.store(true, std::memory_order_release);
-            }
-        }
+        // Start a new Aurora frame if one isn't already active. The attempt runs
+        // where aurora's producer runs; the viewport policy stays on this thread.
+        GxThread::Post(&GxBeginAuroraFrameIfIdle_gx);
+        ApplyPendingMkwDynamicAspectSurface();
         // XR runtime loss and encoded-work stalls request producer-owned
         // teardown. Service it on every retrace, including startup, pause, and
         // minimized-window paths that may never reach a successful present.
@@ -522,24 +534,65 @@ void PaceToRetraceBoundary(Clock::time_point deadline) {
 // pacing thread: the anchor only makes sense against the recorded camera of
 // this exact frame, and the pacing thread does not know which frame its packet
 // will be paired with.
-void PublishVrSceneAnchor() {
+struct SceneAnchorPublication {
+    std::array<float, 12> anchor{};
+    bool valid = false;
+};
+
+SceneAnchorPublication PublishVrSceneAnchor() {
     static bool s_engaged = false;
     // Compute the anchor here rather than at the race draw boundary: the
     // scene's camera matrix for this frame is only set once the draws run, so
     // reading it earlier pairs a stale camera with a current kart pose.
     mkw::vr::MkwVRFirstPersonCommit();
     const mkw::vr::FirstPersonAnchor anchor = mkw::vr::MkwVRFirstPersonGetAnchor();
-    aurora_set_stereo_scene_anchor(anchor.valid ? anchor.anchor_from_scene.data() : nullptr);
+    SceneAnchorPublication publication;
+    publication.valid = anchor.valid;
+    if (anchor.valid) {
+        std::copy(anchor.anchor_from_scene.begin(), anchor.anchor_from_scene.end(), publication.anchor.begin());
+    }
 
     const bool engaged = anchor.valid;
     if (engaged == s_engaged) {
-        return;
+        return publication;
     }
     s_engaged = engaged;
     // The world scale changes with the camera, and the virtual screen's metres
     // are converted at that scale, so the two have to move together.
     mkw::vr::MkwVRPolicySetFirstPersonEngaged(engaged);
     settings_overlay::RefreshVrHudVirtualScreen();
+    return publication;
+}
+
+// Everything the seal needs, latched on the game thread and applied by the GX
+// thread in one record, so the schedule, anchor, tag and overlay all belong to
+// the frame whose GX commands precede it in the ring.
+struct GxPresentRecord {
+    uint64_t scheduleBaseNanos = 0;
+    uint64_t scheduleIntervalNanos = 0;
+    std::array<float, 12> anchor{};
+    bool anchorValid = false;
+    bool reportPaced = false;
+    bool paced = false;
+    uint32_t localPlayerCount = 1;
+    uint64_t contentTag = 0;
+    void* imguiFrame = nullptr;
+};
+
+void GxPresent_gx(GxPresentRecord record) {
+    if (record.reportPaced) {
+        aurora_report_producer_paced(record.paced);
+    }
+    aurora_set_present_schedule(record.scheduleBaseNanos, record.scheduleIntervalNanos);
+    aurora_set_stereo_scene_anchor(record.anchorValid ? record.anchor.data() : nullptr);
+    aurora_set_stereo_local_player_count(record.localPlayerCount);
+    aurora_end_frame_ex(record.contentTag, record.imguiFrame);
+    g_auroraFrameActive.store(false, std::memory_order_release);
+    g_auroraFrameHadWork.store(false, std::memory_order_release);
+    // Pre-warm the next frame so subsequent GX work has a valid frame context.
+    if (BeginAuroraFrame()) {
+        g_auroraFrameActive.store(true, std::memory_order_release);
+    }
 }
 
 } // namespace
@@ -556,6 +609,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     } sequenceGuard;
     Clock::time_point paceDeadline{};
     bool paceThisFrame = false;
+    GxPresentRecord record;
     if (paceToRetrace) {
         uint64_t baseNanos = 0;
         uint64_t intervalNanos = 0;
@@ -586,7 +640,8 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
         // cadence, and zero only happens when production outruns VI. "Kept up" means <=1 retrace
         // elapsed; 2+ means a boundary was missed, so Aurora seals that frame without its interpolated
         // slots (a windowed backstop lowers the slot target only under sustained overload).
-        aurora_report_producer_paced(retracesElapsed <= 1);
+        record.reportPaced = true;
+        record.paced = retracesElapsed <= 1;
         // Stamp the sealed frame's presentation schedule so Aurora paces interpolated slots against
         // this same VI timeline. Anchor to the NEXT retrace boundary, not the period just produced,
         // since slots anchored to the current period would already be expired by seal time. Encoding
@@ -599,47 +654,50 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
             anchorNanos = s_lastPresentAnchorNanos + intervalNanos;
         }
         s_lastPresentAnchorNanos = anchorNanos;
-        aurora_set_present_schedule(anchorNanos, intervalNanos);
+        record.scheduleBaseNanos = anchorNanos;
+        record.scheduleIntervalNanos = intervalNanos;
     } else {
         // Retrace-context presents (VI black, boot) have no display period of
         // their own to subdivide; present as soon as the frame is ready. The
         // schedule grid is gone, so the anchor cursor must not constrain the
         // next paced frame.
         s_lastPresentAnchorNanos = 0;
-        aurora_set_present_schedule(0, 0);
     }
 
     mkw::vr::OpenXRServiceProducerFrameBoundary();
-    PublishVrSceneAnchor();
+    const SceneAnchorPublication anchor = PublishVrSceneAnchor();
+    record.anchor = anchor.anchor;
+    record.anchorValid = anchor.valid;
     // Latch the current policy safety state into this exact Aurora job. The
     // asynchronous worker may ask for an XR packet after the guest has already
     // begun the next frame, so immersive replay is accepted only when both
     // tags match.
     const auto vrPolicy = mkw::vr::MkwVRPolicyGetSnapshot();
-    aurora_set_stereo_local_player_count(
+    record.localPlayerCount =
         vrPolicy.presentation == mkw::vr::VRPresentationMode::ImmersiveRace
-            ? vrPolicy.scene.local_player_count : 1);
-    aurora_end_frame_tagged(vrPolicy.content_tag);
+            ? vrPolicy.scene.local_player_count : 1;
+    record.contentTag = vrPolicy.content_tag;
+    // The overlay drew into the game thread's ImGui frame; close it and hand a
+    // copy of its draw data to the seal.
+    record.imguiFrame = aurora_imgui_host_frame_end();
+    GxThread::Post(&GxPresent_gx, record);
     if (paceThisFrame) {
         PaceToRetraceBoundary(paceDeadline);
         std::lock_guard<std::mutex> lock(g_viMutex);
         s_lastPacedRetraceCount = g_vi.retraceCount;
     }
     settings_overlay::AdvancePresentedFrame();
-    g_auroraFrameActive.store(false, std::memory_order_release);
-    g_auroraFrameHadWork.store(false, std::memory_order_release);
     if (presentedXfb) {
         std::lock_guard<std::mutex> lock(g_viMutex);
         g_vi.hasValidXfb = false;
         g_vi.readyXfb = 0;
     }
-    // Pre-warm the next frame so subsequent GX work has a valid frame context.
-    {
-        UpdateAuroraAndProcessEvents();
-        if (BeginAuroraFrame()) {
-            g_auroraFrameActive.store(true, std::memory_order_release);
-        }
-    }
+    // The GX thread begins the next frame right after the seal; the window's
+    // thread pumps events, applies any surface change and starts the next
+    // ImGui frame for the overlay.
+    UpdateAuroraAndProcessEvents();
+    ApplyPendingMkwDynamicAspectSurface();
+    aurora_imgui_host_frame_begin();
 }
 
 // -----------------------------------------------------------------------------

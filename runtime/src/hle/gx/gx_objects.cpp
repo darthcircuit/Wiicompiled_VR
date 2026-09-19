@@ -15,48 +15,9 @@ using TextureHandle = std::shared_ptr<TextureRef>;
 // HleTexObj now lives in gx_internal.h: it is embedded in TexObjSlot so the
 // metadata and the Aurora object share one hash-map entry.
 
-struct HostGXTlutObj {
-    alignas(GXTlutObj) std::byte publicStorage[sizeof(GXTlutObj)]{};
-    aurora::gfx::TextureHandle ref;
-};
-
-struct HleTlutObj {
-    static constexpr size_t kTlutObjStorageSize =
-        (sizeof(GXTlutObj) >= sizeof(HostGXTlutObj)) ? sizeof(GXTlutObj) : sizeof(HostGXTlutObj);
-    static constexpr size_t kTlutObjStorageAlign =
-        (alignof(GXTlutObj) >= alignof(HostGXTlutObj)) ? alignof(GXTlutObj) : alignof(HostGXTlutObj);
-    using Storage = std::aligned_storage_t<kTlutObjStorageSize, kTlutObjStorageAlign>;
-
-    Storage storage{};
-    bool storageLive = false;
-    bool constructed = false;
-
-    HleTlutObj() = default;
-    ~HleTlutObj() { Destroy(); }
-
-    HostGXTlutObj* HostObj() { return reinterpret_cast<HostGXTlutObj*>(&storage); }
-    GXTlutObj* PublicPtr() { return reinterpret_cast<GXTlutObj*>(HostObj()->publicStorage); }
-
-    void EnsureStorageLive() {
-        if (!storageLive) {
-            new (&storage) HostGXTlutObj();
-            storageLive = true;
-        }
-    }
-
-    void Destroy() {
-        if (storageLive) {
-            GXDestroyTlutObj(PublicPtr());
-            std::destroy_at(HostObj());
-            std::memset(&storage, 0, sizeof(storage));
-            storageLive = false;
-            constructed = false;
-        }
-    }
-};
+// The aurora TLUT objects live on the GX thread (gx_texture.cpp).
 
 std::mutex g_texObjMutex;
-std::map<uint32_t, std::unique_ptr<HleTlutObj>> g_HostTlutObjMap;
 std::mutex g_tlutObjMutex;
 
 // The texobj table. One slot per guest GXTexObj address holds both the decoded
@@ -548,52 +509,6 @@ TlutObjMeta& GetTlutObjMeta(uint32_t addr) {
     return g_TlutObjMeta[addr];
 }
 
-GXTexObj* GetHostTexObj(uint32_t addr) {
-    TexObjSlot* slot = FindTexObjSlot(addr);
-    if (slot == nullptr || !slot->host || !slot->host->constructed) {
-        const CpuContext* cpu = TryGetCpuContext();
-        RT_LOGF(RT_TAG_GX,
-                "GXTex: invalid GXTexObj @0x%08X (PC=0x%08X, LR=0x%08X, CTR=0x%08X)\n",
-                addr, cpu ? cpu->pc : 0u, cpu ? cpu->lr : 0u, cpu ? cpu->ctr : 0u);
-        std::fflush(stderr);
-        GXTexObj* obj = CreateHostTexObj(addr);
-        MarkHostTexObjConstructed(addr);
-        return obj;
-    }
-    return slot->host->PublicPtr();
-}
-
-GXTexObj* CreateHostTexObj(uint32_t addr) {
-    TexObjSlot& slot = FindOrCreateTexObjSlot(addr);
-    // GXInitTexObj/GXInitTexObjCI land here and rewrite the entire guest struct,
-    // resetting the LOD/filter words the HLE does not mirror into this cache.
-    // The shadow captured before that rewrite mismatches afterwards, so the
-    // next lookup takes exactly one guest re-decode and picks those defaults
-    // (and the computed mipmap maxLod) up.
-    if (!slot.host) {
-        slot.host = std::make_unique<HleTexObj>();
-    } else {
-        slot.host->Destroy();
-    }
-    slot.host->EnsureStorageLive();
-    return slot.host->PublicPtr();
-}
-
-void MarkHostTexObjConstructed(uint32_t addr) {
-    TexObjSlot* slot = FindTexObjSlot(addr);
-    if (slot != nullptr && slot->host) {
-        slot->host->constructed = true;
-    }
-}
-
-GXTexObj* TryGetHostTexObj(uint32_t addr) {
-    TexObjSlot* slot = FindTexObjSlot(addr);
-    if (slot != nullptr && slot->host && slot->host->constructed) {
-        return slot->host->PublicPtr();
-    }
-    return nullptr;
-}
-
 void MarkTexObjsDirtyForRange(uint32_t addr, uint32_t size) {
     if (size == 0) {
         return;
@@ -654,39 +569,6 @@ extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size) {
     MarkTexObjsDirtyForRange(addr, size);
     MarkTlutObjsDirtyForRange(addr, size);
     GxNotifyDisplayListMemoryWrite(addr, size);
-}
-
-GXTlutObj* CreateHostTlutObj(uint32_t addr) {
-    auto& slot = g_HostTlutObjMap[addr];
-    if (!slot) {
-        slot = std::make_unique<HleTlutObj>();
-    } else {
-        slot->Destroy();
-    }
-    slot->EnsureStorageLive();
-    return slot->PublicPtr();
-}
-
-void MarkHostTlutObjConstructed(uint32_t addr) {
-    auto it = g_HostTlutObjMap.find(addr);
-    if (it != g_HostTlutObjMap.end() && it->second) {
-        it->second->constructed = true;
-    }
-}
-
-GXTlutObj* GetHostTlutObj(uint32_t addr) {
-    auto it = g_HostTlutObjMap.find(addr);
-    if (it == g_HostTlutObjMap.end() || !it->second || !it->second->constructed) {
-        const CpuContext* cpu = TryGetCpuContext();
-        RT_LOGF(RT_TAG_GX,
-                "GXTex: invalid GXTlutObj @0x%08X (PC=0x%08X, LR=0x%08X, CTR=0x%08X)\n",
-                addr, cpu ? cpu->pc : 0u, cpu ? cpu->lr : 0u, cpu ? cpu->ctr : 0u);
-        std::fflush(stderr);
-        GXTlutObj* obj = CreateHostTlutObj(addr);
-        MarkHostTlutObjConstructed(addr);
-        return obj;
-    }
-    return it->second->PublicPtr();
 }
 
 void MarkTlutObjsDirtyForRange(uint32_t addr, uint32_t size) {

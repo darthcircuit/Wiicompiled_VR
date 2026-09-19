@@ -78,7 +78,7 @@ object GameStorage {
             // Written line by line: trimIndent runs after interpolation, so an interpolated line
             // would take the indent off every other one.
             val lines = mutableListOf(
-                "# WiiCompiled Quest configuration. Edit with the launcher, the in-game panel or adb pull/push.",
+                "# WiiCompiled Quest configuration. Edit with the launcher or the in-game panel. After an adb push, run chmod 664 on it or the app can no longer save settings.",
                 "[paths]",
                 "dvd_root = \"${discDirectory(context).absolutePath}\"",
             )
