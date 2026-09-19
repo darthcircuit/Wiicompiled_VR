@@ -161,7 +161,7 @@ class SettingsPage(
         section(R.string.section_vr_headset) {
             slider(
                 R.string.vr_render_scale, R.string.vr_render_scale_helper, 0.25, 2.0, 0.05,
-                read = { number(it, "vr", "render_scale", 0.25, 2.0, 1.0) },
+                read = { number(it, "vr", "render_scale", 0.25, 2.0, GameStorage.DEFAULT_RENDER_SCALE) },
                 format = { "%.2f×".format(it) },
                 write = { c, value -> c.setFloat("vr", "render_scale", value) },
             )

@@ -365,7 +365,7 @@ public:
         config.application_name = aurora_config.appName != nullptr ? aurora_config.appName
                                                                     : "WiiCompiled";
         config.engine_name = "Aurora";
-        config.resolution_scale = RuntimeConfigFile::VrRenderScale(1.0f);
+        config.resolution_scale = RuntimeConfigFile::VrRenderScale();
 #if defined(_WIN32)
         config.required_extensions = {"XR_KHR_D3D12_enable"};
         config.optional_extensions = {"XR_KHR_win32_convert_performance_counter_time",

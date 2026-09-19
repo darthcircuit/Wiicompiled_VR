@@ -670,8 +670,9 @@ or `EndAccess` errors); a black mirror too points at Aurora itself.
 - **Performance.** The desktop product targets x86-64-v3; nothing has been
   profiled on the XR2. The first run compiles every bundled pipeline recipe
   (about half a minute); later runs load Dawn's pipeline cache from `Cache/`
-  next to `DATA`. Start with `render_scale` below 1.0 if the
-  compositor reports missed frames. `XR_FB_foveation` is not used yet.
+  next to `DATA`. `render_scale` defaults to 0.8 here (1.0 on
+  PC); lower it further if the compositor reports missed frames.
+  `XR_FB_foveation` is not used yet.
 - **Lifecycle.** Backgrounding (the Quest menu, guardian) pauses the session
   through the ordinary `STOPPING`/`READY` events; SDL's Android surface loss is
   handled by Aurora's existing Android paths. Neither has been exercised.

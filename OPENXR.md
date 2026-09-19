@@ -117,7 +117,8 @@ The old Eager Frame Heartbeat option has been removed and existing `eager_frame_
 settings are ignored. Completed rendering wakes the XR thread immediately. A 50 ms keep-alive
 still protects pauses and window dragging without eager repeats during rendering.
 
-`render_scale` scales the per-eye size recommended by the OpenXR runtime.
+`render_scale` scales the per-eye size recommended by the OpenXR runtime. It defaults to 1.0 on PC
+and 0.8 on the Quest, whose mobile GPU needs the headroom.
 `world_units_per_meter` controls the scale of headset translation in the game world.
 `hud_distance_meters` and `hud_width_meters` place and size the virtual screen. They are read at
 launch and govern both the menu screen and the in-race 2D screen, so 2D content keeps its place

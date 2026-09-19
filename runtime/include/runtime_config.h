@@ -164,6 +164,17 @@ inline constexpr int kPortableSearchDepth = 4;
 inline constexpr uint32_t kPostProcessingBloomPath = 0x10u;
 inline constexpr uint32_t kDisabledPostProcessingPathsDefault = kPostProcessingBloomPath;
 
+// Headset eye size as a fraction of what the OpenXR runtime recommends. A
+// standalone headset renders on a mobile GPU, so the Quest starts below it;
+// the launcher's first Config.toml (GameStorage.kt) writes the same value.
+#if defined(__ANDROID__)
+inline constexpr float kVrRenderScaleDefault = 0.8f;
+#define MKW_VR_RENDER_SCALE_DEFAULT_TEXT "0.8"
+#else
+inline constexpr float kVrRenderScaleDefault = 1.0f;
+#define MKW_VR_RENDER_SCALE_DEFAULT_TEXT "1.0"
+#endif
+
 // First-person camera defaults and the range its head offsets accept, in one
 // place: the config getters, the on-disk template and the F10 bar's reset all
 // read them from here, so they cannot drift apart again.
@@ -427,7 +438,7 @@ inline void EnsureConfigFile() {
               "controller_mode = \"wii_remote\"\n"
               "# VR interpolation: 0 = Off, 1 = Auto, or 72/90/120 FPS. Live.\n"
               "frame_interpolation_fps = 0\n"
-              "render_scale = 1.0\n"
+              "render_scale = " MKW_VR_RENDER_SCALE_DEFAULT_TEXT "\n"
               "world_units_per_meter = 500.0\n"
               "hud_distance_meters = 2.0\n"
               "hud_width_meters = 2.4\n"
@@ -1307,7 +1318,7 @@ inline bool VrRequired(bool fallback = false) {
     return Get().vrRequired.value_or(fallback);
 }
 
-inline float VrRenderScale(float fallback = 1.0f) {
+inline float VrRenderScale(float fallback = kVrRenderScaleDefault) {
     return std::clamp(Get().vrRenderScale.value_or(fallback), 0.25f, 2.0f);
 }
 
