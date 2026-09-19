@@ -1724,6 +1724,9 @@ struct RenderInvocation {
   uint32_t localPlayerCount = 1;
   // Inclusive index of the last pass to replay; -1 replays every pass.
   int32_t replayLastPass = -1;
+  // Inclusive index of the last pass that does render work; texture bakes still run for the
+  // passes after it. See last_pass_feeding_replay.
+  int32_t renderLastPass = INT32_MAX;
   bool finalize = true;
   bool replayOnlyEfb = false;
   bool skipCopyClears = false;
@@ -1754,6 +1757,11 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
       for (const auto& conv : passInfo.paletteConvs) {
         tex_palette_conv::run(cmd, conv);
       }
+    }
+    if (static_cast<int32_t>(i) > invocation.renderLastPass) {
+      // Nothing after the last replay-feeding resolve is shown or sampled on a headset; the
+      // bakes above are all these passes owe the eye replays.
+      continue;
     }
     const bool hasRenderWork = passInfo.clearColor || passInfo.clearDepth || !passInfo.commands.empty();
     if (i == renderPasses.size() - 1) {
@@ -1793,11 +1801,16 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
         .depthStoreOp = wgpu::StoreOp::Store,
         .depthClearValue = passInfo.clearDepthValue,
     };
+    const GpuTimingCategory timingCategory = invocation.stereoEye == 0     ? GpuTimingCategory::EyeLeft
+                                             : invocation.stereoEye == 1   ? GpuTimingCategory::EyeRight
+                                             : invocation.interpolatedFrame >= 0 ? GpuTimingCategory::Interpolated
+                                                                                 : GpuTimingCategory::Mono;
     const wgpu::RenderPassDescriptor renderPassDescriptor{
         .label = render_pass_label(i),
         .colorAttachmentCount = attachments.size(),
         .colorAttachments = attachments.data(),
         .depthStencilAttachment = &depthStencilAttachment,
+        .timestampWrites = gpu_timing_pass(timingCategory),
     };
 
     auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
@@ -1908,13 +1921,26 @@ void seal_frame(SealedFrame& out) noexcept {
   g_currentRenderPass = UINT32_MAX;
 }
 
-void render(SealedFrame& frame, wgpu::CommandEncoder& cmd, int32_t interpolatedFrame, bool finalize) {
+void render(SealedFrame& frame, wgpu::CommandEncoder& cmd, int32_t interpolatedFrame, bool finalize,
+            int32_t nativeRenderLastPass) {
   render_impl(frame.data().passes, cmd,
               RenderInvocation{
                   .interpolatedFrame = interpolatedFrame,
+                  .renderLastPass = nativeRenderLastPass,
                   .finalize = finalize,
                   .encodeTextureBakes = interpolatedFrame < 0,
               });
+}
+
+int32_t last_pass_feeding_replay(const SealedFrame& frame) noexcept {
+  const auto& passes = frame.data().passes;
+  int32_t last = -1;
+  for (size_t i = 0; i < passes.size(); ++i) {
+    if (passes[i].resolveTarget && !passes[i].displayCopyResolve) {
+      last = static_cast<int32_t>(i);
+    }
+  }
+  return last;
 }
 
 bool has_late_stereo_replay(const SealedFrame& frame) noexcept {
@@ -2026,6 +2052,209 @@ void render(wgpu::CommandEncoder& cmd, int32_t interpolatedFrame, bool finalize)
     g_currentRenderPass = UINT32_MAX;
     expire_bind_group_cache();
   }
+}
+
+// --- Per-pass GPU timing (see common.hpp) -------------------------------------------------------
+namespace {
+constexpr uint32_t kGpuTimingSlots = 4;
+constexpr uint32_t kGpuTimingPairs = 62;
+constexpr uint32_t kGpuTimingQueries = 2 * kGpuTimingPairs;
+
+struct GpuTimingSlot {
+  wgpu::QuerySet querySet;
+  wgpu::Buffer resolve;
+  wgpu::Buffer readback;
+  std::array<wgpu::PassTimestampWrites, kGpuTimingPairs> writes{};
+  std::array<GpuTimingCategory, kGpuTimingPairs> categories{};
+  uint32_t pairs = 0;
+  bool open = false;    // between the frame's begin and end
+  bool reading = false; // readback in flight or mapped
+  bool mapped = false;  // the callback ran; the encoding thread unmaps on reuse
+};
+
+std::atomic<bool> g_gpuTimingEnabled{false};
+std::array<GpuTimingSlot, kGpuTimingSlots> g_gpuTimingSlots;
+uint32_t g_gpuTimingNextSlot = 0;
+int32_t g_gpuTimingCurrent = -1;
+bool g_gpuTimingReady = false;
+// Guards the totals below and every slot's reading/mapped flags: the map callback may run on
+// whichever thread processes Dawn's events.
+std::mutex g_gpuTimingMutex;
+std::array<uint64_t, static_cast<size_t>(GpuTimingCategory::Count)> g_gpuTimingTotalsNs{};
+uint64_t g_gpuTimingSpanNs = 0;
+uint32_t g_gpuTimingFrames = 0;
+uint32_t g_gpuTimingSkipped = 0;
+
+bool gpu_timing_create_slots() {
+  if (g_gpuTimingReady) {
+    return true;
+  }
+  if (!webgpu::g_timestampQueriesSupported || !webgpu::g_device) {
+    return false;
+  }
+  for (auto& slot : g_gpuTimingSlots) {
+    const wgpu::QuerySetDescriptor querySetDescriptor{
+        .label = "GPU timing queries",
+        .type = wgpu::QueryType::Timestamp,
+        .count = kGpuTimingQueries,
+    };
+    slot.querySet = webgpu::g_device.CreateQuerySet(&querySetDescriptor);
+    const wgpu::BufferDescriptor resolveDescriptor{
+        .label = "GPU timing resolve",
+        .usage = wgpu::BufferUsage::QueryResolve | wgpu::BufferUsage::CopySrc,
+        .size = kGpuTimingQueries * sizeof(uint64_t),
+    };
+    slot.resolve = webgpu::g_device.CreateBuffer(&resolveDescriptor);
+    const wgpu::BufferDescriptor readbackDescriptor{
+        .label = "GPU timing readback",
+        .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
+        .size = kGpuTimingQueries * sizeof(uint64_t),
+    };
+    slot.readback = webgpu::g_device.CreateBuffer(&readbackDescriptor);
+  }
+  g_gpuTimingReady = true;
+  return true;
+}
+} // namespace
+
+void gpu_timing_set_enabled(bool enabled) noexcept { g_gpuTimingEnabled.store(enabled, std::memory_order_relaxed); }
+bool gpu_timing_enabled() noexcept { return g_gpuTimingEnabled.load(std::memory_order_relaxed); }
+
+void gpu_timing_begin_frame() noexcept {
+  g_gpuTimingCurrent = -1;
+  if (!gpu_timing_enabled() || !gpu_timing_create_slots()) {
+    return;
+  }
+  const uint32_t index = g_gpuTimingNextSlot;
+  g_gpuTimingNextSlot = (g_gpuTimingNextSlot + 1) % kGpuTimingSlots;
+  auto& slot = g_gpuTimingSlots[index];
+  {
+    std::lock_guard lock(g_gpuTimingMutex);
+    if (slot.reading && !slot.mapped) {
+      ++g_gpuTimingSkipped; // the GPU is more than a ring behind; leave this frame untimed
+      return;
+    }
+    if (slot.mapped) {
+      slot.readback.Unmap();
+      slot.mapped = false;
+    }
+    slot.reading = false;
+  }
+  slot.pairs = 0;
+  slot.open = true;
+  g_gpuTimingCurrent = static_cast<int32_t>(index);
+}
+
+const wgpu::PassTimestampWrites* gpu_timing_pass(GpuTimingCategory category) noexcept {
+  if (g_gpuTimingCurrent < 0) {
+    return nullptr;
+  }
+  auto& slot = g_gpuTimingSlots[static_cast<size_t>(g_gpuTimingCurrent)];
+  if (!slot.open || slot.pairs >= kGpuTimingPairs) {
+    return nullptr;
+  }
+  const uint32_t i = slot.pairs++;
+  slot.writes[i] = wgpu::PassTimestampWrites{
+      .querySet = slot.querySet,
+      .beginningOfPassWriteIndex = 2 * i,
+      .endOfPassWriteIndex = 2 * i + 1,
+  };
+  slot.categories[i] = category;
+  return &slot.writes[i];
+}
+
+void gpu_timing_end_frame(wgpu::CommandEncoder& encoder) noexcept {
+  if (g_gpuTimingCurrent < 0) {
+    return;
+  }
+  auto& slot = g_gpuTimingSlots[static_cast<size_t>(g_gpuTimingCurrent)];
+  slot.open = false;
+  if (slot.pairs == 0) {
+    g_gpuTimingCurrent = -1;
+    return;
+  }
+  const uint32_t queries = 2 * slot.pairs;
+  encoder.ResolveQuerySet(slot.querySet, 0, queries, slot.resolve, 0);
+  encoder.CopyBufferToBuffer(slot.resolve, 0, slot.readback, 0, queries * sizeof(uint64_t));
+}
+
+void gpu_timing_after_submit() noexcept {
+  if (g_gpuTimingCurrent < 0) {
+    return;
+  }
+  const uint32_t index = static_cast<uint32_t>(g_gpuTimingCurrent);
+  g_gpuTimingCurrent = -1;
+  auto& slot = g_gpuTimingSlots[index];
+  const uint32_t pairs = slot.pairs;
+  {
+    std::lock_guard lock(g_gpuTimingMutex);
+    slot.reading = true;
+    slot.mapped = false;
+  }
+  slot.readback.MapAsync(
+      wgpu::MapMode::Read, 0, 2 * pairs * sizeof(uint64_t), wgpu::CallbackMode::AllowSpontaneous,
+      [index, pairs](wgpu::MapAsyncStatus status, wgpu::StringView) {
+        auto& slot = g_gpuTimingSlots[index];
+        std::lock_guard lock(g_gpuTimingMutex);
+        if (status != wgpu::MapAsyncStatus::Success) {
+          slot.reading = false;
+          return;
+        }
+        const auto* stamps =
+            static_cast<const uint64_t*>(slot.readback.GetConstMappedRange(0, 2 * pairs * sizeof(uint64_t)));
+        if (stamps != nullptr) {
+          uint64_t first = UINT64_MAX;
+          uint64_t last = 0;
+          for (uint32_t i = 0; i < pairs; ++i) {
+            const uint64_t begin = stamps[2 * i];
+            const uint64_t end = stamps[2 * i + 1];
+            if (end < begin) {
+              continue;
+            }
+            g_gpuTimingTotalsNs[static_cast<size_t>(slot.categories[i])] += end - begin;
+            first = std::min(first, begin);
+            last = std::max(last, end);
+          }
+          if (last > first) {
+            g_gpuTimingSpanNs += last - first;
+          }
+          ++g_gpuTimingFrames;
+        }
+        slot.mapped = true;
+      });
+}
+
+std::string gpu_timing_report() {
+  std::lock_guard lock(g_gpuTimingMutex);
+  if (g_gpuTimingFrames == 0 && g_gpuTimingSkipped == 0) {
+    return {};
+  }
+  static constexpr std::array<const char*, static_cast<size_t>(GpuTimingCategory::Count)> kNames{
+      "mono", "eyeL", "eyeR", "interp", "screen", "panel", "efbcopy", "palette", "peek", "snapshot", "present"};
+  std::string text;
+  if (g_gpuTimingFrames != 0) {
+    const double frames = g_gpuTimingFrames;
+    uint64_t sum = 0;
+    text += fmt::format("GPU ms/frame over {} frames: passes-span={:.2f}", g_gpuTimingFrames,
+                        static_cast<double>(g_gpuTimingSpanNs) / 1e6 / frames);
+    for (size_t i = 0; i < kNames.size(); ++i) {
+      if (g_gpuTimingTotalsNs[i] == 0) {
+        continue;
+      }
+      sum += g_gpuTimingTotalsNs[i];
+      text += fmt::format(" {}={:.2f}", kNames[i], static_cast<double>(g_gpuTimingTotalsNs[i]) / 1e6 / frames);
+    }
+    const uint64_t between = g_gpuTimingSpanNs > sum ? g_gpuTimingSpanNs - sum : 0;
+    text += fmt::format(" between-passes={:.2f}", static_cast<double>(between) / 1e6 / frames);
+  }
+  if (g_gpuTimingSkipped != 0) {
+    text += fmt::format(" (untimed frames: {})", g_gpuTimingSkipped);
+  }
+  g_gpuTimingTotalsNs.fill(0);
+  g_gpuTimingSpanNs = 0;
+  g_gpuTimingFrames = 0;
+  g_gpuTimingSkipped = 0;
+  return text;
 }
 
 void after_submit() noexcept {

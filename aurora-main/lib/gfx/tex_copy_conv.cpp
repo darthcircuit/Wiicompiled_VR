@@ -1,4 +1,5 @@
 #include "tex_copy_conv.hpp"
+#include "common.hpp"
 #include "tex_copy_format_contract.hpp"
 
 #include "../internal.hpp"
@@ -586,6 +587,7 @@ static void execute(const wgpu::CommandEncoder& cmd, const ConvRequest& req, con
       .label = "TexCopyConv Pass",
       .colorAttachmentCount = colorAttachments.size(),
       .colorAttachments = colorAttachments.data(),
+      .timestampWrites = gpu_timing_pass(GpuTimingCategory::EfbCopy),
   };
   const auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
   pass.SetPipeline(pipeline);

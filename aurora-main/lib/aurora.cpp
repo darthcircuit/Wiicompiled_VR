@@ -756,6 +756,7 @@ void encode_virtual_screen_eye(wgpu::CommandEncoder& encoder, const webgpu::Pres
       .label = eyeIndex == 0 ? "Virtual screen left eye" : "Virtual screen right eye",
       .colorAttachmentCount = attachments.size(),
       .colorAttachments = attachments.data(),
+      .timestampWrites = gfx::gpu_timing_pass(gfx::GpuTimingCategory::VirtualScreen),
   };
   {
     const auto pass = encoder.BeginRenderPass(&descriptor);
@@ -1274,6 +1275,7 @@ bool present_presentation_job(const PresentationJob& job) {
             .label = "Presentation copy pass",
             .colorAttachmentCount = attachments.size(),
             .colorAttachments = attachments.data(),
+            .timestampWrites = gfx::gpu_timing_pass(gfx::GpuTimingCategory::Present),
         };
         const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
         pass.SetPipeline(webgpu::g_CopyPipeline);
@@ -1576,6 +1578,7 @@ void encode_presentation_snapshot(const wgpu::CommandEncoder& encoder, const web
         .label = "Interpolation snapshot pass",
         .colorAttachmentCount = attachments.size(),
         .colorAttachments = attachments.data(),
+        .timestampWrites = gfx::gpu_timing_pass(gfx::GpuTimingCategory::Snapshot),
     };
     const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
     const auto imageWidth = static_cast<float>(image.texture.size.width);
@@ -1627,6 +1630,7 @@ void encode_presentation_snapshot(const wgpu::CommandEncoder& encoder, const web
         .label = "Snapshot ImGui pass",
         .colorAttachmentCount = attachments.size(),
         .colorAttachments = attachments.data(),
+        .timestampWrites = gfx::gpu_timing_pass(gfx::GpuTimingCategory::Snapshot),
     };
     const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
     pass.SetViewport(0.f, 0.f, static_cast<float>(image.texture.size.width),
@@ -1829,6 +1833,9 @@ void run_retained_stereo_frame(gfx::SealedFrame& sealedFrame) noexcept {
 void seal_frame_locked(gfx::SealedFrame& sealedFrame, SealedFrameContext& ctx, uint64_t contentTag,
                        const StereoSceneAnchor& sceneAnchor) {
   ZoneScopedN("Seal frame");
+  // Every pass this cycle encodes, from the seal's probe blits to the final eye, is timed under
+  // one frame; encode_sealed_frame resolves it on its last submission.
+  gfx::gpu_timing_begin_frame();
   const auto encoderDescriptor = wgpu::CommandEncoderDescriptor{
       .label = "Redraw encoder",
   };
@@ -1988,7 +1995,18 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
 
   // A demanded CPU-visible EFB readback submits a prefix of the frame, so replaying the resumed
   // stream would mutate an already-rendered EFB. Render once, then duplicate into the slots.
-  gfx::render(sealedFrame, encoder, -1, !immersiveReplay && !ctx.retainStereo);
+  //
+  // On a headset an immersive frame's native render is never presented: the eyes replay the draws
+  // themselves and only sample the EFB copies it resolves. So it stops after the last pass that
+  // produces one of those copies (never the display copy), which on a Quest 3 was 4 to 6 ms of a
+  // 12 ms GPU frame spent on a 1280x720 image nobody saw. A pending CPU readback or a frame
+  // capture still gets the whole image.
+  int32_t nativeRenderLastPass = INT32_MAX;
+  if (headsetOnly && immersiveReplay && !gfx::efb_ram::has_pending() &&
+      g_captureFrame.load(std::memory_order_acquire) == UINT32_MAX) {
+    nativeRenderLastPass = gfx::last_pass_feeding_replay(sealedFrame);
+  }
+  gfx::render(sealedFrame, encoder, -1, !immersiveReplay && !ctx.retainStereo, nativeRenderLastPass);
   // The copy targets now hold this frame's resolves, so queue their readbacks on the same encoder;
   // completion is harvested in gfx::after_submit, never waited on here.
   gfx::efb_ram::encode_async_downloads(encoder);
@@ -2070,7 +2088,9 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
       .presentAt = slotPresentDeadline(ctx.interpolatedFrameCount),
       .interpolated = false,
   });
+  gfx::gpu_timing_end_frame(encoder);
   submitEncodedSlot(encoder, pendingStereoSink ? &*pendingStereoSink : nullptr);
+  gfx::gpu_timing_after_submit();
 
   // A group that finished encoding past its anchor slides forward by whole display periods, never
   // per slot. The cursor keeps two groups off one anchor, which bursts then holds for a period.
@@ -2180,7 +2200,12 @@ void record_frame_telemetry() {
   {
     // `adb shell setprop debug.wiicompiled.fpslog 1` before launch logs the game's rendered frame rate every five
     // seconds. The headset compositor's own log (logcat tag VrApi) repeats frames, so it cannot show this.
-    static const bool fpsLog = android_debug::property_int("debug.wiicompiled.fpslog", 0) == 1;
+    static const bool fpsLog = [] {
+      const bool on = android_debug::property_int("debug.wiicompiled.fpslog", 0) == 1;
+      // The same switch turns on the per-pass GPU timestamps reported below the frame-rate line.
+      gfx::gpu_timing_set_enabled(on);
+      return on;
+    }();
     if (fpsLog) {
       static auto windowStart = std::chrono::steady_clock::now();
       static uint32_t windowFrames = 0;
@@ -2203,6 +2228,9 @@ void record_frame_telemetry() {
                  "prepare permit, {:.2f} ms preparing the next frame and {:.2f} ms encoding",
                  windowFrames / elapsed.count(), windowFrames, elapsed.count(), waitDone, waitSealed, seal,
                  permitWait, prepare, encode);
+        if (const std::string gpuTiming = gfx::gpu_timing_report(); !gpuTiming.empty()) {
+          Log.info("{}", gpuTiming);
+        }
         windowStart = now;
         windowFrames = 0;
       }

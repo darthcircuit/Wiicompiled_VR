@@ -143,6 +143,12 @@ suggested for `oculus/touch_controller` and `khr/simple_controller`.
   provider is registered on Android, Aurora skips the surface present and the
   desktop mirror copy (`headset_owns_display` in `lib/aurora.cpp`). The game's
   own render size is unaffected: at `resolution_multiplier = 1` it is 640x528.
+  Since 2026-09-19 an immersive race also stops that native render after the
+  last pass whose EFB copy the eye replays sample (`last_pass_feeding_replay`):
+  the main scene and display copy of a 1280x720 image nobody sees were 4 to
+  6 ms of a 12 ms GPU frame on a Quest 3. A pending CPU readback of an EFB
+  copy or a frame capture still renders the whole image, and menus (the
+  virtual screen) keep it because their eyes are built from that snapshot.
 - **JNI only on the real thread stack.** Guest threads run on libco stacks
   inside the SDL thread, and SDL's Android event pump can reach Java (joystick
   polling, HIDAPI). ART binds JNI transitions to the thread's real stack, so
@@ -582,7 +588,7 @@ the app:
 | `debug.wiicompiled.vtxpad 0` | Turns the stride padding off, to re-check a driver update |
 | `debug.wiicompiled.validation 1` | Keeps WebGPU validation and robustness on in release builds |
 | `debug.wiicompiled.inject <n>:<button>` | Presses `a`, `b`, `x`, `y`, `start`, `up`, `down`, `left` or `right` for 12 XR frames each time `<n>` changes. As a Wii Remote, `x`/`y`/`start` are 1/2/+, the directions push the Nunchuk stick, and `home`, `c` and `z` also exist. `panel` presses the settings panel's button (left Y, or both thumbsticks as a gamepad), opening or closing it (see `OPENXR.md`) |
-| `debug.wiicompiled.fpslog 1` | Logs the game's rendered frame rate every 5 s, with per-frame averages of the producer's waits for the frame worker's DONE and SEALED phases and of the worker's seal, permit wait, prepare and encode stretches. The compositor's `VrApi` log line gives headset FPS, `GPU%`, `CPU%`, clock levels and app GPU time (`App=`) |
+| `debug.wiicompiled.fpslog 1` | Logs the game's rendered frame rate every 5 s, with per-frame averages of the producer's waits for the frame worker's DONE and SEALED phases and of the worker's seal, permit wait, prepare and encode stretches. A second line gives the GPU time per frame from timestamp queries on every pass (`mono` native render, `eyeL`/`eyeR` replays, `screen`, `panel`, `efbcopy`, `palette`, `peek`, plus `passes-span` from the first pass begin to the last pass end and `between-passes` for copies and idle gaps). The compositor's `VrApi` log line gives headset FPS, `GPU%`, `CPU%`, clock levels and app GPU time (`App=`) |
 
 The injector makes headset tests possible with nobody wearing the headset.
 Keep the display awake, drive the menus, then take a compositor screenshot:
@@ -648,6 +654,19 @@ regression of this kind shows up in the session log. The remaining gap to 60
 at the start is about 1 ms of game-thread CPU per frame, with the GPU at 85 to
 89%, so the next steps are on both sides: the guest-code share (translator
 output quality) and the eye replay's GPU cost.
+
+The GPU side, measured the same day with per-pass timestamp queries (the second
+`fpslog` line): on SNES Ghost Valley 2 at `render_scale` 0.5 (840x880 eyes) a
+stereo frame cost 13.2 ms, of which the native render was 5.7 ms, the eyes 3.5
+and 3.8, copies and gaps 0.4. That native render is a 1280x720 image nobody
+sees during an immersive race, so it now stops after the last pass whose EFB
+copy the eyes sample: `mono` fell to 0.15 ms and a Luigi Circuit start at 0.5
+renders in 5.5 to 10 ms of GPU per frame. What remains is the headset pacing:
+with the display at 72 or 90 Hz, each headset frame stays open for the next
+60 Hz game frame plus the whole encode (`open` 16 ms in the pacing summary),
+so cycles span one to two display slots and the headset gets 40 to 60 frames
+per second while the game renders 60. Reworking that pacing (encode the newest
+sealed frame at once, repeat the layer otherwise) is the next step.
 
 Verified on device since: the menus on the virtual screen, controller input
 (the user has driven races), and an immersive Grand Prix start with all 12

@@ -239,6 +239,7 @@ void composite(const wgpu::CommandEncoder& encoder, const wgpu::TextureView& tar
       .label = eyeIndex == 0 ? "Headset panel left eye" : "Headset panel right eye",
       .colorAttachmentCount = attachments.size(),
       .colorAttachments = attachments.data(),
+      .timestampWrites = gfx::gpu_timing_pass(gfx::GpuTimingCategory::Panel),
   };
   const auto pass = encoder.BeginRenderPass(&descriptor);
   pass.SetPipeline(state.pipeline);
@@ -294,6 +295,7 @@ wgpu::CommandBuffer prepare(ImDrawData* drawData, float widthFraction) noexcept 
       .label = "Headset panel ImGui pass",
       .colorAttachmentCount = attachments.size(),
       .colorAttachments = attachments.data(),
+      .timestampWrites = gfx::gpu_timing_pass(gfx::GpuTimingCategory::Panel),
   };
   bool drawn = false;
   {
