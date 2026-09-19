@@ -419,6 +419,16 @@ Android facts this design rests on, all measured on a Quest 3:
   SDL3 built shared (or `-DAURORA_SDL3_PROVIDER=system` for the AAR prefab),
   tests off, products built as `libmain.so` / `libmain_retro_rewind.so`,
   `-mcpu=cortex-a77` (Quest 2's XR2 Gen 1; Quest 3/Pro are supersets).
+  The products link with `-Wl,-Bsymbolic` and the translated shards compile
+  with `-fno-stack-protector`: without them every one of the 29,000 translated
+  functions called its neighbours and the runtime through a PLT stub (26,973
+  of them, 702 after), which was 4% of the game thread on a Quest 3, and the
+  NDK's default canaries cost cycles in code whose state lives in guest memory.
+  With those and a larger indirect-dispatch memo (`kIndirectDispatchCacheEntries`),
+  a twelve-kart race start went from a 30 fps retrace lock to a steady 60.
+  The initial-exec TLS model is not an option: Bionic refuses it in a library
+  loaded with `dlopen`, which is how SDL loads the game
+  (`dlopen failed: TLS symbol ... using IE access model`).
 - `runtime/cmake/PublicProducts.cmake` gains `MKW_GENERATED_DIR` so a build
   configured from a checkout can name the translator output tree, and on
   Android rewrites the PE/COFF `.section .rdata,"dr"` of a Windows-generated

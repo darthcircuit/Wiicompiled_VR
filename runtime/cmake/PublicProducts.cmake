@@ -58,8 +58,11 @@ function(mkw_apply_common_compile_options target)
 endfunction()
 
 function(mkw_apply_translated_compile_options target)
+    # The NDK toolchain adds -fstack-protector-strong to every object. Translated guest code keeps
+    # its state in guest memory and the CpuContext, so the canaries only cost cycles there.
     target_compile_options(${target} PRIVATE
-        -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -w -pipe)
+        -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -w -pipe
+        $<$<PLATFORM_ID:Android>:-fno-stack-protector>)
 endfunction()
 
 function(mkw_configure_object_target target)
@@ -319,6 +322,11 @@ function(mkw_configure_product target)
         target_link_libraries(${target} PRIVATE mkw::libco ${CMAKE_DL_LIBS})
     elseif(MKW_PLATFORM_ANDROID)
         target_link_libraries(${target} PRIVATE mkw::libco android log vulkan ${CMAKE_DL_LIBS})
+        # A shared library's own calls and data references go through the PLT and GOT unless the
+        # symbols are bound at link time; with 29,000 translated functions calling each other and
+        # the runtime, those stubs were 4% of the game thread on the Quest. Nothing interposes
+        # symbols of the game library, and the JNI and SDL_main exports stay exported.
+        target_link_options(${target} PRIVATE "-Wl,-Bsymbolic")
     endif()
     if(MKW_PLATFORM_WINDOWS)
         foreach(runtime_dll libc++.dll libunwind.dll)

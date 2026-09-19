@@ -505,7 +505,9 @@ function Invoke-QuestGameBuild {
     $escape = { param([string]$p) $p.Replace('$', '$$').Replace(':', '$:').Replace(' ', '$ ') }
     [void]$ninjaText.AppendLine('ninja_required_version = 1.10')
     [void]$ninjaText.AppendLine("pool translated`n  depth = $TranslatedJobs")
-    [void]$ninjaText.AppendLine("rule cxx`n  command = $(ConvertTo-QuotedArgument $ClangCxx) @`$flags -c `$in -o `$out`n  description = Compiling `$in")
+    # Depfiles, so a changed runtime header recompiles the shards that include it instead of
+    # leaving objects built against the previous kit.
+    [void]$ninjaText.AppendLine("rule cxx`n  command = $(ConvertTo-QuotedArgument $ClangCxx) @`$flags -MD -MF `$out.d -c `$in -o `$out`n  depfile = `$out.d`n  deps = gcc`n  description = Compiling `$in")
     [void]$ninjaText.AppendLine("rule asm`n  command = $(ConvertTo-QuotedArgument $ClangC) @`$flags -c `$in -o `$out`n  description = Assembling `$in")
     [void]$ninjaText.AppendLine("rule link`n  command = $(ConvertTo-QuotedArgument $ClangCxx) @`$flags -o `$out @`$out.rsp`n  rspfile = `$out.rsp`n  rspfile_content = `$inputs`n  description = Linking `$out")
     $objectsOf = @{}
