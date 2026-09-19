@@ -369,7 +369,7 @@ public:
 #if defined(_WIN32)
         config.required_extensions = {"XR_KHR_D3D12_enable"};
         config.optional_extensions = {"XR_KHR_win32_convert_performance_counter_time",
-                                      "XR_FB_display_refresh_rate"};
+                                      "XR_FB_display_refresh_rate", "XR_EXT_performance_settings"};
 #else
         // Either Vulkan binding extension is acceptable; the backend picks
         // whichever the runtime enabled, preferring enable2.
@@ -377,7 +377,7 @@ public:
         config.optional_extensions = {"XR_KHR_vulkan_enable2", "XR_KHR_vulkan_enable",
                                       "XR_KHR_convert_timespec_time",
                                       "XR_KHR_android_thread_settings",
-                                      "XR_FB_display_refresh_rate"};
+                                      "XR_FB_display_refresh_rate", "XR_EXT_performance_settings"};
         config.instance_create_next = OpenXRAndroidInstanceCreateNext();
 #endif
         if (!runtime_->Initialize(config)) {
@@ -400,6 +400,9 @@ public:
 #endif
         if (has_extension("XR_FB_display_refresh_rate")) {
             runtime_->LoadFunction("xrGetDisplayRefreshRateFB", &get_display_refresh_rate_);
+        }
+        if (has_extension("XR_EXT_performance_settings")) {
+            runtime_->LoadFunction("xrPerfSettingsSetPerformanceLevelEXT", &set_performance_level_);
         }
         interpolation_available_.store(convert_display_time_ != nullptr, std::memory_order_release);
         if (!backend_->QueryGraphicsRequirements(*runtime_)) {
@@ -509,6 +512,7 @@ public:
         prepared_ = false;
         convert_display_time_ = nullptr;
         get_display_refresh_rate_ = nullptr;
+        set_performance_level_ = nullptr;
         headset_hz_.store(0, std::memory_order_relaxed);
         rendered_fps_.store(0, std::memory_order_relaxed);
         interpolation_available_.store(false, std::memory_order_release);
@@ -635,6 +639,32 @@ private:
     }
 #endif
 
+    // Asks the runtime for the configured performance level in both domains. Standalone
+    // headsets clock their cores by this: a Quest 3 held the game thread at CPU level 4
+    // (2.2 GHz of a possible 2.36) and the GPU at level 3 with the runtime's own choice. A
+    // refusal is logged and changes nothing; desktop runtimes rarely offer the extension.
+    void ApplyPerformanceLevel() {
+        if (runtime_ == nullptr || set_performance_level_ == nullptr || !runtime_->HasSession()) {
+            return;
+        }
+        const std::string requested = RuntimeConfigFile::VrPerformanceLevel();
+        XrPerfSettingsLevelEXT level = XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT;
+        if (requested == "default") {
+            return;
+        } else if (requested == "power_savings") {
+            level = XR_PERF_SETTINGS_LEVEL_POWER_SAVINGS_EXT;
+        } else if (requested == "sustained_low") {
+            level = XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT;
+        } else if (requested == "boost") {
+            level = XR_PERF_SETTINGS_LEVEL_BOOST_EXT;
+        }
+        const XrResult cpu = set_performance_level_(runtime_->Session(), XR_PERF_SETTINGS_DOMAIN_CPU_EXT, level);
+        const XrResult gpu = set_performance_level_(runtime_->Session(), XR_PERF_SETTINGS_DOMAIN_GPU_EXT, level);
+        RT_LOG(RT_TAG_RUNTIME) << "OpenXR: performance level \"" << requested << "\" CPU "
+                               << (XR_SUCCEEDED(cpu) ? "set" : "refused") << " (" << cpu << "), GPU "
+                               << (XR_SUCCEEDED(gpu) ? "set" : "refused") << " (" << gpu << ")" << std::endl;
+    }
+
     static bool ProvideStereoFrame(uint32_t, AuroraStereoFrame* output, void* userdata) {
         auto* self = static_cast<OpenXRIntegration*>(userdata);
         if (self == nullptr || output == nullptr) {
@@ -672,6 +702,7 @@ private:
             worker_registered = RegisterAuroraFrameWorkerThread();
         }
 #endif
+        ApplyPerformanceLevel();
         bool fatal = false;
         uint32_t consecutive_skips = 0;
         bool store_gate_set = false;
@@ -1295,6 +1326,7 @@ private:
     std::chrono::steady_clock::time_point timing_start_ = std::chrono::steady_clock::now();
     uint32_t timing_submissions_ = 0;
     PFN_xrGetDisplayRefreshRateFB get_display_refresh_rate_ = nullptr;
+    PFN_xrPerfSettingsSetPerformanceLevelEXT set_performance_level_ = nullptr;
 #if defined(_WIN32)
     using ConvertDisplayTime = XrResult (XRAPI_PTR*)(XrInstance, XrTime, LARGE_INTEGER*);
 #else

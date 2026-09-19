@@ -39,10 +39,12 @@ inline uint32_t CanonicalizeGxMainRamAddress(uint32_t addr) noexcept {
 
 namespace GxGuestWrite {
 
-// Granularity matches the GX resource caches' occupancy maps: 64 KiB, so a
-// cacheable display list or texture spans only a handful of counters. A false
-// bump only costs one re-digest, which is exactly the untracked behaviour.
-inline constexpr uint32_t kGranuleShift = 16; // 64 KiB per granule
+// 4 KiB per granule, so a cacheable display list or texture spans a few counters and a false
+// bump only costs one re-digest, which is exactly the untracked behaviour. It used to be 64 KiB:
+// then per-frame guest writes landing beside a static list or texture (a race start streams
+// data next to them) bumped the same granule, and every affected list was re-digested and every
+// affected texture re-hashed each frame. The table is 320 KiB.
+inline constexpr uint32_t kGranuleShift = 12;
 inline constexpr uint64_t kTrackedSpan = static_cast<uint64_t>(Memory::kMem2PhysicalEnd);
 inline constexpr size_t kGranuleCount = static_cast<size_t>(kTrackedSpan >> kGranuleShift);
 

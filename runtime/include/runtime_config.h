@@ -68,6 +68,7 @@ struct RuntimeUserConfig {
     std::optional<bool> vrFirstPersonHideDriver;
     std::optional<int32_t> vrFirstPersonHiddenModel;
     std::optional<std::string> vrFirstPersonRotation;
+    std::optional<std::string> vrPerformanceLevel;
     std::optional<std::string> vrRecenterKey;
     std::optional<float> vrLeanBackDegrees;
     // F10 > Diagnostics: OpenXR pacing and presentation logging in console.log.
@@ -178,6 +179,16 @@ inline constexpr const char* kVrFirstPersonRotationDefault = "yaw";
 
 inline bool IsSupportedVrFirstPersonRotation(std::string_view value) {
     return value == "yaw" || value == "yaw_pitch" || value == "full";
+}
+// The performance level asked of the OpenXR runtime (XR_EXT_performance_settings) for its CPU and
+// GPU domains. Standalone headsets clock their cores by this request: a Quest 3 ran the game
+// thread at 1.92 GHz with the runtime's own choice while its fast cores reach 2.36 GHz. "default"
+// leaves the runtime's choice; desktop runtimes without the extension ignore the setting.
+inline constexpr const char* kVrPerformanceLevelDefault = "boost";
+
+inline bool IsSupportedVrPerformanceLevel(std::string_view value) {
+    return value == "default" || value == "power_savings" || value == "sustained_low" ||
+           value == "sustained_high" || value == "boost";
 }
 // What the desktop window shows while the headset is running: "normal" leaves
 // the ordinary desktop view alone, "both", "left" and "right" mirror the
@@ -455,6 +466,11 @@ inline void EnsureConfigFile() {
               "# horizon, \"yaw_pitch\" adds the kart's climb but no roll, and\n"
               "# \"full\" takes the kart's whole orientation so the view banks.\n"
               "first_person_rotation = \"yaw\"\n\n"
+              "# Performance level asked of the headset's runtime for its CPU and\n"
+              "# GPU: \"boost\", \"sustained_high\", \"sustained_low\", \"power_savings\",\n"
+              "# or \"default\" to leave the runtime's own choice. Standalone headsets\n"
+              "# clock their cores by this request; desktop runtimes ignore it.\n"
+              "performance_level = \"boost\"\n\n"
               "# Keyboard shortcut that recenters the VR view, naming the key the\n"
               "# way SDL does (F9, Home, Keypad 5, ...). It moves the race view to\n"
               "# where you are sitting now and brings the menu screen back upright in\n"
@@ -674,6 +690,10 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     if (auto value = FindConfigValue<std::string>(document, "vr", "first_person_rotation");
         value && IsSupportedVrFirstPersonRotation(*value)) {
         config.vrFirstPersonRotation = *value;
+    }
+    if (auto value = FindConfigValue<std::string>(document, "vr", "performance_level");
+        value && IsSupportedVrPerformanceLevel(*value)) {
+        config.vrPerformanceLevel = *value;
     }
     if (auto value = FindConfigValue<std::string>(document, "vr", "mirror_view");
         value && IsSupportedVrMirrorView(*value)) {
@@ -1011,6 +1031,14 @@ inline bool SetVrFirstPersonRotation(std::string value) {
     }
     Mutable().vrFirstPersonRotation = value;
     return WriteSetting("vr", "first_person_rotation", FormatString(value));
+}
+
+inline bool SetVrPerformanceLevel(std::string value) {
+    if (!IsSupportedVrPerformanceLevel(value)) {
+        return false;
+    }
+    Mutable().vrPerformanceLevel = value;
+    return WriteSetting("vr", "performance_level", FormatString(value));
 }
 
 inline bool SetVrFirstPersonHiddenModel(int32_t value) {
@@ -1369,6 +1397,11 @@ inline bool SetDiagnosticsOpenXRLogging(bool value) {
 inline std::string VrFirstPersonRotation(std::string fallback = kVrFirstPersonRotationDefault) {
     const auto& value = Get().vrFirstPersonRotation;
     return value && IsSupportedVrFirstPersonRotation(*value) ? *value : std::move(fallback);
+}
+
+inline std::string VrPerformanceLevel(std::string fallback = kVrPerformanceLevelDefault) {
+    const auto& value = Get().vrPerformanceLevel;
+    return value && IsSupportedVrPerformanceLevel(*value) ? *value : std::move(fallback);
 }
 
 inline int32_t VrFirstPersonHiddenModel(int32_t fallback = kVrFirstPersonHiddenModelDefault) {

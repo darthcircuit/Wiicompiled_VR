@@ -443,9 +443,28 @@ bool frame_worker_phase_reached(FrameWorkerPhase phase) noexcept {
 
 bool wait_for_frame_worker_private_for(FrameWorkerPhase phase, std::chrono::microseconds timeout) noexcept;
 
+// Where a frame's wall-clock time goes between the producer and the worker, summed in nanoseconds
+// and reported with the frame-rate log: the producer's waits for each worker phase, and the
+// worker cycle's four stretches: sealing, the wait for the producer's prepare permit, preparing
+// the next frame (which includes waiting for a free staging buffer), and the overlapped encode.
+std::atomic<uint64_t> g_producerWaitDoneNs{0};
+std::atomic<uint64_t> g_producerWaitSealedNs{0};
+std::atomic<uint64_t> g_workerSealNs{0};
+std::atomic<uint64_t> g_workerEncodeNs{0};
+std::atomic<uint64_t> g_workerPermitWaitNs{0};
+std::atomic<uint64_t> g_workerPrepareNs{0};
+
 void wait_for_frame_worker_private(FrameWorkerPhase phase) noexcept {
   constexpr auto kWaitServiceInterval = std::chrono::milliseconds(1);
+  if (frame_worker_phase_reached(phase)) {
+    return;
+  }
+  const auto started = std::chrono::steady_clock::now();
   while (!wait_for_frame_worker_private_for(phase, kWaitServiceInterval)) {}
+  const auto waited = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
+  (phase == FrameWorkerPhase::Sealed ? g_producerWaitSealedNs : g_producerWaitDoneNs)
+      .fetch_add(waited, std::memory_order_relaxed);
 }
 
 bool wait_for_frame_worker_private_for(FrameWorkerPhase phase, std::chrono::microseconds timeout) noexcept {
@@ -2169,8 +2188,21 @@ void record_frame_telemetry() {
       const auto now = std::chrono::steady_clock::now();
       const std::chrono::duration<double> elapsed = now - windowStart;
       if (elapsed.count() >= 5.0) {
-        Log.info("Game frame rate {:.1f} FPS ({} frames in {:.2f} s)", windowFrames / elapsed.count(), windowFrames,
-                 elapsed.count());
+        // Per-frame averages of where the wall-clock time went (see the counters' definition).
+        const auto msPerFrame = [&](std::atomic<uint64_t>& counter) {
+          return static_cast<double>(counter.exchange(0, std::memory_order_relaxed)) / 1e6 / std::max(windowFrames, 1u);
+        };
+        const double waitDone = msPerFrame(g_producerWaitDoneNs);
+        const double waitSealed = msPerFrame(g_producerWaitSealedNs);
+        const double seal = msPerFrame(g_workerSealNs);
+        const double permitWait = msPerFrame(g_workerPermitWaitNs);
+        const double prepare = msPerFrame(g_workerPrepareNs);
+        const double encode = msPerFrame(g_workerEncodeNs);
+        Log.info("Game frame rate {:.1f} FPS ({} frames in {:.2f} s); per frame the producer waited {:.2f} ms for "
+                 "DONE and {:.2f} ms for SEALED; the worker spent {:.2f} ms sealing, {:.2f} ms waiting for the "
+                 "prepare permit, {:.2f} ms preparing the next frame and {:.2f} ms encoding",
+                 windowFrames / elapsed.count(), windowFrames, elapsed.count(), waitDone, waitSealed, seal,
+                 permitWait, prepare, encode);
         windowStart = now;
         windowFrames = 0;
       }
@@ -2187,19 +2219,17 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame, uint64_t contentTag,
   ZoneScopedN("Frame worker cycle");
   webgpu::fail_if_device_lost();
   SealedFrameContext ctx;
-  std::vector<PresentationJob> presentationJobs;
-  bool overlapEncode = false;
+  const auto elapsedNs = [](std::chrono::steady_clock::time_point since) {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - since).count());
+  };
+  auto stretchStarted = std::chrono::steady_clock::now();
   {
     std::lock_guard gpuLock(g_rendererGpuMutex);
     seal_frame_locked(sealedFrame, ctx, contentTag, sceneAnchor);
-    overlapEncode = ctx.interpolationActive || ctx.retainStereo;
-    if (!overlapEncode) {
-      presentationJobs = encode_sealed_frame(sealedFrame, ctx);
-    }
   }
-  if (!overlapEncode) {
-    publish_presentations(std::move(presentationJobs), ctx.interpolationActive);
-  }
+  g_workerSealNs.fetch_add(elapsedNs(stretchStarted), std::memory_order_relaxed);
+  stretchStarted = std::chrono::steady_clock::now();
 
   {
     std::unique_lock lock(g_frameWorker.mutex);
@@ -2209,39 +2239,41 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame, uint64_t contentTag,
     }
     g_frameWorker.prepareAllowed = false;
   }
+  g_workerPermitWaitNs.fetch_add(elapsedNs(stretchStarted), std::memory_order_relaxed);
+  stretchStarted = std::chrono::steady_clock::now();
 
   // Preparing the next frame belongs to the SEALED phase: without a fresh pass 0 and mapped
   // staging buffers the producer's drain has nowhere to put its commands.
   bool imguiNewFrameOwed = false;
-  const bool prepared = begin_frame_impl(
-      false, overlapEncode ? ImGuiFramePolicy::Deferred : ImGuiFramePolicy::Immediate, &imguiNewFrameOwed);
+  const bool prepared = begin_frame_impl(false, ImGuiFramePolicy::Deferred, &imguiNewFrameOwed);
+  g_workerPrepareNs.fetch_add(elapsedNs(stretchStarted), std::memory_order_relaxed);
+  stretchStarted = std::chrono::steady_clock::now();
 
+  // SEALED before the encode, always. The encode reads only `ctx` and the sealed passes, so it
+  // runs while the producer records the next frame, which takes the renderer mutex per drain.
+  // It used to be published after the encode unless interpolation was on, and the producer's
+  // first drain of each frame then waited for the whole encode and submit: 3 to 4.5 ms of every
+  // frame on a Quest 3, the difference between a twelve-kart race start at 50 and at 60 fps.
   {
     std::lock_guard lock(g_frameWorker.mutex);
     g_frameWorker.framePrepared = prepared;
     g_frameWorker.sealed.store(true, std::memory_order_release);
-    if (!overlapEncode) {
-      g_frameWorker.ready.store(true, std::memory_order_release);
-    }
   }
   g_frameWorker.cv.notify_all();
 
-  if (overlapEncode) {
-    // Mutex-free: the producer drains and records the next frame in parallel, taking the renderer
-    // mutex per drain, and this phase never takes it.
-    presentationJobs = encode_sealed_frame(sealedFrame, ctx);
-    publish_presentations(std::move(presentationJobs), ctx.interpolationActive);
-    if (imguiNewFrameOwed) {
-      // Safe only now: every slot has replayed this frame's ImGui draw lists.
-      std::lock_guard gpuLock(g_rendererGpuMutex);
-      imgui::new_frame(window::get_window_size());
-    }
-    {
-      std::lock_guard lock(g_frameWorker.mutex);
-      g_frameWorker.ready.store(true, std::memory_order_release);
-    }
-    g_frameWorker.cv.notify_all();
+  std::vector<PresentationJob> presentationJobs = encode_sealed_frame(sealedFrame, ctx);
+  publish_presentations(std::move(presentationJobs), ctx.interpolationActive);
+  if (imguiNewFrameOwed) {
+    // Safe only now: every slot has replayed this frame's ImGui draw lists.
+    std::lock_guard gpuLock(g_rendererGpuMutex);
+    imgui::new_frame(window::get_window_size());
   }
+  g_workerEncodeNs.fetch_add(elapsedNs(stretchStarted), std::memory_order_relaxed);
+  {
+    std::lock_guard lock(g_frameWorker.mutex);
+    g_frameWorker.ready.store(true, std::memory_order_release);
+  }
+  g_frameWorker.cv.notify_all();
 
   record_frame_telemetry();
   return true;

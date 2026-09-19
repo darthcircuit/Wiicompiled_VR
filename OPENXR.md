@@ -49,6 +49,7 @@ first_person_head_right_meters = 0.0
 first_person_hide_driver = true
 first_person_hidden_model = 0
 first_person_rotation = "yaw"
+performance_level = "boost"
 ```
 
 To play this installation on the desktop instead, set `enabled = false`, close the game completely,
@@ -127,6 +128,12 @@ desktop. `skip_copy_clears` independently suppresses the EFB reset performed aft
 default on and can be changed live from the F10 settings bar for diagnostics.
 `first_person` and the `first_person_*` values are the first-person camera described below. All
 four are live and are also exposed in the F10 settings bar.
+`performance_level` is the level asked of the runtime through `XR_EXT_performance_settings` for
+its CPU and GPU domains: `boost`, `sustained_high`, `sustained_low`, `power_savings`, or
+`default` to leave the runtime's own choice. Standalone headsets clock their cores by this
+request (see `docs/quest-port.md`); desktop runtimes rarely offer the extension, and the setting
+then does nothing. It is read at launch, and the session log records whether the runtime accepted
+it and any later performance notification (a thermal or rendering warning).
 
 ## Controllers
 
@@ -475,8 +482,10 @@ Stereo uniform calculations use cached CPU memory, followed by a single write in
 buffer. Reading or modifying matrices directly in D3D12 upload memory can be extremely slow,
 especially with many character draws; see Microsoft's [Map guidance](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12resource-map).
 Retained interpolation reserves eye ranges at seal time and fills them once at the headset sample
-time. VR interpolation also releases the producer after sealing so eye encoding can overlap the
-next game frame, as it does with desktop interpolation.
+time. The frame worker always releases the producer after sealing, so eye encoding overlaps the
+next game frame whether or not interpolation is on. It used to publish that phase only after the
+encode unless interpolation was enabled, and the producer's first GX drain of every frame then
+waited for the previous frame's whole encode and submit (3 to 4.5 ms per frame on a Quest 3).
 
 When VR interpolation is enabled at batch start, uniform recording also uses cached CPU
 memory. Matching and history capture read that buffer, then the used prefix is copied to

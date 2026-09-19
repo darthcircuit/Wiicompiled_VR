@@ -582,7 +582,7 @@ the app:
 | `debug.wiicompiled.vtxpad 0` | Turns the stride padding off, to re-check a driver update |
 | `debug.wiicompiled.validation 1` | Keeps WebGPU validation and robustness on in release builds |
 | `debug.wiicompiled.inject <n>:<button>` | Presses `a`, `b`, `x`, `y`, `start`, `up`, `down`, `left` or `right` for 12 XR frames each time `<n>` changes. As a Wii Remote, `x`/`y`/`start` are 1/2/+, the directions push the Nunchuk stick, and `home`, `c` and `z` also exist. `panel` clicks both thumbsticks, opening or closing the settings panel (see `OPENXR.md`) |
-| `debug.wiicompiled.fpslog 1` | Logs the game's rendered frame rate every 5 s. The compositor's `VrApi` log line gives headset FPS, `GPU%`, `CPU%` and app GPU time (`App=`) |
+| `debug.wiicompiled.fpslog 1` | Logs the game's rendered frame rate every 5 s, with per-frame averages of the producer's waits for the frame worker's DONE and SEALED phases and of the worker's seal, permit wait, prepare and encode stretches. The compositor's `VrApi` log line gives headset FPS, `GPU%`, `CPU%`, clock levels and app GPU time (`App=`) |
 
 The injector makes headset tests possible with nobody wearing the headset.
 Keep the display awake, drive the menus, then take a compositor screenshot:
@@ -621,6 +621,33 @@ about 80%, and CPU and GPU clock levels sit at 4/3. The headset FPS also
 follows the game rate instead of holding 72 Hz, so the pacing thread is not
 repeating the last layer as it does on desktop. Both need profiling on the
 XR2 Gen 2.
+
+Profiled 2026-09-19 on a twelve-kart 50cc Grand Prix start (Luigi Circuit,
+`render_scale` 0.8, intro skipped, driven unattended by the button injector:
+ten `a` presses 5 s apart from the title screen reach the race, one more skips
+the course intro). The game thread is the limit, not the GPU: it is one
+libco-hosted thread (about 60% translated game code, 20% GX HLE, 12% Aurora's
+FIFO decode), and Aurora's frame worker, which encodes and submits the Dawn
+work, runs at about half a core with most of its own time inside the Adreno
+driver's ioctls. Trimming the GX HLE (a 4 KiB write-tracking granule, one
+pointer probe for the texture-object shadow, inline padded vertex copies, a
+throttled clock poll) changed nothing measurable against the same automated
+start, and asking for `XR_EXT_performance_settings` BOOST is accepted but the
+runtime keeps its own dynamic clocks (CPU level 4 at 1.9 to 2.2 GHz, GPU level
+3 at 490 to 640 MHz). What did matter was a scheduler trace of the game
+thread: it slept 3 to 4.5 ms of every frame, in 1 ms slices, on Aurora's
+SEALED phase. Without interpolation the worker published SEALED only after the
+whole encode and submit, so the producer's first GX drain of each frame waited
+for the previous frame's encode (5 ms in menus, 9 to 11 ms in a race). The
+worker now always releases the producer right after sealing; the same start
+went from 47 to 53 fps to 55 to 58 fps, the game thread from 82% to 98% busy,
+and menus lost the same 4.5 ms of idle wait per frame. With `fpslog` on, the
+`Game frame rate` line now carries that breakdown (producer waits for DONE and
+SEALED; the worker's seal, permit wait, prepare and encode) so the next
+regression of this kind shows up in the session log. The remaining gap to 60
+at the start is about 1 ms of game-thread CPU per frame, with the GPU at 85 to
+89%, so the next steps are on both sides: the guest-code share (translator
+output quality) and the eye replay's GPU cost.
 
 Verified on device since: the menus on the virtual screen, controller input
 (the user has driven races), and an immersive Grand Prix start with all 12

@@ -244,6 +244,16 @@ void ServiceDeferredTimingDuringGxWork() {
         return;
     }
 
+    // GX__Begin runs thousands of times a frame, and reading the clock on each one was 2% of the
+    // game thread on the Quest. The poll has a 1 ms cadence, so sampling the clock on every
+    // sixteenth call keeps it within a few microseconds of that. A plain static: GX runs on the
+    // one guest-facing thread, and a thread_local here would cost a resolver call per access.
+    static uint32_t s_pollCountdown = 0;
+    if (s_pollCountdown != 0) {
+        --s_pollCountdown;
+        return;
+    }
+    s_pollCountdown = 15;
     const auto now = std::chrono::steady_clock::now();
     if (now < g_nextDeferredTimingPoll) {
         return;

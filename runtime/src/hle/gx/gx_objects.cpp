@@ -2,6 +2,7 @@
 #include "runtime_log.h"
 
 #include <cstddef>
+#include <cstring>
 #include <limits>
 
 // --- Texture and TLUT Objects ---
@@ -447,15 +448,23 @@ TexObjMeta MergeGuestTexObjMeta(const TexObjMeta& cached, const TexObjMeta& gues
 
 // Reads the raw 32 guest bytes of a GXTexObj struct. Returns false (and the
 // caller must treat the shadow as absent) when the address is unreadable.
+// The shadow is only ever compared for equality (ShadowEquals), so it keeps
+// the bytes in guest order: one page-table probe and one copy per lookup
+// instead of four checked, byte-swapped 64-bit reads. Every draw's texture
+// binds go through this on the game thread, so the per-call cost matters.
 bool ReadTexObjShadow(uint32_t addr, uint64_t (&out)[4]) noexcept {
-    try {
-        out[0] = Memory::Read64(addr + 0x00);
-        out[1] = Memory::Read64(addr + 0x08);
-        out[2] = Memory::Read64(addr + 0x10);
-        out[3] = Memory::Read64(addr + 0x18);
-    } catch (...) {
-        return false;
+    const uint8_t* bytes = MemoryInline::GetPointerFast(addr, sizeof(out));
+    if (bytes == nullptr) {
+        try {
+            bytes = Memory::GetPointer(addr, sizeof(out));
+        } catch (...) {
+            return false;
+        }
+        if (bytes == nullptr) {
+            return false;
+        }
     }
+    std::memcpy(out, bytes, sizeof(out));
     return true;
 }
 

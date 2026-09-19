@@ -566,6 +566,38 @@ OpenXREventStatus OpenXRRuntime::PollEvents() {
             Log(OpenXRLogLevel::Warning, message.str());
             break;
         }
+        case XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT: {
+            // XR_EXT_performance_settings: the runtime reports when a domain's compositing,
+            // rendering or thermal state moves between normal, warning and impaired. Logged so a
+            // throttled headset explains a frame-rate drop in the session log.
+            const auto& perf_event =
+                *reinterpret_cast<const XrEventDataPerfSettingsEXT*>(&event);
+            const auto sub_domain = [](XrPerfSettingsSubDomainEXT value) {
+                switch (value) {
+                case XR_PERF_SETTINGS_SUB_DOMAIN_COMPOSITING_EXT: return "compositing";
+                case XR_PERF_SETTINGS_SUB_DOMAIN_RENDERING_EXT: return "rendering";
+                case XR_PERF_SETTINGS_SUB_DOMAIN_THERMAL_EXT: return "thermal";
+                default: return "unknown";
+                }
+            };
+            const auto notification = [](XrPerfSettingsNotificationLevelEXT value) {
+                switch (value) {
+                case XR_PERF_SETTINGS_NOTIF_LEVEL_NORMAL_EXT: return "normal";
+                case XR_PERF_SETTINGS_NOTIF_LEVEL_WARNING_EXT: return "warning";
+                case XR_PERF_SETTINGS_NOTIF_LEVEL_IMPAIRED_EXT: return "impaired";
+                default: return "unknown";
+                }
+            };
+            std::ostringstream message;
+            message << "OpenXR performance notification: "
+                    << (perf_event.domain == XR_PERF_SETTINGS_DOMAIN_CPU_EXT ? "CPU" : "GPU") << " "
+                    << sub_domain(perf_event.subDomain) << " " << notification(perf_event.fromLevel)
+                    << " -> " << notification(perf_event.toLevel);
+            Log(perf_event.toLevel == XR_PERF_SETTINGS_NOTIF_LEVEL_NORMAL_EXT ? OpenXRLogLevel::Info
+                                                                              : OpenXRLogLevel::Warning,
+                message.str());
+            break;
+        }
         default:
             break;
         }

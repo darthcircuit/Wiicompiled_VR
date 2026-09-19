@@ -157,6 +157,13 @@
     <string name="section_vr_headset">Headset</string>
     <string name="vr_render_scale">Headset render scale</string>
     <string name="vr_render_scale_helper">Scales the eye resolution the headset recommends. Higher is sharper and costs GPU time; lower it if races stutter.</string>
+    <string name="vr_performance_level">Headset performance level</string>
+    <string name="vr_performance_level_helper">How hard the headset clocks its CPU and GPU for the game. Boost gives the most speed; lower it if the headset gets hot or the battery matters more.</string>
+    <string name="vr_performance_level_boost">Boost</string>
+    <string name="vr_performance_level_sustained_high">Sustained high</string>
+    <string name="vr_performance_level_sustained_low">Sustained low</string>
+    <string name="vr_performance_level_power_savings">Power savings</string>
+    <string name="vr_performance_level_default">Headset default</string>
     <string name="vr_interpolation">VR frame interpolation</string>
     <string name="vr_interpolation_helper">Experimental. Renders extra frames between game frames at the headset\'s rate. Needs GPU headroom and adds one game frame of latency.</string>
     <string name="vr_interpolation_off">Off</string>

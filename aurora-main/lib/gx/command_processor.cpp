@@ -1833,16 +1833,44 @@ static void handle_draw_overrun(u8 cmd, u16 vtxCount, u32 vtxSize, u32 totalVtxB
 // Uploads a draw's GX vertices with the stride populate_pipeline_config gave the shader. When that stride is padded
 // (Android, see padded_upload_stride), each vertex is copied with zeroed trailing bytes; attribute offsets inside the
 // vertex are unchanged. Every padded upload is a multiple of 4 bytes, so consecutive draws stay contiguous for merging.
+// One padded element: srcStride bytes copied in word, half-word and byte steps, then the
+// padding zeroed. Inline arithmetic instead of a memcpy and memset call per element: a race
+// frame uploads tens of thousands of 7-byte vertices and 6-byte normals this way, and the two
+// library calls per element were most of the game thread's memcpy time on the Quest.
+static inline void copy_padded_element(u8* dst, const u8* src, u32 srcStride, u32 dstStride) noexcept {
+  u32 n = srcStride;
+  while (n >= 4) {
+    u32 word;
+    std::memcpy(&word, src, 4);
+    std::memcpy(dst, &word, 4);
+    src += 4;
+    dst += 4;
+    n -= 4;
+  }
+  if (n >= 2) {
+    u16 half;
+    std::memcpy(&half, src, 2);
+    std::memcpy(dst, &half, 2);
+    src += 2;
+    dst += 2;
+    n -= 2;
+  }
+  if (n != 0) {
+    *dst++ = *src;
+  }
+  for (u32 pad = srcStride; pad < dstStride; ++pad) {
+    *dst++ = 0;
+  }
+}
+
 static gfx::Range push_draw_vertices(const u8* vertices, u32 vtxCount, u32 vtxSize) {
   const u32 uploadStride = padded_upload_stride(vtxSize);
   if (uploadStride == vtxSize)
     LIKELY { return gfx::push_verts(vertices, static_cast<size_t>(vtxCount) * vtxSize); }
   auto [buffer, range] = gfx::map_verts(static_cast<size_t>(vtxCount) * uploadStride);
   u8* dst = buffer.data();
-  const u32 padding = uploadStride - vtxSize;
   for (u32 i = 0; i < vtxCount; ++i) {
-    std::memcpy(dst, vertices + static_cast<size_t>(i) * vtxSize, vtxSize);
-    std::memset(dst + vtxSize, 0, padding);
+    copy_padded_element(dst, vertices + static_cast<size_t>(i) * vtxSize, vtxSize, uploadStride);
     dst += uploadStride;
   }
   return range;
@@ -1857,10 +1885,15 @@ static gfx::Range push_vertex_array(const AttrArray& array, u32 uploadStride) {
   const size_t count = (static_cast<size_t>(array.size) + array.stride - 1) / array.stride;
   auto [buffer, range] = gfx::map_storage(count * uploadStride);
   u8* dst = buffer.data();
-  std::memset(dst, 0, count * uploadStride);
-  for (size_t i = 0; i < count; ++i) {
-    const size_t start = i * array.stride;
-    std::memcpy(dst + i * uploadStride, data + start, std::min<size_t>(array.stride, array.size - start));
+  // Every whole element inline; only a trailing partial element takes the library calls.
+  const size_t whole = static_cast<size_t>(array.size) / array.stride;
+  for (size_t i = 0; i < whole; ++i) {
+    copy_padded_element(dst + i * uploadStride, data + i * array.stride, array.stride, uploadStride);
+  }
+  if (whole < count) {
+    const size_t start = whole * array.stride;
+    std::memset(dst + whole * uploadStride, 0, uploadStride);
+    std::memcpy(dst + whole * uploadStride, data + start, array.size - start);
   }
   return range;
 }
