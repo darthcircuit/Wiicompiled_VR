@@ -18,10 +18,11 @@ namespace mkw::vr {
 // controllers, which are withheld from the game while it is open.
 //
 // The XR pacing thread owns the controllers: it opens and closes the panel from
-// the controller chord, aims the pointer and publishes it here. The game thread
-// draws the panel, may close it (its Close button) or open it (the F10 bar), and
-// reads the pointer once per presented frame. Nothing in this header depends on
-// OpenXR, so the settings overlay compiles the same in builds without it.
+// the controllers' panel button, aims the pointer and publishes it here. The
+// game thread draws the panel, may close it (its Close button) or open it (the
+// F10 bar), and reads the pointer once per presented frame. Nothing in this
+// header depends on OpenXR, so the settings overlay compiles the same in builds
+// without it.
 
 // The panel's canvas in ImGui pixels, drawn at twice the desktop menu's scale.
 inline constexpr float kSettingsPanelWidthPixels = 1440.0f;
@@ -75,10 +76,20 @@ struct Frame {
     float wheel = 0.0f;
 };
 
+// Whether the button that opens and closes the panel is held. As a Wii Remote
+// that is left Y, which has no Wii button; as a gamepad left Y is GameCube Y, so
+// both thumbsticks clicked together stand in for it.
+inline bool ToggleHeld(const std::array<HandInputs, 2>& hands, OpenXRControllerMode mode) noexcept {
+    if (mode == OpenXRControllerMode::WiiRemote) {
+        return hands[0].secondary;
+    }
+    return hands[0].thumbstick_click && hands[1].thumbstick_click;
+}
+
 // The controller side of the panel, one Update per XR frame:
 //
-// - Clicking both thumbsticks together opens or closes it. Nothing else opens
-//   it from the controllers: every other button already means something to the
+// - The panel button (ToggleHeld) opens or closes it. Nothing else opens it
+//   from the controllers: every other button already means something to the
 //   game.
 // - While it is open, the left menu button also closes it, both triggers and
 //   the A / X buttons select, the thumbsticks scroll, and the hand whose trigger
@@ -87,15 +98,16 @@ struct Frame {
 //   press that closed the panel never lands in the game as well.
 class Controls {
 public:
-    // `open` is the shared flag: the chord flips it, and the game thread may
-    // have changed it since the last frame. `dt_seconds` is the time since the
-    // previous frame.
-    Frame Update(const std::array<HandInputs, 2>& hands, bool& open, float dt_seconds) noexcept {
-        const bool chord = hands[0].thumbstick_click && hands[1].thumbstick_click;
-        if (chord && !m_chord_held) {
+    // `open` is the shared flag: the panel button flips it, and the game thread
+    // may have changed it since the last frame. `dt_seconds` is the time since
+    // the previous frame; `mode` is how the game sees the controllers.
+    Frame Update(const std::array<HandInputs, 2>& hands, bool& open, float dt_seconds,
+                 OpenXRControllerMode mode) noexcept {
+        const bool toggle = ToggleHeld(hands, mode);
+        if (toggle && !m_toggle_held) {
             open = !open;
         }
-        m_chord_held = chord;
+        m_toggle_held = toggle;
 
         if (open && hands[0].menu && !m_menu_held && m_was_open) {
             open = false;
@@ -152,7 +164,7 @@ public:
     }
 
 private:
-    bool m_chord_held = false;
+    bool m_toggle_held = false;
     bool m_menu_held = false;
     std::array<bool, 2> m_trigger_held{};
     bool m_was_open = false;

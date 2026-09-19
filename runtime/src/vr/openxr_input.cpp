@@ -40,9 +40,10 @@ namespace {
 // A new sequence number holds the button for kInjectHoldFrames XR frames.
 // Buttons: a, b, x, y, start, up, down, left, right, and for the Wii Remote
 // presentation also home, c and z (x/y/start press 1/2/+ there, and the
-// directions push the Nunchuk stick). `panel` clicks both thumbsticks, opening
-// or closing the settings panel, where `a` then selects. The property is unset
-// in normal use, so this costs one property read every few frames.
+// directions push the Nunchuk stick). `panel` presses the settings panel's
+// button (left Y, or both thumbsticks for a gamepad), opening or closing it,
+// where `a` then selects. The property is unset in normal use, so this costs
+// one property read every few frames.
 constexpr uint32_t kInjectHoldFrames = 12;
 constexpr uint32_t kInjectPollFrames = 4;
 
@@ -594,6 +595,8 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     m_last_input_time = input_time;
     std::array<wii_remote::HandInputs, kHands> panel_hands = hands;
     if (Injected("panel")) {
+        // The panel button in either controller mode.
+        panel_hands[0].secondary = true;
         panel_hands[0].thumbstick_click = true;
         panel_hands[1].thumbstick_click = true;
     }
@@ -604,7 +607,8 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     // is written back.
     const bool was_open = OpenXRSettingsPanelOpen();
     bool open = was_open;
-    const settings_panel::Frame panel = m_panel_controls.Update(panel_hands, open, dt_seconds);
+    const settings_panel::Frame panel =
+        m_panel_controls.Update(panel_hands, open, dt_seconds, OpenXRGetControllerMode());
     // Pointer first: the game thread reads it as soon as it sees the panel open.
     PublishSettingsPanel(input_time, settings_panel, panel);
     if (open != was_open) {

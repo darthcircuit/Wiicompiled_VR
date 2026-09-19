@@ -252,7 +252,6 @@ class SettingsPage(
             info(R.string.controls_map_stick, activity.getString(R.string.controls_map_stick_value))
             info(R.string.controls_map_z, activity.getString(R.string.controls_map_z_value))
             info(R.string.controls_map_c, activity.getString(R.string.controls_map_c_value))
-            info(R.string.controls_map_home, activity.getString(R.string.controls_map_home_value))
             info(R.string.controls_map_pointer, activity.getString(R.string.controls_map_pointer_value))
             info(R.string.controls_map_panel, activity.getString(R.string.controls_map_panel_value))
         }

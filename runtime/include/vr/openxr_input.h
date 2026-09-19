@@ -40,7 +40,8 @@ struct OpenXRPointerScreen {
 // poses are located at the measured current time, turned into both
 // accelerometers and the IR pointer (the right aim ray against the virtual
 // screen the renderer is showing), and published through openxr_wii_remote.h.
-// Buttons follow DolphinXR's "OpenXR Wii Remote" profile (see RemoteButtons).
+// Buttons are adapted from DolphinXR's "OpenXR Wii Remote" profile (see
+// RemoteButtons).
 // The game's rumble drives both controllers' haptics.
 //
 // Gamepad: the virtual joystick is read through PAD as a GameCube controller,
@@ -55,10 +56,10 @@ struct OpenXRPointerScreen {
 // Both are bound for the Oculus Touch profile; khr/simple_controller gets
 // select/menu and the poses so an unknown runtime still offers something.
 //
-// Clicking both thumbsticks opens the in-headset settings panel
-// (openxr_settings_panel.h). While it is open, and until every button has been
-// released after it closes, the game sees idle controllers: the chord, the
-// pointer and the triggers belong to the panel.
+// Left Y (both thumbsticks clicked together as a gamepad) opens the in-headset
+// settings panel (openxr_settings_panel.h). While it is open, and until every
+// button has been released after it closes, the game sees idle controllers: the
+// panel button, the pointer and the triggers belong to the panel.
 //
 // Lifetime: Create after the session exists (attaches the action set, which
 // OpenXR permits once per session), Sync once per xrWaitFrame, Idle while the

@@ -143,26 +143,27 @@ to a port like any other. `controller_mode` decides what the game finds on that 
 from **F10 > VR > VR controllers**; the game sees a change as a controller reconnection.
 
 `"wii_remote"`, the default, presents them as a Wii Remote with a Nunchuk, the way DolphinXR's
-OpenXR Wii Remote does, including its default `OpenXR Wii Remote` profile for the Touch
-controllers. The port is served through KPAD like a Bluetooth remote (`wii_remote_input.cpp`), so
-`WPADProbe` reports a Nunchuk and the game runs its own Wii Remote + Nunchuk control scheme:
+OpenXR Wii Remote does, with buttons adapted from its default `OpenXR Wii Remote` profile for the
+Touch controllers. The port is served through KPAD like a Bluetooth remote
+(`wii_remote_input.cpp`), so `WPADProbe` reports a Nunchuk and the game runs its own Wii Remote + Nunchuk control scheme:
 
 | Controller | Wii |
 | --- | --- |
 | Right A | A |
 | Right trigger | B |
 | Right stick up / down | 1 / 2 |
-| Right stick left / right | − / + |
+| Left X | − |
+| Left menu | + |
 | Left stick | Nunchuk stick |
 | Left trigger | Z |
 | Left grip | C |
-| Left menu | HOME |
+| Left Y | Settings panel (not a Wii button) |
 | Right controller motion and aim | Wii Remote accelerometer and pointer |
 | Left controller motion | Nunchuk accelerometer |
 
-Analog inputs count as pressed past half travel. Right B, left X/Y and the stick clicks are unbound,
-as in DolphinXR's profile. The game's Wii Remote rumble vibrates both controllers, subject to the
-ordinary controller-vibration switch.
+Analog inputs count as pressed past half travel. Right B, right stick left / right and the stick
+clicks are unbound, and no controller button presses HOME. The game's Wii Remote rumble vibrates
+both controllers, subject to the ordinary controller-vibration switch.
 
 **Motion.** Each XR frame the aim and grip poses are located at the measured current time
 (`XR_KHR_win32_convert_performance_counter_time`, `XR_KHR_convert_timespec_time` on Android), not
@@ -192,13 +193,14 @@ cursor for 100 ms before it disappears, so tracking spikes during fast motion do
 Raw IR camera dots in `KPADGetUnifiedWpadStatus` stay invalid; the game reads the pointer from
 `KPADStatus`.
 
-**Settings in the headset.** Clicking both thumbsticks together opens the settings panel described
-below; while it is open the controllers operate the panel and the game sees them idle.
+**Settings in the headset.** Left Y opens the settings panel described below; while it is open the
+controllers operate the panel and the game sees them idle.
 
 `"gamepad"` keeps the controllers one ordinary gamepad read through PAD as a GameCube controller:
 A/B → South/East, X/Y → West/North, index triggers → trigger axes, grips → shoulders, thumbsticks
 → sticks (clicks → stick buttons), left menu → Start. Every binding in the F10 controller menu
-applies.
+applies. Left Y is GameCube Y here, so clicking both thumbsticks together opens the settings panel
+instead.
 
 Bindings are suggested for `oculus/touch_controller` (Quest 2, 3 and Pro) and
 `khr/simple_controller`. `mkw_vr_wii_remote_tests` checks the accelerometer frame, the pointer
@@ -208,8 +210,9 @@ raycast and debounce, the picture placement and the button profile without a hea
 
 The F10 settings bar is only visible on the desktop window, so the same settings are also offered on
 a panel inside the headset, in menus and during an immersive race alike, including on the Quest.
-**Click both thumbsticks together** to open it, and again to close it; the left controller's menu
-button and the panel's *Close* button also close it. It can be opened from the desktop as well, with
+**Press left Y** to open it, and again to close it (with `controller_mode = "gamepad"`, **click both
+thumbsticks together** instead); the left controller's menu button and the panel's *Close* button
+also close it. It can be opened from the desktop as well, with
 **F10 → VR → Show these settings in the headset**.
 
 The panel has the F10 bar's menus as tabs (VR, Graphics, Controllers, Audio, Diagnostics) and a
@@ -219,8 +222,8 @@ pointing. Changes apply exactly as they do from the F10 bar, and the two stay in
 
 While the panel is open, and until every button has been released after it closes, the game sees
 the VR controllers idle: no buttons, no pointer and a remote at rest. Nothing reaches the game from
-the chord, the trigger that clicked *Close*, or the menu press that closed the panel. The game is
-not paused, so a race carries on while you change settings. Other controllers (keyboard, desktop
+the panel button, the trigger that clicked *Close*, or the menu press that closed the panel. The
+game is not paused, so a race carries on while you change settings. Other controllers (keyboard, desktop
 gamepads, Bluetooth remotes) are not affected.
 
 The panel sits centred on the virtual screen, three quarters of its width across (1.8 m with the
@@ -240,8 +243,8 @@ backends already submit carry it, so no extra swapchain or composition layer is 
 ImGui backend keeps a single projection uniform, so the panel's pass is submitted on its own command
 buffer before the desktop's ImGui pass of the same frame is recorded.
 
-`mkw_vr_settings_panel_tests` covers the chord, the release latch, selection, scrolling and the
-canvas mapping; `gx_fifo_tests` covers where the panel lands in each eye.
+`mkw_vr_settings_panel_tests` covers the panel button in both controller modes, the release latch,
+selection, scrolling and the canvas mapping; `gx_fifo_tests` covers where the panel lands in each eye.
 
 ## The first-person camera
 

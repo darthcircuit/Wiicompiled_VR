@@ -130,7 +130,7 @@
     <string name="about_credit_title_dolphin">Dolphin</string>
     <string name="about_credit_title_logo">Logo</string>
     <string name="about_licence_title">GPL v3</string>
-    <string name="settings_apply_note">Changes apply the next time the game starts. While playing, click both thumbsticks together to open the in-headset settings.</string>
+    <string name="settings_apply_note">Changes apply the next time the game starts. While playing, press left Y to open the in-headset settings (click both thumbsticks together with Gamepad controllers).</string>
     <string name="settings_running_note">The game is running, so these changes wait until it is closed and started again.</string>
     <string name="settings_write_failed">Could not save Config.toml.</string>
     <string name="settings_custom_value">Custom (%1$s)</string>
@@ -205,19 +205,17 @@
     <string name="controls_map_12">1 / 2</string>
     <string name="controls_map_12_value">Right stick up / down</string>
     <string name="controls_map_minus_plus">− / +</string>
-    <string name="controls_map_minus_plus_value">Right stick left / right</string>
+    <string name="controls_map_minus_plus_value">Left X / left menu</string>
     <string name="controls_map_stick">Nunchuk stick</string>
     <string name="controls_map_stick_value">Left stick</string>
     <string name="controls_map_z">Z</string>
     <string name="controls_map_z_value">Left trigger</string>
     <string name="controls_map_c">C</string>
     <string name="controls_map_c_value">Left grip</string>
-    <string name="controls_map_home">HOME</string>
-    <string name="controls_map_home_value">Left menu</string>
     <string name="controls_map_pointer">Pointer and motion</string>
     <string name="controls_map_pointer_value">Aim and move the right controller</string>
     <string name="controls_map_panel">Settings panel</string>
-    <string name="controls_map_panel_value">Click both thumbsticks</string>
+    <string name="controls_map_panel_value">Left Y</string>
 
     <!-- Audio tab -->
     <string name="section_audio">Volume</string>

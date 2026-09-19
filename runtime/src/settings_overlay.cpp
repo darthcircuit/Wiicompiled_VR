@@ -1240,7 +1240,8 @@ void DrawVrSettings() {
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip(
             "Opens these settings on a panel in front of you, in menus and races alike.\n"
-            "In the headset, clicking both thumbsticks together opens and closes it too.\n"
+            "In the headset, left Y opens and closes it too (with Gamepad VR controllers,\n"
+            "click both thumbsticks together instead).\n"
             "Aim at it and pull a trigger to change a setting; push a thumbstick to scroll.\n"
             "While it is open the game does not see the VR controllers.");
     }
@@ -1253,8 +1254,8 @@ void DrawVrSettings() {
         ImGui::SetTooltip(
             "Wii Remote + Nunchuk: the right controller is a Wii Remote, with motion and a pointer "
             "that lands where you aim on the virtual screen; the left one is the Nunchuk.\n"
-            "  Right: A = A, trigger = B, stick up/down = 1/2, stick left/right = -/+\n"
-            "  Left: stick = Nunchuk stick, trigger = Z, grip = C, menu = HOME\n"
+            "  Right: A = A, trigger = B, stick up/down = 1/2\n"
+            "  Left: stick = Nunchuk stick, trigger = Z, grip = C, X = -, menu = +, Y = settings panel\n"
             "Gamepad: both controllers are one ordinary controller, read as a GameCube pad.\n"
             "Applies immediately; the game sees the controller change as a reconnection.");
     }
@@ -1967,7 +1968,10 @@ void DrawVrSettingsPanelWindow() {
             mkw::vr::OpenXRSetSettingsPanelOpen(false);
         }
         ImGui::TextDisabled("Aim and pull a trigger to change a setting, push a thumbstick to scroll.");
-        ImGui::TextDisabled("Click both thumbsticks or press Menu to close. The game does not see the controllers meanwhile.");
+        ImGui::TextDisabled("%s to close. The game does not see the controllers meanwhile.",
+                            mkw::vr::OpenXRGetControllerMode() == mkw::vr::OpenXRControllerMode::WiiRemote
+                                ? "Press left Y or Menu"
+                                : "Click both thumbsticks or press Menu");
         ImGui::Separator();
         if (ImGui::BeginTabBar("Settings")) {
             const auto tab = [](const char* label, void (*draw)()) {

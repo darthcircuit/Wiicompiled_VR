@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // The in-headset settings panel's controller handling, tested without a
-// headset: the thumbstick chord that opens and closes it, the release latch that
-// keeps a closing press out of the game, selection, scrolling, and where a hit
-// lands on the panel's canvas.
+// headset: the button that opens and closes it in each controller mode, the
+// release latch that keeps a closing press out of the game, selection,
+// scrolling, and where a hit lands on the panel's canvas.
 
 #include "vr/openxr_settings_panel.h"
 
@@ -32,6 +32,8 @@ void CheckNear(float actual, float expected, const char* what, float tolerance =
 }
 
 constexpr float kDt = 1.0f / 90.0f;
+constexpr OpenXRControllerMode kWiiRemote = OpenXRControllerMode::WiiRemote;
+constexpr OpenXRControllerMode kGamepad = OpenXRControllerMode::Gamepad;
 
 std::array<HandInputs, 2> Released() {
     return {};
@@ -44,46 +46,80 @@ std::array<HandInputs, 2> Chord() {
     return hands;
 }
 
-void ChordOpensAndClosesOnce() {
+std::array<HandInputs, 2> LeftY() {
+    std::array<HandInputs, 2> hands{};
+    hands[0].secondary = true;
+    return hands;
+}
+
+void LeftYOpensAndClosesOnceAsAWiiRemote() {
     Controls controls;
     bool open = false;
 
+    auto right_b = Released();
+    right_b[1].secondary = true;
+    Frame frame = controls.Update(right_b, open, kDt, kWiiRemote);
+    Check(!open && !frame.withheld, "right B neither opens nor withholds");
+    frame = controls.Update(Chord(), open, kDt, kWiiRemote);
+    Check(!open && !frame.withheld, "as a Wii Remote the thumbstick chord does not open the panel");
+    controls.Update(Released(), open, kDt, kWiiRemote);
+
+    frame = controls.Update(LeftY(), open, kDt, kWiiRemote);
+    Check(open && frame.open && frame.withheld, "left Y opens the panel");
+    frame = controls.Update(LeftY(), open, kDt, kWiiRemote);
+    Check(open, "holding left Y does not toggle again");
+    frame = controls.Update(Released(), open, kDt, kWiiRemote);
+    Check(open && frame.withheld, "the panel stays open and keeps the controllers after left Y is released");
+
+    frame = controls.Update(LeftY(), open, kDt, kWiiRemote);
+    Check(!open && !frame.open, "left Y closes the panel again");
+    Check(frame.withheld, "the closing press is still withheld from the game");
+    frame = controls.Update(Released(), open, kDt, kWiiRemote);
+    Check(!frame.withheld, "the game gets the controllers back once everything is released");
+}
+
+void ChordOpensAndClosesOnceAsAGamepad() {
+    Controls controls;
+    bool open = false;
+
+    Frame frame = controls.Update(LeftY(), open, kDt, kGamepad);
+    Check(!open && !frame.withheld, "as a gamepad left Y is GameCube Y, not the panel");
     auto one = Released();
     one[0].thumbstick_click = true;
-    Frame frame = controls.Update(one, open, kDt);
+    frame = controls.Update(one, open, kDt, kGamepad);
     Check(!open && !frame.withheld, "one thumbstick click alone neither opens nor withholds");
 
-    frame = controls.Update(Chord(), open, kDt);
+    frame = controls.Update(Chord(), open, kDt, kGamepad);
     Check(open && frame.open && frame.withheld, "clicking both thumbsticks opens the panel");
-    frame = controls.Update(Chord(), open, kDt);
+    frame = controls.Update(Chord(), open, kDt, kGamepad);
     Check(open, "holding the chord does not toggle again");
-    frame = controls.Update(Released(), open, kDt);
+    frame = controls.Update(Released(), open, kDt, kGamepad);
     Check(open && frame.withheld, "the panel stays open and keeps the controllers after the chord is released");
 
-    frame = controls.Update(Chord(), open, kDt);
+    frame = controls.Update(Chord(), open, kDt, kGamepad);
     Check(!open && !frame.open, "the chord closes the panel again");
     Check(frame.withheld, "the closing chord is still withheld from the game");
-    frame = controls.Update(Released(), open, kDt);
+    frame = controls.Update(Released(), open, kDt, kGamepad);
     Check(!frame.withheld, "the game gets the controllers back once everything is released");
 }
 
 void MenuClosesAndItsPressStaysOutOfTheGame() {
     Controls controls;
     bool open = false;
-    controls.Update(Chord(), open, kDt);
-    controls.Update(Released(), open, kDt);
+    controls.Update(LeftY(), open, kDt, kWiiRemote);
+    controls.Update(Released(), open, kDt, kWiiRemote);
 
     auto menu = Released();
     menu[0].menu = true;
-    Frame frame = controls.Update(menu, open, kDt);
+    Frame frame = controls.Update(menu, open, kDt, kWiiRemote);
     Check(!open, "the left menu button closes an open panel");
-    frame = controls.Update(menu, open, kDt);
-    Check(frame.withheld, "HOME held across the close does not reach the game");
+    frame = controls.Update(menu, open, kDt, kWiiRemote);
+    Check(frame.withheld, "+ held across the close does not reach the game");
     Check(!open, "a held menu button does not reopen the panel");
-    frame = controls.Update(Released(), open, kDt);
+    frame = controls.Update(Released(), open, kDt, kWiiRemote);
     Check(!frame.withheld, "released, the controllers go back to the game");
 
-    frame = controls.Update(menu, open, kDt);
+    frame = controls.Update(menu, open, kDt, kWiiRemote);
     Check(!open && !frame.withheld, "with the panel closed the menu button is the game's");
 }
 
@@ -93,49 +129,49 @@ void SelectWaitsForAReleaseAndFollowsTheTrigger() {
     // Opened from the settings bar while a trigger is held for the game.
     auto trigger = Released();
     trigger[1].trigger = 1.0f;
-    controls.Update(trigger, open, kDt);
+    controls.Update(trigger, open, kDt, kWiiRemote);
     open = true;
-    Frame frame = controls.Update(trigger, open, kDt);
+    Frame frame = controls.Update(trigger, open, kDt, kWiiRemote);
     Check(frame.open && !frame.select, "a trigger held from before the panel opened does not click");
-    frame = controls.Update(Released(), open, kDt);
+    frame = controls.Update(Released(), open, kDt, kWiiRemote);
     Check(!frame.select, "nothing held, nothing selected");
-    frame = controls.Update(trigger, open, kDt);
+    frame = controls.Update(trigger, open, kDt, kWiiRemote);
     Check(frame.select && frame.pointing_hand == 1, "a fresh right trigger selects and points with the right hand");
 
     auto left = Released();
     left[0].trigger = 0.9f;
-    controls.Update(Released(), open, kDt);
-    frame = controls.Update(left, open, kDt);
+    controls.Update(Released(), open, kDt, kWiiRemote);
+    frame = controls.Update(left, open, kDt, kWiiRemote);
     Check(frame.select && frame.pointing_hand == 0, "pulling the left trigger hands the pointer to the left hand");
 
     auto button = Released();
     button[1].primary = true;
-    controls.Update(Released(), open, kDt);
-    frame = controls.Update(button, open, kDt);
+    controls.Update(Released(), open, kDt, kWiiRemote);
+    frame = controls.Update(button, open, kDt, kWiiRemote);
     Check(frame.select && frame.pointing_hand == 0, "A selects without moving the pointer to another hand");
 }
 
 void ThumbstickScrolls() {
     Controls controls;
     bool open = true;
-    controls.Update(Released(), open, kDt);
+    controls.Update(Released(), open, kDt, kWiiRemote);
 
     auto small = Released();
     small[1].stick_y = 0.2f;
-    Check(controls.Update(small, open, kDt).wheel == 0.0f, "a resting thumbstick does not scroll");
+    Check(controls.Update(small, open, kDt, kWiiRemote).wheel == 0.0f, "a resting thumbstick does not scroll");
 
     auto up = Released();
     up[1].stick_y = 1.0f;
-    CheckNear(controls.Update(up, open, 0.5f).wheel, kScrollStepsPerSecond * 0.1f,
+    CheckNear(controls.Update(up, open, 0.5f, kWiiRemote).wheel, kScrollStepsPerSecond * 0.1f,
               "full deflection scrolls up at the full rate, with a long frame clamped");
     auto down = Released();
     down[0].stick_y = -1.0f;
     down[1].stick_y = 0.3f;
-    Check(controls.Update(down, open, kDt).wheel < 0.0f, "the more deflected stick decides the direction");
+    Check(controls.Update(down, open, kDt, kWiiRemote).wheel < 0.0f, "the more deflected stick decides the direction");
 
     bool closed = false;
     Controls idle;
-    Check(idle.Update(up, closed, kDt).wheel == 0.0f, "a closed panel does not scroll");
+    Check(idle.Update(up, closed, kDt, kWiiRemote).wheel == 0.0f, "a closed panel does not scroll");
 }
 
 void HitsMapOntoTheCanvas() {
@@ -175,7 +211,8 @@ void BridgeAccumulatesWheelUntilTaken() {
 } // namespace
 
 int main() {
-    ChordOpensAndClosesOnce();
+    LeftYOpensAndClosesOnceAsAWiiRemote();
+    ChordOpensAndClosesOnceAsAGamepad();
     MenuClosesAndItsPressStaysOutOfTheGame();
     SelectWaitsForAReleaseAndFollowsTheTrigger();
     ThumbstickScrolls();

@@ -247,24 +247,33 @@ void TestButtons() {
     Check(RemoteButtons(left, right) == kButtonOne, "right stick up is 1");
     right.stick_y = -0.9f;
     Check(RemoteButtons(left, right) == kButtonTwo, "right stick down is 2");
+    right.stick_y = 0.3f;
+    Check(RemoteButtons(left, right) == 0, "a light push is no press");
     right.stick_y = 0.0f;
     right.stick_x = -0.9f;
-    Check(RemoteButtons(left, right) == kButtonMinus, "right stick left is -");
+    Check(RemoteButtons(left, right) == 0, "right stick left is unbound");
     right.stick_x = 0.9f;
-    Check(RemoteButtons(left, right) == kButtonPlus, "right stick right is +");
-    right.stick_x = 0.3f;
-    Check(RemoteButtons(left, right) == 0, "a light push is no press");
+    Check(RemoteButtons(left, right) == 0, "right stick right is unbound");
 
     right = {};
+    left.primary = true;
     left.menu = true;
+    Check(RemoteButtons(left, right) == (kButtonMinus | kButtonPlus), "left X and menu are - and +");
+    left = {};
     left.squeeze = 0.8f;
     left.trigger = 0.7f;
-    Check(RemoteButtons(left, right) == (kButtonHome | kButtonC | kButtonZ), "left menu, grip, trigger are HOME, C, Z");
-    // Left X and Y have no Wii button in the profile.
+    Check(RemoteButtons(left, right) == (kButtonC | kButtonZ), "left grip and trigger are C and Z");
+    // Left Y is the settings panel's button, and nothing presses HOME.
     left = {};
-    left.primary = true;
     left.secondary = true;
-    Check(RemoteButtons(left, right) == 0, "left X/Y are unbound");
+    right.secondary = true;
+    right.thumbstick_click = true;
+    left.thumbstick_click = true;
+    Check(RemoteButtons(left, right) == 0, "left Y, right B and the stick clicks are unbound");
+    left = {};
+    right = {};
+    left.menu = true;
+    Check((RemoteButtons(left, right) & kButtonHome) == 0, "left menu is no longer HOME");
 
     left.stick_x = 1.0f;
     left.stick_y = 1.0f;

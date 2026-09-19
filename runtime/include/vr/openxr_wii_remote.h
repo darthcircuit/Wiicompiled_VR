@@ -337,10 +337,12 @@ struct HandInputs {
     float stick_y = 0.0f; // +up
 };
 
-// DolphinXR's default "OpenXR Wii Remote" profile (Data/Sys/Profiles/Wiimote):
+// Adapted from DolphinXR's default "OpenXR Wii Remote" profile
+// (Data/Sys/Profiles/Wiimote):
 //   right A -> A, right trigger -> B, right stick up/down -> 1/2,
-//   right stick left/right -> -/+, left menu -> HOME,
+//   left X -> -, left menu -> +,
 //   left grip -> C, left trigger -> Z, left stick -> Nunchuk stick.
+// HOME has no button; left Y opens the settings panel (openxr_settings_panel.h).
 inline uint32_t RemoteButtons(const HandInputs& left, const HandInputs& right) noexcept {
     uint32_t hold = 0;
     const auto press = [&hold](bool held, uint32_t bit) {
@@ -352,9 +354,8 @@ inline uint32_t RemoteButtons(const HandInputs& left, const HandInputs& right) n
     press(right.trigger > kPressThreshold, kButtonB);
     press(right.stick_y > kPressThreshold, kButtonOne);
     press(right.stick_y < -kPressThreshold, kButtonTwo);
-    press(right.stick_x < -kPressThreshold, kButtonMinus);
-    press(right.stick_x > kPressThreshold, kButtonPlus);
-    press(left.menu, kButtonHome);
+    press(left.primary, kButtonMinus);
+    press(left.menu, kButtonPlus);
     press(left.squeeze > kPressThreshold, kButtonC);
     press(left.trigger > kPressThreshold, kButtonZ);
     return hold;
