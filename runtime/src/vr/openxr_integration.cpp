@@ -802,6 +802,19 @@ private:
             const uint32_t interpolation_target = frame_interpolation_fps_.load(std::memory_order_relaxed);
             SetInterpolationActive(immersive && FrameInterpolationAvailable() && interpolation_target != 0);
 
+#if !defined(_WIN32)
+            // Standalone (Vulkan) backend: with interpolation off, the eyes are rendered before
+            // the compositor frame that shows them is begun, so that frame never waits for a
+            // game frame. Interpolation keeps the frame-first order below: it renders for the
+            // frame's own predicted display time.
+            if (!aurora_get_stereo_frame_interpolation()) {
+                if (!RenderFirstCycle(presentation, policy, immersive, consecutive_skips,
+                                      immersive_submission_logged)) {
+                    fatal = true;
+                }
+                continue;
+            }
+#endif
             OpenXRBackendFrame frame{};
             const OpenXRBeginStatus begin = backend_->BeginFrame(presentation, frame);
             if (begin == OpenXRBeginStatus::SessionNotRunning) {
@@ -960,6 +973,164 @@ private:
         }
         ShutdownOrRetainGraphicsObjects();
     }
+
+#if !defined(_WIN32)
+    // One compositor cycle on the retained layer, with no frame left active. False on a fatal
+    // backend or runtime failure (the error is recorded).
+    bool KeepAlive() {
+        const OpenXRBeginStatus status = backend_->KeepAliveCycle();
+        if (status == OpenXRBeginStatus::SessionNotRunning) {
+            MkwVRPolicySetSessionActive(false);
+            return true;
+        }
+        if (status == OpenXRBeginStatus::ExitRequested) {
+            SetError("OpenXR runtime requested session exit; continuing on the mirror output");
+            return false;
+        }
+        if (status == OpenXRBeginStatus::Error) {
+            SetError(backend_->LastError());
+            return false;
+        }
+        return true;
+    }
+
+    // Render-first pacing (see OpenXRVulkanBackend::PreparePacket). Returns false on a fatal
+    // failure; a cycle that ends without a layer returns true and the loop tries again.
+    bool RenderFirstCycle(OpenXRPresentation presentation, const MkwVRPolicySnapshot& policy, bool immersive,
+                          uint32_t& consecutive_skips, bool& immersive_submission_logged) {
+        OpenXRBackendFrame packet{};
+        const OpenXRBeginStatus prepared = backend_->PreparePacket(presentation, packet);
+        if (prepared == OpenXRBeginStatus::SessionNotRunning) {
+            MkwVRPolicySetSessionActive(false);
+            return true;
+        }
+        if (prepared == OpenXRBeginStatus::ExitRequested) {
+            SetError("OpenXR runtime requested session exit; continuing on the mirror output");
+            return false;
+        }
+        if (prepared == OpenXRBeginStatus::Error) {
+            SetError(backend_->LastError());
+            return false;
+        }
+        // The head pose this packet was located with places the screens and aims the pointer.
+        ServiceRecenterRequest();
+        UpdateVirtualScreenPose(packet);
+        if (input_ != nullptr) {
+            input_->Sync(packet.xr_frame.predicted_display_time, PointerScreen(packet, policy, immersive),
+                         SettingsPanelScreen(packet, policy, immersive));
+        }
+        if (!packet.expects_gpu_submission) {
+            // Nothing to render (no rendering requested or no tracking): keep the compositor fed.
+            return KeepAlive();
+        }
+        {
+            std::lock_guard lock(published_mutex_);
+            BuildPublishedFrame(packet, immersive, policy.EffectiveUnitsPerMeter(), policy.content_tag);
+            diagnostics::OnPacketPublished();
+            published_.store(&published_frame_, std::memory_order_release);
+        }
+        aurora_notify_stereo_frame();
+
+        // Aurora renders the eyes at its next seal. Meanwhile the compositor keeps showing the
+        // retained layer; a 50 ms stall repeats it explicitly and withdraws the packet.
+        OpenXRSubmissionStatus submission = OpenXRSubmissionStatus::Timeout;
+        bool canceled_before_encode = false;
+        const auto cancel_after = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+        while (!stop_.load(std::memory_order_acquire) && submission == OpenXRSubmissionStatus::Timeout) {
+            submission = backend_->WaitForSubmission(packet, 50);
+            if (submission == OpenXRSubmissionStatus::Timeout) {
+                if (std::chrono::steady_clock::now() >= cancel_after) {
+                    WithdrawPublishedFrame();
+                    canceled_before_encode = backend_->TryCancelPendingPacket(packet);
+                    if (canceled_before_encode) {
+                        diagnostics::OnPacketCanceled();
+                        break;
+                    }
+                }
+                diagnostics::OnKeepaliveRepeat();
+                if (!KeepAlive()) {
+                    return false;
+                }
+            }
+        }
+        WithdrawPublishedFrame();
+        if (stop_.load(std::memory_order_acquire) || canceled_before_encode ||
+            submission == OpenXRSubmissionStatus::ShuttingDown) {
+            return true;
+        }
+        if (submission != OpenXRSubmissionStatus::Success) {
+            // Nothing reached the shared buffers (Skipped) or Aurora failed after queuing GPU
+            // work (Failed): same accounting as the frame-first path, on a keep-alive cycle.
+            diagnostics::OnSubmission(false);
+            if (submission == OpenXRSubmissionStatus::Failed) {
+                SetError(std::string("Aurora's ") + kGraphicsBackendName +
+                         " stereo copy failed; continuing on the mirror output");
+                return false;
+            }
+            ++consecutive_skips;
+            if (consecutive_skips == 1 || consecutive_skips % 60 == 0) {
+                RT_LOG(RT_TAG_RUNTIME) << "OpenXR: eye copy skipped (" << consecutive_skips
+                                       << " in a row): " << backend_->LastError() << std::endl;
+            }
+            if (consecutive_skips >= kMaxConsecutiveSkips) {
+                SetError(std::string("Aurora's ") + kGraphicsBackendName +
+                         " stereo copy keeps failing; continuing on the mirror output");
+                return false;
+            }
+            return KeepAlive();
+        }
+
+        // The eyes are in the shared buffers: begin the compositor frame, copy, end.
+        OpenXRBackendFrame frame{};
+        const OpenXRBeginStatus begin = backend_->BeginFrameForPacket(packet, frame);
+        if (begin == OpenXRBeginStatus::SessionNotRunning) {
+            MkwVRPolicySetSessionActive(false);
+            return true;
+        }
+        if (begin == OpenXRBeginStatus::ExitRequested) {
+            SetError("OpenXR runtime requested session exit; continuing on the mirror output");
+            return false;
+        }
+        if (begin == OpenXRBeginStatus::Error) {
+            SetError(backend_->LastError());
+            return false;
+        }
+        UpdateFrameTiming(frame.xr_frame);
+        if (diagnostics::Enabled()) {
+            NoteFrameDiagnostics(frame, immersive);
+        }
+        const OpenXRSubmissionStatus copy =
+            frame.expects_gpu_submission ? backend_->CopyRenderedEyes(frame) : OpenXRSubmissionStatus::Skipped;
+        const bool submit = copy == OpenXRSubmissionStatus::Success;
+        diagnostics::OnSubmission(submit);
+        if (!backend_->FinishFrame(frame, submit)) {
+            SetError(backend_->LastError());
+            return false;
+        }
+        if (copy == OpenXRSubmissionStatus::Failed) {
+            SetError(std::string("Aurora's ") + kGraphicsBackendName +
+                     " stereo copy failed; continuing on the mirror output");
+            return false;
+        }
+        if (!submit) {
+            ++consecutive_skips;
+            if (consecutive_skips == 1 || consecutive_skips % 60 == 0) {
+                RT_LOG(RT_TAG_RUNTIME) << "OpenXR: eye copy skipped (" << consecutive_skips
+                                       << " in a row): " << backend_->LastError() << std::endl;
+            }
+            return consecutive_skips < kMaxConsecutiveSkips;
+        }
+        consecutive_skips = 0;
+        ++timing_submissions_;
+        if (immersive && !immersive_submission_logged) {
+            immersive_submission_logged = true;
+            RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] first immersive packet consumed and submitted as "
+                                      "an OpenXR projection layer"
+                                   << std::endl;
+        }
+        return true;
+    }
+#endif
 
     void BuildPublishedFrame(const OpenXRBackendFrame& source, bool immersive,
                              float units_per_meter, uint64_t content_tag) noexcept {

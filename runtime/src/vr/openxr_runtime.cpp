@@ -741,6 +741,19 @@ bool OpenXRRuntime::LocateViews(OpenXRFrame& frame) {
         return Fail(XR_ERROR_CALL_ORDER_INVALID, "xrLocateViews",
                     "frame token is stale or xrBeginFrame was not called");
     }
+    return LocateViewsForFrame(frame);
+}
+
+bool OpenXRRuntime::LocateViewsAt(XrTime display_time, OpenXRFrame& frame) {
+    ClearError();
+    if (!HasSession() || !m_session_running) {
+        return Fail(XR_ERROR_SESSION_NOT_RUNNING, "xrLocateViews", "the session is not running");
+    }
+    frame.predicted_display_time = display_time;
+    return LocateViewsForFrame(frame);
+}
+
+bool OpenXRRuntime::LocateViewsForFrame(OpenXRFrame& frame) {
     frame.views_valid = false;
     frame.view_state_flags = 0;
     if (!frame.should_render) {

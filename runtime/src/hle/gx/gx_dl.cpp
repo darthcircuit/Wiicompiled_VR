@@ -28,9 +28,13 @@ using GxCpDecode::SameVtxAttrFmt;
 // Small display lists dominate the in-race call count. Cache them as well, but
 // cap both individual entries and aggregate copied command bytes so malformed
 // guest input cannot turn this optimization into unbounded host allocation.
-constexpr uint32_t kDlScanCacheMaxEntryBytes = 64u * 1024u;
+// The entry cap was 64 KiB: a list above it was never cached and its index
+// scan ran on every call, which on a Retro Rewind track with large shape lists
+// was 11% of the game thread on a Quest 3. Only lists that need flattening
+// store a copy, and the aggregate cap still bounds those.
+constexpr uint32_t kDlScanCacheMaxEntryBytes = 4u * 1024u * 1024u;
 constexpr size_t kDlScanCacheMaxEntries = 8192;
-constexpr size_t kDlScanCacheMaxStoredBytes = 8u * 1024u * 1024u;
+constexpr size_t kDlScanCacheMaxStoredBytes = 32u * 1024u * 1024u;
 
 // Display-list write tracking (audit F6a): re-digesting every list every call is the
 // costliest step of GX__CallDisplayList, and wasted on BRRES shape lists that are written

@@ -153,6 +153,11 @@ public:
     OpenXRFrameStatus WaitFrame(OpenXRFrame& frame);
     bool BeginFrame(const OpenXRFrame& frame);
     bool LocateViews(OpenXRFrame& frame);
+    // Locates the views for `display_time` outside the frame protocol, for a
+    // packet whose eyes are rendered before the compositor frame that will show
+    // them is begun (the standalone backend's render-first pacing). Fills the
+    // frame's display time, views, flags and validity; requires a running session.
+    bool LocateViewsAt(XrTime display_time, OpenXRFrame& frame);
     bool EndFrame(
         const OpenXRFrame& frame,
         const XrCompositionLayerBaseHeader* const* layers,
@@ -224,6 +229,7 @@ private:
     bool EnumerateSwapchainFormats();
     bool HandleSessionStateChanged(const XrEventDataSessionStateChanged& event);
     bool IsFrameTokenCurrent(const OpenXRFrame& frame, FramePhase expected) const;
+    bool LocateViewsForFrame(OpenXRFrame& frame);
     void ResetFrameState();
     void DestroyReferenceSpaces();
     void ResetSessionState();

@@ -482,6 +482,139 @@ public:
         return true;
     }
 
+    // ---- Render-first pacing (see openxr_vulkan.h) ---------------------------------------------
+
+    void DiscardPendingReleasesLocked() noexcept {
+        if (!have_pending_releases_) {
+            return;
+        }
+        for (auto& release : pending_releases_) {
+            CloseFd(release.releaseFenceFd);
+            release = {-1, VK_IMAGE_LAYOUT_UNDEFINED};
+        }
+        have_pending_releases_ = false;
+    }
+
+    OpenXRBeginStatus PreparePacket(const OpenXRPresentation& presentation, OpenXRBackendFrame& packet) {
+        packet = {};
+        packet.presentation = presentation;
+        if (!bound_ || runtime_ == nullptr) {
+            Fail("PreparePacket called before the Vulkan backend was bound");
+            return OpenXRBeginStatus::Error;
+        }
+        if (frame_active_) {
+            Fail("PreparePacket called while an OpenXR frame is active");
+            return OpenXRBeginStatus::Error;
+        }
+        if (runtime_->ShouldExit()) {
+            return OpenXRBeginStatus::ExitRequested;
+        }
+        if (!runtime_->IsSessionRunning()) {
+            return OpenXRBeginStatus::SessionNotRunning;
+        }
+        if (last_display_period_ <= 0) {
+            // No display timing yet: one compositor cycle learns it.
+            const OpenXRBeginStatus primed = KeepAliveCycle();
+            if (primed != OpenXRBeginStatus::Ready) {
+                return primed;
+            }
+        }
+        packet.xr_frame.serial = next_packet_serial_++;
+        // The eyes are ready after at most one game frame plus the encode and show at the first
+        // display slot after that: two periods past the last predicted display time.
+        packet.xr_frame.predicted_display_time = last_display_time_ + 2 * last_display_period_;
+        packet.xr_frame.predicted_display_period = last_display_period_;
+        packet.xr_frame.should_render = last_should_render_;
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            packet.render_width[eye] = eye_swapchains_[eye].width;
+            packet.render_height[eye] = eye_swapchains_[eye].height;
+        }
+        if (!packet.xr_frame.should_render) {
+            return OpenXRBeginStatus::Ready;
+        }
+        if (!runtime_->LocateViewsAt(packet.xr_frame.predicted_display_time, packet.xr_frame)) {
+            Fail("xrLocateViews failed for a packet");
+            return OpenXRBeginStatus::Error;
+        }
+        if (!packet.xr_frame.views_valid) {
+            return OpenXRBeginStatus::Ready;
+        }
+
+        const uint32_t target_count =
+            presentation.mode == OpenXRFrameMode::VirtualScreen ? 1u : kOpenXREyeCount;
+        if (target_count == 1) {
+            packet.render_width[1] = packet.render_width[0];
+            packet.render_height[1] = packet.render_height[0];
+        }
+        std::array<AuroraVulkanStereoTarget, kOpenXREyeCount> targets{};
+        const uint32_t slot = next_slot_;
+        {
+            std::lock_guard lock(vk_mutex_);
+            DiscardPendingReleasesLocked();
+            for (uint32_t eye = 0; eye < target_count; ++eye) {
+                EyeSlot& eye_slot = slots_[eye][slot];
+                targets[eye] = {
+                    eye_slot.buffer,
+                    eye_slot.width,
+                    eye_slot.height,
+                    static_cast<int64_t>(aurora_format_),
+                    DupFd(eye_slot.pending_acquire_fd),
+                    static_cast<int32_t>(eye_slot.layout),
+                };
+            }
+            // The compositor images are acquired by BeginFrameForPacket, once the eyes exist.
+            pending_copy_ = {packet.xr_frame.serial, slot, target_count, {}};
+            deferred_copy_ = true;
+        }
+        {
+            std::lock_guard lock(submission_mutex_);
+            awaiting_token_ = packet.xr_frame.serial;
+            submitted_token_ = 0;
+            submission_arrived_ = false;
+            submission_success_ = false;
+            submission_unsafe_ = false;
+        }
+        if (!aurora_vulkan_set_stereo_targets(packet.xr_frame.serial, targets.data(), target_count)) {
+            for (uint32_t eye = 0; eye < target_count; ++eye) {
+                CloseFd(targets[eye].acquireFenceFd);
+            }
+            {
+                std::lock_guard lock(submission_mutex_);
+                awaiting_token_ = 0;
+            }
+            {
+                std::lock_guard lock(vk_mutex_);
+                deferred_copy_ = false;
+            }
+            Fail("Aurora rejected the AHardwareBuffer stereo targets");
+            return OpenXRBeginStatus::Error;
+        }
+        next_slot_ = (slot + 1) % kSlotCount;
+        packet.expects_gpu_submission = true;
+        return OpenXRBeginStatus::Ready;
+    }
+
+    bool TryCancelPendingPacket(OpenXRBackendFrame& packet) {
+        if (!packet.expects_gpu_submission || !aurora_vulkan_cancel_stereo_targets(packet.xr_frame.serial)) {
+            return false;
+        }
+        {
+            std::lock_guard lock(submission_mutex_);
+            awaiting_token_ = 0;
+            submitted_token_ = 0;
+            submission_arrived_ = false;
+            submission_success_ = false;
+            submission_unsafe_ = false;
+        }
+        {
+            std::lock_guard lock(vk_mutex_);
+            DiscardPendingReleasesLocked();
+            deferred_copy_ = false;
+        }
+        packet.expects_gpu_submission = false;
+        return true;
+    }
+
     bool FinishFrame(OpenXRBackendFrame& frame, bool submit_layer) {
         if (!frame_active_ || runtime_ == nullptr ||
             frame.xr_frame.serial != active_frame_serial_) {
@@ -532,6 +665,12 @@ public:
         active_frame_ = {};
         frame.expects_gpu_submission = false;
         {
+            // Eyes rendered for a packet that this frame did not copy are dropped with it.
+            std::lock_guard lock(vk_mutex_);
+            DiscardPendingReleasesLocked();
+            deferred_copy_ = false;
+        }
+        {
             std::lock_guard lock(submission_mutex_);
             awaiting_token_ = 0;
             submission_arrived_ = false;
@@ -539,6 +678,137 @@ public:
             submission_unsafe_ = false;
         }
         return release_ok && end_ok;
+    }
+
+    OpenXRBeginStatus BeginFrameForPacket(const OpenXRBackendFrame& packet, OpenXRBackendFrame& frame) {
+        frame = {};
+        frame.presentation = packet.presentation;
+        frame.render_width = packet.render_width;
+        frame.render_height = packet.render_height;
+        if (!bound_ || runtime_ == nullptr) {
+            Fail("BeginFrameForPacket called before the Vulkan backend was bound");
+            return OpenXRBeginStatus::Error;
+        }
+        if (frame_active_) {
+            Fail("BeginFrameForPacket called while another OpenXR frame is active");
+            return OpenXRBeginStatus::Error;
+        }
+        const OpenXRFrameStatus status = runtime_->WaitFrame(frame.xr_frame);
+        if (status != OpenXRFrameStatus::Ready) {
+            if (status == OpenXRFrameStatus::Error) {
+                Fail(BeginStatusOperation(status));
+            }
+            return status == OpenXRFrameStatus::SessionNotRunning ? OpenXRBeginStatus::SessionNotRunning
+                   : status == OpenXRFrameStatus::ExitRequested  ? OpenXRBeginStatus::ExitRequested
+                                                                  : OpenXRBeginStatus::Error;
+        }
+        NoteDisplayTiming(frame.xr_frame);
+        if (!runtime_->BeginFrame(frame.xr_frame)) {
+            Fail("xrBeginFrame failed");
+            return OpenXRBeginStatus::Error;
+        }
+        frame_active_ = true;
+        active_frame_serial_ = frame.xr_frame.serial;
+        render_session_serial_ = runtime_->SessionRunSerial();
+        render_space_serial_ = runtime_->LastReferenceSpaceChange().serial;
+        // The layer shows the eyes as they were rendered: it carries the packet's located views.
+        frame.xr_frame.views = packet.xr_frame.views;
+        frame.xr_frame.view_state_flags = packet.xr_frame.view_state_flags;
+        frame.xr_frame.views_valid = packet.xr_frame.views_valid;
+        active_frame_ = frame.xr_frame;
+        frame.expects_gpu_submission = packet.expects_gpu_submission;
+        if (!frame.xr_frame.should_render || !frame.expects_gpu_submission || !frame.xr_frame.views_valid) {
+            // No swapchain image is acquired for this frame, so the rendered eyes cannot be
+            // copied; FinishFrame drops them with the frame.
+            frame.expects_gpu_submission = false;
+            return OpenXRBeginStatus::Ready;
+        }
+
+        const uint32_t target_count =
+            presentation_target_count(frame.presentation);
+        const diagnostics::Stopwatch acquire_timer;
+        for (uint32_t eye = 0; eye < target_count; ++eye) {
+            if (!AcquireSwapchain(eye_swapchains_[eye])) {
+                ReleaseAcquiredSwapchains();
+                EndActiveFrameWithoutLayers(frame.xr_frame);
+                return OpenXRBeginStatus::Error;
+            }
+        }
+        diagnostics::OnSwapchainAcquire(acquire_timer);
+        {
+            std::lock_guard lock(vk_mutex_);
+            for (uint32_t eye = 0; eye < target_count; ++eye) {
+                pending_copy_.swapchain_images[eye] =
+                    eye_swapchains_[eye].images[eye_swapchains_[eye].acquired_index].image;
+            }
+        }
+        return OpenXRBeginStatus::Ready;
+    }
+
+    OpenXRSubmissionStatus CopyRenderedEyes(const OpenXRBackendFrame& frame) {
+        CopyOutcome outcome = CopyOutcome::Skipped;
+        {
+            std::lock_guard lock(vk_mutex_);
+            if (!frame_active_ || !have_pending_releases_ || !deferred_copy_) {
+                return OpenXRSubmissionStatus::Skipped;
+            }
+            outcome = RecordAndSubmitCopyLocked(pending_releases_);
+            have_pending_releases_ = false;
+            deferred_copy_ = false;
+        }
+        {
+            // FinishFrame judges the queue's safety by this frame's token.
+            std::lock_guard lock(submission_mutex_);
+            submitted_token_ = frame.xr_frame.serial;
+            submission_arrived_ = true;
+            submission_success_ = outcome == CopyOutcome::Submitted;
+            submission_unsafe_ = outcome == CopyOutcome::Unsafe;
+        }
+        return outcome == CopyOutcome::Submitted ? OpenXRSubmissionStatus::Success
+               : outcome == CopyOutcome::Unsafe  ? OpenXRSubmissionStatus::Failed
+                                                 : OpenXRSubmissionStatus::Skipped;
+    }
+
+    OpenXRBeginStatus KeepAliveCycle() {
+        if (!bound_ || runtime_ == nullptr || frame_active_) {
+            Fail("KeepAliveCycle called with a frame active or before binding");
+            return OpenXRBeginStatus::Error;
+        }
+        OpenXRFrame cycle{};
+        const OpenXRFrameStatus status = runtime_->WaitFrame(cycle);
+        if (status != OpenXRFrameStatus::Ready) {
+            if (status == OpenXRFrameStatus::Error) {
+                Fail(BeginStatusOperation(status));
+            }
+            return status == OpenXRFrameStatus::SessionNotRunning ? OpenXRBeginStatus::SessionNotRunning
+                   : status == OpenXRFrameStatus::ExitRequested  ? OpenXRBeginStatus::ExitRequested
+                                                                  : OpenXRBeginStatus::Error;
+        }
+        NoteDisplayTiming(cycle);
+        if (!runtime_->BeginFrame(cycle)) {
+            Fail("xrBeginFrame failed for a keep-alive cycle");
+            return OpenXRBeginStatus::Error;
+        }
+        active_frame_ = cycle;
+        frame_active_ = true;
+        const bool end_ok = EndRetainedFrame(false);
+        frame_active_ = false;
+        active_frame_ = {};
+        if (!end_ok) {
+            Fail("OpenXR could not resubmit the retained frame");
+            return OpenXRBeginStatus::Error;
+        }
+        return OpenXRBeginStatus::Ready;
+    }
+
+    void NoteDisplayTiming(const OpenXRFrame& frame) noexcept {
+        last_display_time_ = frame.predicted_display_time;
+        last_display_period_ = frame.predicted_display_period;
+        last_should_render_ = frame.should_render;
+    }
+
+    static uint32_t presentation_target_count(const OpenXRPresentation& presentation) noexcept {
+        return presentation.mode == OpenXRFrameMode::VirtualScreen ? 1u : kOpenXREyeCount;
     }
 
     bool RepeatFrame(const OpenXRBackendFrame& frame) {
@@ -1082,6 +1352,7 @@ private:
 
     void DestroySlots() {
         std::lock_guard lock(vk_mutex_);
+        DiscardPendingReleasesLocked();
         if (vk_device_ != VK_NULL_HANDLE) {
             vkDeviceWaitIdle(vk_device_);
         }
@@ -1136,7 +1407,16 @@ private:
                 expected = token == self->awaiting_token_ && token == self->pending_copy_.token;
             }
             if (expected && success && release_count >= self->pending_copy_.target_count) {
-                outcome = self->RecordAndSubmitCopyLocked(owned);
+                if (self->deferred_copy_) {
+                    // No compositor frame is open yet: keep Dawn's release fences for
+                    // CopyRenderedEyes, which records the copy once the frame is begun.
+                    self->DiscardPendingReleasesLocked();
+                    self->pending_releases_ = owned;
+                    self->have_pending_releases_ = true;
+                    outcome = CopyOutcome::Submitted;
+                } else {
+                    outcome = self->RecordAndSubmitCopyLocked(owned);
+                }
             } else {
                 for (auto& release : owned) {
                     CloseFd(release.releaseFenceFd);
@@ -1594,6 +1874,15 @@ private:
     uint32_t next_submission_ = 0;
     uint32_t next_slot_ = 0;
     PendingCopy pending_copy_{};
+    // Render-first pacing (PreparePacket): Aurora's release fences arrive while no compositor
+    // frame is active, so the copy is recorded later by CopyRenderedEyes.
+    bool deferred_copy_ = false;
+    std::array<AuroraVulkanStereoRelease, kOpenXREyeCount> pending_releases_{};
+    bool have_pending_releases_ = false;
+    uint64_t next_packet_serial_ = 1ull << 40; // never collides with the runtime's frame serials
+    XrTime last_display_time_ = 0;
+    XrDuration last_display_period_ = 0;
+    bool last_should_render_ = false;
 
     std::mutex submission_mutex_;
     std::condition_variable submission_cv_;
@@ -1638,6 +1927,21 @@ OpenXRSubmissionStatus OpenXRVulkanBackend::WaitForSubmission(const OpenXRBacken
                                                               uint32_t timeout_ms) {
     return m_impl->WaitForSubmission(frame, timeout_ms);
 }
+OpenXRBeginStatus OpenXRVulkanBackend::PreparePacket(const OpenXRPresentation& presentation,
+                                                     OpenXRBackendFrame& packet) {
+    return m_impl->PreparePacket(presentation, packet);
+}
+bool OpenXRVulkanBackend::TryCancelPendingPacket(OpenXRBackendFrame& packet) {
+    return m_impl->TryCancelPendingPacket(packet);
+}
+OpenXRBeginStatus OpenXRVulkanBackend::BeginFrameForPacket(const OpenXRBackendFrame& packet,
+                                                           OpenXRBackendFrame& frame) {
+    return m_impl->BeginFrameForPacket(packet, frame);
+}
+OpenXRSubmissionStatus OpenXRVulkanBackend::CopyRenderedEyes(const OpenXRBackendFrame& frame) {
+    return m_impl->CopyRenderedEyes(frame);
+}
+OpenXRBeginStatus OpenXRVulkanBackend::KeepAliveCycle() { return m_impl->KeepAliveCycle(); }
 
 bool OpenXRVulkanBackend::TryCancelPendingFrame(OpenXRBackendFrame& frame) {
     return m_impl->TryCancelPendingFrame(frame);

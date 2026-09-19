@@ -320,6 +320,19 @@ short-lived immutable stereo packet. Each sealed GX frame and immersive packet c
 policy-generation tag; a mismatch is rendered in mono and the acquired XR frame is canceled, so an
 asynchronous menu/race transition cannot replay race transforms over unsafe content.
 
+With interpolation off, the standalone (Vulkan) backend paces render-first: the pacing thread
+locates the views for an estimated display time (two periods past the last one the compositor
+predicted), hands Aurora the packet and its shared-buffer targets with no compositor frame open,
+and waits for Aurora to render the eyes at its next seal, repeating the retained layer if that
+takes more than 50 ms. Only then does it call xrWaitFrame and xrBeginFrame, copy the eyes into the
+freshly acquired swapchain images and end the frame with the packet's render poses. A headset
+frame therefore stays open for the copy alone instead of for the next 60 Hz game frame plus the
+whole encode, which on a 72 or 90 Hz display used to make every second cycle span two display
+slots (about 45 headset frames per second while the game rendered 60). The compositor reprojects
+the rendered pose to the frame it lands in. The D3D12 backend keeps the frame-first order below,
+as does interpolation on either backend, since interpolation renders for the frame's own
+predicted display time.
+
 With VR interpolation enabled, Aurora retains each sealed race's command stream and matched
 previous/current transform uniforms. New OpenXR packets wake the frame worker between game
 frames. It interpolates at the requested display time, then applies that packet's head pose and

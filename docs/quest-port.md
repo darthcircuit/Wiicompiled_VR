@@ -661,12 +661,31 @@ stereo frame cost 13.2 ms, of which the native render was 5.7 ms, the eyes 3.5
 and 3.8, copies and gaps 0.4. That native render is a 1280x720 image nobody
 sees during an immersive race, so it now stops after the last pass whose EFB
 copy the eyes sample: `mono` fell to 0.15 ms and a Luigi Circuit start at 0.5
-renders in 5.5 to 10 ms of GPU per frame. What remains is the headset pacing:
-with the display at 72 or 90 Hz, each headset frame stays open for the next
-60 Hz game frame plus the whole encode (`open` 16 ms in the pacing summary),
-so cycles span one to two display slots and the headset gets 40 to 60 frames
-per second while the game renders 60. Reworking that pacing (encode the newest
-sealed frame at once, repeat the layer otherwise) is the next step.
+renders in 5.5 to 10 ms of GPU per frame. The last limiter was the headset
+pacing: with the display at 72 or 90 Hz, each headset frame stayed open for
+the next 60 Hz game frame plus the whole encode (`open` 16 ms in the pacing
+summary), so cycles spanned one to two display slots and the headset got 40 to
+60 frames per second while the game rendered 60. The Vulkan backend now paces
+render-first (`PreparePacket`, `BeginFrameForPacket`, `CopyRenderedEyes` in
+`openxr_vulkan.cpp`; see `OPENXR.md`): the packet is located and handed to
+Aurora with no compositor frame open, and the frame is begun only once the
+eyes exist, for the copy alone. On the same automated start at 0.75 the
+summary reads `cycles=60 skipped-slots=12 late=0 layers new=60 repeat=0
+open=5.5 end-gap=16.7`, the compositor shows 60 to 61 of 72 with the
+inherent 12 stale slots, app-to-compositor latency fell from 51 to 9 to 13 ms,
+and the frame worker's encode fell from 8 to 2.7 ms because the eye copy and
+its fence wait moved off the worker onto the pacing thread.
+
+Retro Rewind tracks then showed a game-thread limit of their own: on Athens
+Dash (a Mario Kart Tour port) the display-list index scan
+(`WalkDisplayList<DlIndexScanVisitor>`) was 11.5% of the thread while the base
+game's tracks spend 0.3% there. The scan cache in `gx_dl.cpp` refused lists
+above 64 KiB, so that track's large shape lists were scanned again on every
+call; the cap is now 4 MiB. With it the scan is 0.2%, the game rate on Athens
+Dash went from 47 to 51 fps to 50 to 58, and the thread splits into 62% game
+plus mod code, 9% GX HLE, 6% FIFO decode, 4% memory copies, 3.5% dispatch and
+the rest. What remains on such tracks is the game's own code plus the mod's,
+which no host change shrinks; a GX thread could move about 20% of it.
 
 Verified on device since: the menus on the virtual screen, controller input
 (the user has driven races), and an immersive Grand Prix start with all 12
