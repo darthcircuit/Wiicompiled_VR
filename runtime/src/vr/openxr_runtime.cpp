@@ -723,7 +723,9 @@ bool OpenXRRuntime::BeginFrame(const OpenXRFrame& frame) {
     }
 
     XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
-    const XrResult result = xrBeginFrame(m_session, &begin_info);
+    const XrResult result = diagnostics::Measure(diagnostics::Stage::BeginCall, [&] {
+        return xrBeginFrame(m_session, &begin_info);
+    });
     if (XR_FAILED(result)) {
         m_frame_phase = FramePhase::Idle;
         m_active_frame_serial = 0;
@@ -769,9 +771,11 @@ bool OpenXRRuntime::LocateViewsForFrame(OpenXRFrame& frame) {
     locate_info.space = m_app_space;
     XrViewState view_state{XR_TYPE_VIEW_STATE};
     uint32_t view_count = 0;
-    if (!Check(xrLocateViews(m_session, &locate_info, &view_state,
-                             kOpenXREyeCount, &view_count, frame.views.data()),
-               "xrLocateViews")) {
+    const XrResult locate_result = diagnostics::Measure(diagnostics::Stage::LocateViews, [&] {
+        return xrLocateViews(m_session, &locate_info, &view_state,
+                             kOpenXREyeCount, &view_count, frame.views.data());
+    });
+    if (!Check(locate_result, "xrLocateViews")) {
         return false;
     }
     if (view_count != kOpenXREyeCount) {

@@ -10,6 +10,7 @@
 #endif
 
 #include "vr/openxr_input.h"
+#include "vr/openxr_diagnostics.h"
 
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_joystick.h>
@@ -518,7 +519,9 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
     sync.countActiveActionSets = 1;
     sync.activeActionSets = &active;
-    const XrResult result = xrSyncActions(m_runtime->Session(), &sync);
+    const XrResult result = diagnostics::Measure(diagnostics::Stage::SyncActions, [&] {
+        return xrSyncActions(m_runtime->Session(), &sync);
+    });
     m_runtime->ObserveResult(result);
     if (XR_FAILED(result)) {
         if (!m_logged_sync_failure) {

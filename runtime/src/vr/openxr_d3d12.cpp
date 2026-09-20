@@ -316,7 +316,9 @@ public:
             submission_success_ = false;
             submission_unsafe_ = false;
         }
-        if (!aurora_d3d12_set_stereo_targets(frame.xr_frame.serial, targets.data(), target_count)) {
+        if (!diagnostics::Measure(diagnostics::Stage::SetTargets, [&] {
+            return aurora_d3d12_set_stereo_targets(frame.xr_frame.serial, targets.data(), target_count);
+        })) {
             {
                 std::lock_guard lock(submission_mutex_);
                 awaiting_token_ = 0;

@@ -736,7 +736,9 @@ private:
                 gx_registered = RegisterGxThread();
             }
 #endif
-            const OpenXREventStatus events = runtime_->PollEvents();
+            const OpenXREventStatus events = diagnostics::Measure(diagnostics::Stage::PollEvents, [&] {
+                return runtime_->PollEvents();
+            });
             const bool session_active = runtime_->IsSessionRunning();
             MkwVRPolicySetSessionActive(session_active);
             const uint64_t session_run_serial = runtime_->SessionRunSerial();
@@ -859,6 +861,7 @@ private:
             ServiceRecenterRequest();
             UpdateVirtualScreenPose(frame);
             if (input_ != nullptr) {
+                const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
                 // After the screen is placed, so the pointer aims at this
                 // frame's screen rather than the previous one's.
                 input_->Sync(frame.xr_frame.predicted_display_time, PointerScreen(frame, policy, immersive),
@@ -876,7 +879,9 @@ private:
             if (aurora_get_stereo_frame_interpolation() &&
                 !interpolation_pacing_.ShouldRender(frame.xr_frame.predicted_display_time, interpolation_target)) {
                 diagnostics::OnInterpolationSkip();
-                if (!backend_->TryCancelPendingFrame(frame) || !backend_->FinishFrame(frame, false)) {
+                if (!diagnostics::Measure(diagnostics::Stage::Cancel, [&] {
+                    return backend_->TryCancelPendingFrame(frame);
+                }) || !backend_->FinishFrame(frame, false)) {
                     SetError(backend_->LastError());
                     fatal = true;
                 }
@@ -884,6 +889,7 @@ private:
             }
 
             {
+                const diagnostics::ScopedStage publish_timer(diagnostics::Stage::Publish);
                 std::lock_guard lock(published_mutex_);
                 // First person renders at life-size scale, third person at the
                 // configured diorama scale. Head translation and IPD are the
@@ -904,14 +910,18 @@ private:
                    submission == OpenXRSubmissionStatus::Timeout) {
                 // Fresh rendering wakes us immediately. A 50 ms keep-alive
                 // protects stalls without issuing eager repeats during GPU work.
-                submission = backend_->WaitForSubmission(frame, 50);
+                submission = diagnostics::Measure(diagnostics::Stage::SubmissionWait, [&] {
+                    return backend_->WaitForSubmission(frame, 50);
+                });
                 if (submission == OpenXRSubmissionStatus::Timeout) {
                     // A pause, minimized window, or guest stall may leave no GX
                     // frame to consume this packet. Withdraw it, then cancel the
                     // matching bridge target only if Encode has not taken ownership.
                     if (std::chrono::steady_clock::now() >= cancel_after) {
-                        WithdrawPublishedFrame();
-                        canceled_before_encode = backend_->TryCancelPendingFrame(frame);
+                        diagnostics::Measure(diagnostics::Stage::Withdraw, [&] { WithdrawPublishedFrame(); });
+                        canceled_before_encode = diagnostics::Measure(diagnostics::Stage::Cancel, [&] {
+                            return backend_->TryCancelPendingFrame(frame);
+                        });
                         if (canceled_before_encode) {
                             diagnostics::OnPacketCanceled();
                             break;
@@ -925,7 +935,7 @@ private:
                     }
                 }
             }
-            WithdrawPublishedFrame();
+            diagnostics::Measure(diagnostics::Stage::Withdraw, [&] { WithdrawPublishedFrame(); });
             if (stop_.load(std::memory_order_acquire)) {
                 // Aurora has been drained by Shutdown(); backend shutdown below
                 // cancels its pending target, then either safely releases the
@@ -1035,6 +1045,7 @@ private:
         ServiceRecenterRequest();
         UpdateVirtualScreenPose(packet);
         if (input_ != nullptr) {
+            const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
             input_->Sync(packet.xr_frame.predicted_display_time, PointerScreen(packet, policy, immersive),
                          SettingsPanelScreen(packet, policy, immersive));
         }
@@ -1043,6 +1054,7 @@ private:
             return KeepAlive();
         }
         {
+            const diagnostics::ScopedStage publish_timer(diagnostics::Stage::Publish);
             std::lock_guard lock(published_mutex_);
             BuildPublishedFrame(packet, immersive, policy.EffectiveUnitsPerMeter(), policy.content_tag);
             diagnostics::OnPacketPublished();
@@ -1056,11 +1068,15 @@ private:
         bool canceled_before_encode = false;
         const auto cancel_after = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
         while (!stop_.load(std::memory_order_acquire) && submission == OpenXRSubmissionStatus::Timeout) {
-            submission = backend_->WaitForSubmission(packet, 50);
+            submission = diagnostics::Measure(diagnostics::Stage::SubmissionWait, [&] {
+                return backend_->WaitForSubmission(packet, 50);
+            });
             if (submission == OpenXRSubmissionStatus::Timeout) {
                 if (std::chrono::steady_clock::now() >= cancel_after) {
-                    WithdrawPublishedFrame();
-                    canceled_before_encode = backend_->TryCancelPendingPacket(packet);
+                    diagnostics::Measure(diagnostics::Stage::Withdraw, [&] { WithdrawPublishedFrame(); });
+                    canceled_before_encode = diagnostics::Measure(diagnostics::Stage::Cancel, [&] {
+                        return backend_->TryCancelPendingPacket(packet);
+                    });
                     if (canceled_before_encode) {
                         diagnostics::OnPacketCanceled();
                         break;
@@ -1072,7 +1088,7 @@ private:
                 }
             }
         }
-        WithdrawPublishedFrame();
+        diagnostics::Measure(diagnostics::Stage::Withdraw, [&] { WithdrawPublishedFrame(); });
         if (stop_.load(std::memory_order_acquire) || canceled_before_encode ||
             submission == OpenXRSubmissionStatus::ShuttingDown) {
             return true;

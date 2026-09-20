@@ -14,6 +14,10 @@
 namespace mkw::vr::diagnostics {
 namespace {
 
+constexpr std::array<const char*, static_cast<size_t>(Stage::Count)> kStageNames{
+    "poll-events", "begin-call", "locate-views", "input-sync", "sync-actions",
+    "publish", "withdraw", "submission-wait", "cancel", "set-targets"};
+
 constexpr double kNanosecondsPerMillisecond = 1'000'000.0;
 
 double Milliseconds(int64_t nanoseconds) noexcept {
@@ -123,6 +127,7 @@ void FrameDiagnostics::Reset(int64_t now_ns) {
     Sink sink = std::move(sink_);
     *this = FrameDiagnostics(std::move(sink));
     window_start_ns_ = now_ns;
+    session_start_ns_ = now_ns;
     session_info_requested_ = true;
 }
 
@@ -136,6 +141,7 @@ void FrameDiagnostics::OnWaitFrame(int64_t now_ns, int64_t wait_ns, int64_t disp
         window_start_ns_ = now_ns;
     }
     ++cycles_;
+    ++cycle_sequence_;
     wait_frame_ms_.Add(Milliseconds(wait_ns));
     if (display_period > 0) {
         display_period_ = display_period;
@@ -280,14 +286,31 @@ void FrameDiagnostics::OnPacketPublished(int64_t now_ns) {
     published_ns_ = now_ns;
 }
 
-void FrameDiagnostics::OnPacketCanceled(int64_t consumed_ns) {
+void FrameDiagnostics::OnStage(Stage stage, int64_t ns, int64_t now_ns) {
+    if (ns < 0 || static_cast<size_t>(stage) >= stages_.size()) return;
+    auto& sample = stages_[static_cast<size_t>(stage)];
+    sample.samples.Add(Milliseconds(ns));
+    if (ns > sample.worst_ns) {
+        sample.worst_ns = ns;
+        sample.worst_at_ns = now_ns;
+        sample.cycle = cycle_sequence_;
+    }
+}
+
+void FrameDiagnostics::OnPacketCanceled(int64_t now_ns, int64_t consumed_ns) {
+    if (published_ns_ != 0 && now_ns >= published_ns_) {
+        cancel_age_ms_.Add(Milliseconds(now_ns - published_ns_));
+        if (consumed_ns >= published_ns_ && consumed_ns <= now_ns) {
+            cancel_pickup_ms_.Add(Milliseconds(consumed_ns - published_ns_));
+            cancel_after_pickup_ms_.Add(Milliseconds(now_ns - consumed_ns));
+        }
+    }
     if (consumed_ns == 0 || consumed_ns < published_ns_) {
         ++packet_unused_;
-        Event("stereo packet withdrawn: no game frame picked it up within 50 ms");
+        Event("stereo packet withdrawn: no game frame picked it up before cancellation");
     } else {
         ++packet_rejected_;
-        Event("stereo packet canceled: Aurora picked it up but rendered that frame without it "
-              "(content tag or transform check)");
+        Event("stereo packet canceled: Aurora picked it up but the bridge had not encoded it before cancellation");
     }
     published_ns_ = 0;
 }
@@ -355,8 +378,13 @@ void FrameDiagnostics::ClearWindow(int64_t now_ns) {
     keepalive_ = packet_unused_ = packet_rejected_ = submit_failed_ = interp_skip_ = 0;
     immersive_ = screen_ = not_rendered_ = no_orientation_ = no_position_ = 0;
     events_ = suppressed_ = 0;
+    for (auto& stage : stages_) {
+        stage.samples.Clear();
+        stage.worst_ns = -1;
+    }
     for (Samples* samples : {&wait_frame_ms_, &open_ms_, &margin_ms_, &end_gap_ms_, &end_call_ms_,
-                             &acquire_ms_, &release_ms_, &game_wait_ms_, &encode_ms_}) {
+                             &acquire_ms_, &release_ms_, &game_wait_ms_, &encode_ms_,
+                             &cancel_age_ms_, &cancel_pickup_ms_, &cancel_after_pickup_ms_}) {
         samples->Clear();
     }
 }
@@ -365,7 +393,7 @@ void FrameDiagnostics::EmitSummary(int64_t now_ns) {
     std::string text;
     AppendFormat(text, "%.2fs", Milliseconds(now_ns - window_start_ns_) / 1000.0);
     if (display_period_ > 0) {
-        AppendFormat(text, " %.1fHz", 1.0e9 / static_cast<double>(display_period_));
+        AppendFormat(text, " predicted-rate=%.1fHz", 1.0e9 / static_cast<double>(display_period_));
     }
     AppendFormat(text, " cycles=%u skipped-slots=%u late=%u", cycles_, skipped_slots_, late_);
     AppendFormat(text, " | layers new=%u repeat=%u empty=%u discarded=%u layer-rejected=%u", layers_new_,
@@ -384,8 +412,26 @@ void FrameDiagnostics::EmitSummary(int64_t now_ns) {
                  keepalive_, packet_unused_, packet_rejected_, submit_failed_, interp_skip_);
     AppendFormat(text, " | frames immersive=%u screen=%u not-rendered=%u no-orientation=%u no-position=%u",
                  immersive_, screen_, not_rendered_, no_orientation_, no_position_);
-    AppendFormat(text, " | suppressed=%u", suppressed_);
+    AppendFormat(text, " | suppressed=%u cycle=%llu t=%.3fs", suppressed_,
+                 static_cast<unsigned long long>(cycle_sequence_),
+                 static_cast<double>(now_ns - session_start_ns_) / 1.0e9);
     Info(text);
+    // Skipped-slot event spam must not suppress evidence of a blocking call.
+    std::string stages = "stages ms";
+    for (size_t i = 0; i < stages_.size(); ++i) {
+        auto& sample = stages_[i];
+        AppendStat(stages, kStageNames[i], sample.samples.values, false);
+        if (sample.worst_ns >= 0) {
+            AppendFormat(stages, "@cycle=%llu,t=%.3fs",
+                         static_cast<unsigned long long>(sample.cycle),
+                         static_cast<double>(sample.worst_at_ns - session_start_ns_) / 1.0e9);
+        }
+    }
+    AppendStat(stages, "cancel-age", cancel_age_ms_.values, false);
+    AppendStat(stages, "cancel-pickup", cancel_pickup_ms_.values, false);
+    AppendStat(stages, "cancel-after-pickup", cancel_after_pickup_ms_.values, false);
+    if (!cancel_age_ms_.values.empty() || std::any_of(stages_.begin(), stages_.end(),
+            [](const auto& stage) { return stage.worst_ns >= 0; })) Info(stages);
 }
 
 namespace {
@@ -473,6 +519,10 @@ void OnWaitFrame(int64_t wait_ns, int64_t display_time, int64_t display_period) 
     collector.OnWaitFrame(NowNs(), wait_ns, display_time, display_period, ConvertDisplayTime(display_time));
 }
 
+void OnStage(Stage stage, int64_t ns) {
+    Collector().OnStage(stage, ns, NowNs());
+}
+
 void OnBeginFrame() {
     Collector().OnBeginFrame(NowNs());
 }
@@ -524,7 +574,7 @@ void OnPacketPublished() {
 }
 
 void OnPacketCanceled() {
-    Collector().OnPacketCanceled(g_packet_consumed_ns.load(std::memory_order_relaxed));
+    Collector().OnPacketCanceled(NowNs(), g_packet_consumed_ns.load(std::memory_order_relaxed));
 }
 
 void OnKeepaliveRepeat() {

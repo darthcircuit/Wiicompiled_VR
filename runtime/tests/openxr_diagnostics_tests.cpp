@@ -171,23 +171,51 @@ void TestPacketAccounting() {
     diagnostics.OnSubmission(now + 18 * kMs, now + 15 * kMs, true);
 
     diagnostics.OnPacketPublished(now + 20 * kMs);
-    diagnostics.OnPacketCanceled(0);
-    Require(capture.Count("no game frame picked it up within 50 ms") == 1);
+    diagnostics.OnPacketCanceled(now + 75 * kMs, 0);
+    Require(capture.Count("no game frame picked it up before cancellation") == 1);
 
     diagnostics.OnPacketPublished(now + 80 * kMs);
-    diagnostics.OnPacketCanceled(now + 90 * kMs);
-    Require(capture.Count("Aurora picked it up but rendered that frame without it") == 1);
+    diagnostics.OnPacketCanceled(now + 280 * kMs, now + 90 * kMs);
+    Require(capture.Count("Aurora picked it up but the bridge had not encoded it") == 1);
 
-    diagnostics.OnPacketPublished(now + 200 * kMs);
-    diagnostics.OnSubmission(now + 210 * kMs, now + 205 * kMs, false);
+    diagnostics.OnPacketPublished(now + 400 * kMs);
+    diagnostics.OnSubmission(now + 410 * kMs, now + 405 * kMs, false);
     Require(capture.Count("stereo submission failed") == 1);
 
     diagnostics.Tick(now + 1'500 * kMs);
     const std::string& summary = capture.Summary();
     Require(summary.find("packet-unused=1 packet-rejected=1 submit-failed=1") != std::string::npos);
+    Require(capture.Count("cancel-age=200.0/200.0") == 1);
+    Require(capture.Count("cancel-pickup=10.0/10.0") == 1);
+    Require(capture.Count("cancel-after-pickup=190.0/190.0") == 1);
     // Two submissions: pickup 15 and 5 ms, render 3 and 5 ms.
     Require(summary.find("pickup=15.0/15.0") != std::string::npos);
     Require(summary.find("render=5.0/5.0") != std::string::npos);
+}
+
+void TestStageTimingSurvivesEventFlood() {
+    Capture capture;
+    FrameDiagnostics diagnostics(capture.Sink());
+    const int64_t start = 10'000 * kMs;
+    diagnostics.Reset(start);
+    diagnostics.OnWaitFrame(start, 0, 1, kPeriod72Hz, 0);
+    for (int i = 0; i < 20; ++i) diagnostics.OnEmptyFrame(EmptyFrameReason::NoRetainedLayer);
+    diagnostics.OnStage(Stage::SyncActions, 2 * kMs, start + 2 * kMs);
+    diagnostics.OnStage(Stage::SyncActions, 180 * kMs, start + 500 * kMs);
+    diagnostics.OnStage(Stage::SyncActions, 3 * kMs, start + 600 * kMs);
+    diagnostics.OnStage(Stage::Cancel, -1, start);
+    diagnostics.Tick(start + 1'000 * kMs);
+    Require(capture.Count("sync-actions=3.0/180.0@cycle=1,t=0.500s") == 1);
+    Require(capture.Count("cancel=-") == 1);
+    Require(capture.Summary().find("suppressed=12") != std::string::npos);
+    diagnostics.OnStage(Stage::Cancel, 4 * kMs, start + 1'100 * kMs);
+    diagnostics.Tick(start + 2'000 * kMs);
+    Require(capture.Count("sync-actions=-") == 1);
+    Require(capture.Count("cancel=4.0/4.0@cycle=1,t=1.100s") == 1);
+    diagnostics.Reset(start + 3'000 * kMs);
+    diagnostics.OnStage(Stage::Cancel, kMs, start + 3'010 * kMs);
+    diagnostics.Tick(start + 4'000 * kMs);
+    Require(capture.Count("cancel=1.0/1.0@cycle=0,t=0.010s") == 1);
 }
 
 void TestViewGeometry() {
@@ -249,6 +277,9 @@ void TestGlobalSwitchAndConfig() {
         const Stopwatch stopwatch;
         Require(stopwatch.ElapsedNs() == -1);
     }
+    int calls = 0;
+    Require(Measure(Stage::Cancel, [&] { ++calls; return 42; }) == 42);
+    Require(calls == 1);
     OnEmptyFrame(EmptyFrameReason::NoRetainedLayer);
     Require(lines.empty());
 
@@ -284,6 +315,7 @@ int main() {
     TestEventsAreRateLimited();
     TestTrackingEdgesAndRejections();
     TestPacketAccounting();
+    TestStageTimingSurvivesEventFlood();
     TestViewGeometry();
     TestResetStartsANewSession();
     TestGlobalSwitchAndConfig();

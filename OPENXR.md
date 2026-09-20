@@ -414,21 +414,48 @@ When it is on, `console.log` receives lines tagged `[runtime] [xr-diag]`
 
 | Field | Meaning |
 | --- | --- |
-| `Hz`, `cycles` | Display rate from the predicted display period; compositor cycles (xrWaitFrame/xrEndFrame pairs, repeats included). |
+| `predicted-rate`, `cycles` | Reciprocal of the runtime's predicted display period, **not necessarily physical headset refresh rate**; compositor cycles (xrWaitFrame/xrEndFrame pairs, repeats included). |
 | `skipped-slots` | Display slots the predicted display time jumped over: the runtime throttled or dropped frames. |
 | `late` | Frames whose xrEndFrame came after their predicted display time (needs `XR_KHR_win32_convert_performance_counter_time` or `XR_KHR_convert_timespec_time`). |
 | `layers new/repeat/empty` | Cycles ending with a newly rendered layer, the retained layer again, or no layer at all (black). |
 | `discarded`, `layer-rejected` | Retained layers dropped by a session or reference-space change; rendered layers not submitted (invalid pose or views, failed release). |
 | `wait-frame`, `open`, `end-call` | Time blocked in xrWaitFrame, from xrBeginFrame to xrEndFrame, and inside xrEndFrame. |
 | `end-margin`, `end-gap` | Predicted display time minus the xrEndFrame time; interval between xrEndFrame calls. |
-| `pickup`, `render` | Stereo packet published until Aurora's frame worker takes it (without interpolation this includes waiting for the next 60 Hz game frame); taken until the eye copy is submitted. |
+| `pickup`, `render` | Stereo packet published until Aurora's frame worker takes it (without interpolation this includes waiting for the next 60 Hz game frame); taken until the pacing thread observes the submission result. These are CPU wall times for completed submissions, **not GPU timestamps**; canceled packets are measured separately below. |
 | `acquire`, `release` | Swapchain image acquire+wait and release. |
 | `keepalive` | Retained-layer repeats while Aurora was still encoding past the 50 ms keep-alive. |
-| `packet-unused`, `packet-rejected`, `submit-failed` | Packets no game frame took within 50 ms; packets Aurora took but rendered mono (content tag or transform check); failed stereo copies. |
+| `packet-unused`, `packet-rejected`, `submit-failed` | Packets not picked up before cancellation; packets picked up but not encoded by the bridge before cancellation (the precise rejection cause is not known); failed stereo copies. |
 | `interp-skip` | Cycles the VR interpolation rate cap chose not to render. |
 | `frames immersive/screen` | Cycles per presentation mode; `not-rendered` counts cycles without views to render. |
 | `no-orientation`, `no-position` | Cycles whose head orientation or position was not valid. |
 | `suppressed` | Event lines dropped by the rate limit. |
+
+- **Stage timings.** A separate `[xr-diag] stages ms` line accompanies each nonempty
+  window, independently of the event rate limit. Each field is `median/worst` in ms;
+  `@cycle=N,t=Ts` identifies the worst call's diagnostic cycle and completion time
+  since logging/session reset. The main summary also includes the last `cycle` and `t`.
+  Cycle 0 is before the first wait; work between cycles belongs to the previous cycle.
+  These are wall times, including time the OS did not schedule the thread. Nested
+  measurements (notably `sync-actions` within `input-sync`) must not be added together.
+
+| Stage | What it isolates |
+| --- | --- |
+| `poll-events`, `begin-call`, `locate-views` | Event polling, the xrBeginFrame call itself, and xrLocateViews. |
+| `input-sync`, `sync-actions` | Complete input update and its xrSyncActions call. |
+| `publish`, `withdraw` | Packet construction/publication and withdrawal, including mutex waits. |
+| `set-targets` | D3D12 bridge target registration, including its mutex wait. |
+| `submission-wait` | Actual time waiting for a render result, including timeout paths; compare against the requested 50 ms. |
+| `cancel` | Bridge cancellation attempt, whether it succeeds or fails. |
+| `cancel-age` | Publication to cancellation, including packets never picked up. |
+| `cancel-pickup`, `cancel-after-pickup` | Publication to pickup and pickup to cancellation for consumed, canceled packets. |
+
+For a blackout report, enable logging before entering a race, reproduce the blackout,
+and export the logs immediately afterward. Include the approximate time and whether
+both eyes and the desktop mirror went black. Check `frames immersive` is nonzero for
+an immersive-race capture. A large stage maximum identifies where the pacing thread
+spent time, but cannot distinguish API blocking from OS scheduling without a system
+trace. No empty layers does not rule out black image contents or compositor/display
+problems. This instrumentation does not change frame pacing or inspect image pixels.
 
 - **Event lines.** At most 8 per second; the rest are counted in `suppressed`. They report late
   frames, skipped display slots, stalls (more than 2.5 display periods, and at least 25 ms, between
