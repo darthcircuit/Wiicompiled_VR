@@ -37,6 +37,8 @@ AuroraD3D12StereoSubmittedCallback callback = nullptr;
 void* callback_data = nullptr;
 uint64_t pending_token = 0;
 bool encoded = false;
+bool compositor_open = false;
+bool expect_render_first = false;
 bool should_render = true;
 bool tracking_valid = true;
 bool change_space = false;
@@ -53,6 +55,7 @@ XrPosef quad_pose{};
 
 void Complete(bool success = true) {
     Require(pending_token != 0);
+    if (expect_render_first) Require(!compositor_open);
     if (success) {
         for (const auto& target : targets)
             reinterpret_cast<Image*>(target.resource)->content = pending_token;
@@ -172,16 +175,17 @@ bool OpenXRRuntime::CreateSession(const void*) {
     ++m_session_run_serial;
     return true;
 }
-void OpenXRRuntime::DestroySession() { m_session_running = false; }
+void OpenXRRuntime::DestroySession() { m_session_running = false; compositor_open = false; }
 void OpenXRRuntime::ObserveResult(XrResult) noexcept {}
 OpenXREventStatus OpenXRRuntime::PollEvents() {
     if (change_space) { ++m_reference_space_change.serial; change_space = false; }
-    if (restart_session) { ++m_session_run_serial; restart_session = false; }
+    if (restart_session) { ++m_session_run_serial; m_session_running = true; restart_session = false; }
     if (stop_session) { m_session_running = false; stop_session = false; }
     return OpenXREventStatus::Continue;
 }
 OpenXRFrameStatus OpenXRRuntime::WaitFrame(OpenXRFrame& frame) {
     Require(m_frame_phase == FramePhase::Idle);
+    if (!m_session_running) return OpenXRFrameStatus::SessionNotRunning;
     frame = {};
     frame.serial = m_next_frame_serial++;
     frame.predicted_display_time = frame.serial * 11'111'111;
@@ -194,6 +198,7 @@ OpenXRFrameStatus OpenXRRuntime::WaitFrame(OpenXRFrame& frame) {
 bool OpenXRRuntime::BeginFrame(const OpenXRFrame& frame) {
     Require(m_frame_phase == FramePhase::Waited && frame.serial == m_active_frame_serial);
     m_frame_phase = FramePhase::Begun;
+    compositor_open = true;
     return true;
 }
 bool OpenXRRuntime::LocateViews(OpenXRFrame& frame) {
@@ -205,6 +210,11 @@ bool OpenXRRuntime::LocateViews(OpenXRFrame& frame) {
         view.fov.angleLeft = -0.75f;
     }
     return true;
+}
+bool OpenXRRuntime::LocateViewsAt(XrTime time, OpenXRFrame& frame) {
+    Require(!compositor_open);
+    frame.predicted_display_time = time;
+    return LocateViews(frame);
 }
 bool OpenXRRuntime::EndFrame(const OpenXRFrame& frame,
                              const XrCompositionLayerBaseHeader* const* layers, uint32_t count) {
@@ -238,6 +248,7 @@ bool OpenXRRuntime::EndFrame(const OpenXRFrame& frame,
         }
     }
     m_frame_phase = FramePhase::Idle;
+    compositor_open = false;
     if (fail_end) {
         fail_end = false;
         return false;
@@ -249,7 +260,142 @@ bool OpenXRRuntime::EndFrameWithoutLayers(const OpenXRFrame& frame) {
 }
 }
 
+void TestRenderFirst() {
+    display_time = 0;
+    expect_render_first = true;
+    OpenXRRuntime runtime;
+    OpenXRD3D12Backend backend;
+    Require(backend.QueryGraphicsRequirements(runtime) && backend.BindAurora(runtime));
+    OpenXRPresentation presentation;
+    OpenXRBackendFrame packet, frame;
+    const auto prepare = [&] {
+        Require(backend.PreparePacket(presentation, packet) == OpenXRBeginStatus::Ready);
+        Require(!compositor_open && packet.expects_gpu_submission);
+    };
+    const auto submit = [&] {
+        Complete();
+        Require(backend.WaitForSubmission(packet, 0) == OpenXRSubmissionStatus::Success);
+        Require(backend.BeginFrameForPacket(packet, frame) == OpenXRBeginStatus::Ready);
+        Require(compositor_open && frame.xr_frame.serial != packet.xr_frame.serial);
+        Require(backend.CopyRenderedEyes(frame) == OpenXRSubmissionStatus::Success);
+        Require(backend.FinishFrame(frame, true));
+        Require(!compositor_open);
+    };
+    prepare();
+    Require(backend.BeginFrameForPacket(packet, frame) == OpenXRBeginStatus::Error);
+    submit();
+    const auto first = displayed_content;
+    Require(first == packet.xr_frame.serial && layer_count == 1);
+    prepare();
+    const auto before_stall = releases;
+    encoded = true;
+    for (int i = 0; i < 300; ++i) {
+        Require(backend.WaitForSubmission(packet, 0) == OpenXRSubmissionStatus::Timeout);
+        Require(!backend.TryCancelPendingPacket(packet));
+        Require(backend.KeepAliveCycle() == OpenXRBeginStatus::Ready);
+        Require(!compositor_open && layer_count == 1 && displayed_content == first);
+        Require(releases == before_stall);
+    }
+    submit(); // Must preserve original poses across independently advancing cycles.
+    Require(displayed_content == packet.xr_frame.serial);
+    const auto second = displayed_content;
+    prepare();
+    auto stale = packet;
+    ++stale.xr_frame.serial;
+    Require(!backend.TryCancelPendingPacket(stale));
+    Require(backend.BeginFrameForPacket(stale, frame) == OpenXRBeginStatus::Error);
+    Require(backend.TryCancelPendingPacket(packet));
+    Require(!compositor_open && releases == before_stall + 4);
+    Require(backend.KeepAliveCycle() == OpenXRBeginStatus::Ready);
+    Require(displayed_content == second);
+
+    // Original frame-first mode still works after switching interpolation on.
+    expect_render_first = false;
+    Require(backend.BeginFrame(presentation, frame) == OpenXRBeginStatus::Ready);
+    Complete();
+    Require(backend.FinishFrame(frame, true));
+    expect_render_first = true;
+    prepare();
+    Require(packet.xr_frame.predicted_display_time > display_time);
+    Require(backend.TryCancelPendingPacket(packet));
+    presentation.mode = OpenXRFrameMode::VirtualScreen;
+    presentation.quad_anchored = true;
+    presentation.quad_pose.position.z = -4;
+    prepare();
+    Require(targets.size() == 1);
+    submit();
+    Require(layer_type == XR_TYPE_COMPOSITION_LAYER_QUAD && quad_pose.position.z == -4);
+
+    presentation.mode = OpenXRFrameMode::ImmersiveProjection;
+    prepare();
+    should_render = false; // Visibility can change while rendering.
+    submit();
+    Require(layer_count == 0);
+    Require(backend.PreparePacket(presentation, packet) == OpenXRBeginStatus::Ready);
+    Require(!packet.expects_gpu_submission);
+    should_render = true;
+    Require(backend.KeepAliveCycle() == OpenXRBeginStatus::Ready);
+    tracking_valid = false;
+    Require(backend.PreparePacket(presentation, packet) == OpenXRBeginStatus::Ready);
+    Require(!packet.expects_gpu_submission);
+    tracking_valid = true;
+
+    for (bool session_change : {false, true}) {
+        prepare();
+        change_space = !session_change;
+        restart_session = session_change;
+        runtime.PollEvents();
+        submit();
+        Require(layer_count == 0); // Do not relabel old images with new space/session serials.
+        prepare();
+        submit();
+        Require(layer_count == 1);
+    }
+    prepare();
+    Complete();
+    stop_session = true;
+    runtime.PollEvents();
+    Require(backend.BeginFrameForPacket(packet, frame) == OpenXRBeginStatus::SessionNotRunning);
+    restart_session = true;
+    runtime.PollEvents();
+    prepare();
+    submit();
+    Require(layer_count == 1);
+
+    prepare();
+    const auto before_failure = releases;
+    Complete(false);
+    Require(backend.WaitForSubmission(packet, 0) == OpenXRSubmissionStatus::Failed);
+    Require(backend.BeginFrameForPacket(packet, frame) == OpenXRBeginStatus::Error);
+    Require(releases == before_failure);
+    Require(backend.Shutdown() && live_swapchains == 0);
+    // Shutdown must also drain packets that never entered a compositor frame,
+    // including a runtime end failure or session stop during a keep-alive.
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        display_time = 0;
+        OpenXRRuntime next_runtime;
+        OpenXRD3D12Backend next_backend;
+        Require(next_backend.QueryGraphicsRequirements(next_runtime));
+        Require(next_backend.BindAurora(next_runtime));
+        Require(next_backend.PreparePacket(presentation, packet) == OpenXRBeginStatus::Ready);
+        encoded = true;
+        if (scenario == 1) {
+            fail_end = true;
+            Require(next_backend.KeepAliveCycle() == OpenXRBeginStatus::Error);
+        } else if (scenario == 2) {
+            stop_session = true;
+            next_runtime.PollEvents();
+            Require(next_backend.KeepAliveCycle() == OpenXRBeginStatus::SessionNotRunning);
+        }
+        Require(!compositor_open);
+        Require(next_backend.Shutdown() && live_swapchains == 0);
+    }
+    expect_render_first = false;
+    display_time = 0;
+}
+
 int main() {
+    TestRenderFirst();
     OpenXRRuntime runtime;
     OpenXRD3D12Backend backend;
     Require(backend.QueryGraphicsRequirements(runtime) && backend.BindAurora(runtime));

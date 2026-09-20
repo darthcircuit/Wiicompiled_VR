@@ -727,6 +727,7 @@ private:
         VRPresentationMode logged_presentation = VRPresentationMode::Desktop;
         uint32_t presentation_log_count = 0;
         bool immersive_submission_logged = false;
+        int last_pacing_mode = -1;
         while (!stop_.load(std::memory_order_acquire) && !fatal) {
 #if defined(__ANDROID__)
             if (!worker_registered) {
@@ -823,19 +824,23 @@ private:
             const uint32_t interpolation_target = frame_interpolation_fps_.load(std::memory_order_relaxed);
             SetInterpolationActive(immersive && FrameInterpolationAvailable() && interpolation_target != 0);
 
-#if !defined(_WIN32)
-            // Standalone (Vulkan) backend: with interpolation off, the eyes are rendered before
+            // With interpolation off, the eyes are rendered before
             // the compositor frame that shows them is begun, so that frame never waits for a
             // game frame. Interpolation keeps the frame-first order below: it renders for the
             // frame's own predicted display time.
-            if (!aurora_get_stereo_frame_interpolation()) {
+            const bool render_first = !aurora_get_stereo_frame_interpolation();
+            if (last_pacing_mode != static_cast<int>(render_first)) {
+                last_pacing_mode = static_cast<int>(render_first);
+                RT_LOG(RT_TAG_RUNTIME) << "OpenXR " << kGraphicsBackendName << " pacing: "
+                    << (render_first ? "render-first" : "frame-first (VR interpolation)") << std::endl;
+            }
+            if (render_first) {
                 if (!RenderFirstCycle(presentation, policy, immersive, consecutive_skips,
                                       immersive_submission_logged)) {
                     fatal = true;
                 }
                 continue;
             }
-#endif
             OpenXRBackendFrame frame{};
             const OpenXRBeginStatus begin = backend_->BeginFrame(presentation, frame);
             if (begin == OpenXRBeginStatus::SessionNotRunning) {
@@ -1003,7 +1008,6 @@ private:
         ShutdownOrRetainGraphicsObjects();
     }
 
-#if !defined(_WIN32)
     // One compositor cycle on the retained layer, with no frame left active. False on a fatal
     // backend or runtime failure (the error is recorded).
     bool KeepAlive() {
@@ -1023,7 +1027,7 @@ private:
         return true;
     }
 
-    // Render-first pacing (see OpenXRVulkanBackend::PreparePacket). Returns false on a fatal
+    // Render-first pacing (see each backend's PreparePacket). Returns false on a fatal
     // failure; a cycle that ends without a layer returns true and the loop tries again.
     bool RenderFirstCycle(OpenXRPresentation presentation, const MkwVRPolicySnapshot& policy, bool immersive,
                           uint32_t& consecutive_skips, bool& immersive_submission_logged) {
@@ -1089,9 +1093,14 @@ private:
             }
         }
         diagnostics::Measure(diagnostics::Stage::Withdraw, [&] { WithdrawPublishedFrame(); });
-        if (stop_.load(std::memory_order_acquire) || canceled_before_encode ||
+        if (stop_.load(std::memory_order_acquire) ||
             submission == OpenXRSubmissionStatus::ShuttingDown) {
             return true;
+        }
+        if (canceled_before_encode) {
+            // Refresh display timing after a canceled packet as well, so the
+            // next estimate cannot remain stuck in the past during a game stall.
+            return KeepAlive();
         }
         if (submission != OpenXRSubmissionStatus::Success) {
             // Nothing reached the shared buffers (Skipped) or Aurora failed after queuing GPU
@@ -1115,7 +1124,7 @@ private:
             return KeepAlive();
         }
 
-        // The eyes are in the shared buffers: begin the compositor frame, copy, end.
+        // The eyes are rendered: begin the compositor frame, complete the backend copy, end.
         OpenXRBackendFrame frame{};
         const OpenXRBeginStatus begin = backend_->BeginFrameForPacket(packet, frame);
         if (begin == OpenXRBeginStatus::SessionNotRunning) {
@@ -1165,7 +1174,6 @@ private:
         }
         return true;
     }
-#endif
 
     void BuildPublishedFrame(const OpenXRBackendFrame& source, bool immersive,
                              float units_per_meter, uint64_t content_tag) noexcept {

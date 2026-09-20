@@ -320,18 +320,31 @@ short-lived immutable stereo packet. Each sealed GX frame and immersive packet c
 policy-generation tag; a mismatch is rendered in mono and the acquired XR frame is canceled, so an
 asynchronous menu/race transition cannot replay race transforms over unsafe content.
 
-With interpolation off, the standalone (Vulkan) backend paces render-first: the pacing thread
-locates the views for an estimated display time (two periods past the last one the compositor
-predicted), hands Aurora the packet and its shared-buffer targets with no compositor frame open,
-and waits for Aurora to render the eyes at its next seal, repeating the retained layer if that
-takes more than 50 ms. Only then does it call xrWaitFrame and xrBeginFrame, copy the eyes into the
-freshly acquired swapchain images and end the frame with the packet's render poses. A headset
-frame therefore stays open for the copy alone instead of for the next 60 Hz game frame plus the
-whole encode, which on a 72 or 90 Hz display used to make every second cycle span two display
-slots (about 45 headset frames per second while the game rendered 60). The compositor reprojects
-the rendered pose to the frame it lands in. The D3D12 backend keeps the frame-first order below,
-as does interpolation on either backend, since interpolation renders for the frame's own
-predicted display time.
+With interpolation off, both PC (D3D12) and standalone (Vulkan) pace render-first:
+the pacing thread locates views for an estimated display time (two periods past the last
+prediction), hands Aurora a packet without leaving a compositor frame open, and waits for
+rendering. A 50 ms stall repeats the retained layer; cancellation also advances a keep-alive
+cycle to refresh timing. Once rendering is submitted, the thread calls xrWaitFrame and
+xrBeginFrame, completes backend-specific copy/release work, and ends the frame using the
+packet's original render poses with the current compositor display time.
+
+Vulkan renders into shared buffers and copies them into newly acquired XR images afterward.
+D3D12 acquires images from its non-retained swapchain pair before rendering; Aurora queues the
+copy on the session's D3D12 queue before reporting completion. PC therefore needs no additional
+copy in the short compositor cycle. Pending images remain acquired and separate from the
+retained pair until completion or confirmed cancellation before encoding. GPU failure still
+requires the existing queue-drain teardown. Rendered poses keep the session/reference-space
+serials recorded when the packet was prepared, so changes during rendering invalidate them.
+
+VR interpolation keeps the frame-first order on both backends because it renders for the
+frame's own predicted display time. The log announces `OpenXR D3D12 pacing: render-first` or
+`frame-first (VR interpolation)` on each transition. For PC testing, disable **VR** frame
+interpolation for a race capture; changing desktop interpolation alone does not select this
+path. Menus use render-first even when VR interpolation is configured for races. Compare the
+new diagnostic `open`, `end-gap`, `late`, and stage timings against a frame-first capture on
+the same course and settings. Shorter `open` alone does not prove fewer black frames: rendering
+and xrWaitFrame still take time outside that interval. Hardware testing is needed to measure
+latency, runtime throttling and visible blackouts.
 
 With VR interpolation enabled, Aurora retains each sealed race's command stream and matched
 previous/current transform uniforms. New OpenXR packets wake the frame worker between game

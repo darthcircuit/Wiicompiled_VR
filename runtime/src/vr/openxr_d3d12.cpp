@@ -234,7 +234,7 @@ public:
             Fail("BeginFrame called before the D3D12 backend was bound");
             return OpenXRD3D12BeginStatus::Error;
         }
-        if (frame_active_) {
+        if (frame_active_ || pending_packet_serial_ != 0) {
             Fail("BeginFrame called while another OpenXR frame is active");
             return OpenXRD3D12BeginStatus::Error;
         }
@@ -255,6 +255,7 @@ public:
                 break;
             }
         }
+        NoteDisplayTiming(frame.xr_frame);
         if (!runtime_->BeginFrame(frame.xr_frame)) {
             Fail("xrBeginFrame failed");
             return OpenXRD3D12BeginStatus::Error;
@@ -283,8 +284,13 @@ public:
             return OpenXRD3D12BeginStatus::Ready;
         }
 
+        return PrepareTargets(frame);
+    }
+
+    // Both pacing paths retain ownership until completion or cancellation.
+    OpenXRD3D12BeginStatus PrepareTargets(OpenXRD3D12Frame& frame) {
         const uint32_t target_count =
-            presentation.mode == OpenXRD3D12FrameMode::VirtualScreen ? 1u : kOpenXREyeCount;
+            frame.presentation.mode == OpenXRD3D12FrameMode::VirtualScreen ? 1u : kOpenXREyeCount;
         if (target_count == 1) {
             frame.render_width[1] = frame.render_width[0];
             frame.render_height[1] = frame.render_height[0];
@@ -330,6 +336,151 @@ public:
         }
         frame.expects_gpu_submission = true;
         return OpenXRD3D12BeginStatus::Ready;
+    }
+
+    // D3D12 renders straight into the non-retained XR swapchain pair. Acquiring
+    // images is independent of the compositor cycle; keep them acquired while
+    // Aurora owns them, and never expose them through the retained pair early.
+    OpenXRBeginStatus PreparePacket(const OpenXRPresentation& presentation, OpenXRBackendFrame& packet) {
+        packet = {};
+        packet.presentation = presentation;
+        if (!bound_ || runtime_ == nullptr || frame_active_ || pending_packet_serial_ != 0) {
+            Fail("PreparePacket called before binding or with work pending");
+            return OpenXRBeginStatus::Error;
+        }
+        if (runtime_->ShouldExit()) return OpenXRBeginStatus::ExitRequested;
+        if (!runtime_->IsSessionRunning()) return OpenXRBeginStatus::SessionNotRunning;
+        if (timing_session_serial_ != runtime_->SessionRunSerial() || last_display_period_ <= 0) {
+            const auto status = KeepAliveCycle();
+            if (status != OpenXRBeginStatus::Ready) return status;
+        }
+        packet.xr_frame.serial = next_packet_serial_++;
+        packet.xr_frame.predicted_display_time = last_display_time_ + 2 * last_display_period_;
+        packet.xr_frame.predicted_display_period = last_display_period_;
+        packet.xr_frame.should_render = last_should_render_;
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            packet.render_width[eye] = eye_swapchains_[eye].width;
+            packet.render_height[eye] = eye_swapchains_[eye].height;
+        }
+        if (!packet.xr_frame.should_render) return OpenXRBeginStatus::Ready;
+        if (!runtime_->LocateViewsAt(packet.xr_frame.predicted_display_time, packet.xr_frame)) {
+            Fail("xrLocateViews failed for a D3D12 packet");
+            return OpenXRBeginStatus::Error;
+        }
+        if (!packet.xr_frame.views_valid) return OpenXRBeginStatus::Ready;
+        render_session_serial_ = runtime_->SessionRunSerial();
+        render_space_serial_ = runtime_->LastReferenceSpaceChange().serial;
+        const auto status = PrepareTargets(packet);
+        if (status == OpenXRBeginStatus::Ready) pending_packet_serial_ = packet.xr_frame.serial;
+        return status;
+    }
+
+    bool TryCancelPendingPacket(OpenXRBackendFrame& packet) {
+        if (frame_active_ || pending_packet_serial_ == 0 ||
+            packet.xr_frame.serial != pending_packet_serial_ || !packet.expects_gpu_submission ||
+            !aurora_d3d12_cancel_stereo_targets(packet.xr_frame.serial)) return false;
+        {
+            std::lock_guard lock(submission_mutex_);
+            awaiting_token_ = submitted_token_ = 0;
+            submission_arrived_ = submission_success_ = submission_unsafe_ = false;
+        }
+        packet.expects_gpu_submission = false;
+        pending_packet_serial_ = 0;
+        const diagnostics::Stopwatch release_timer;
+        const bool released = ReleaseAcquiredSwapchains();
+        diagnostics::OnSwapchainRelease(release_timer);
+        // A release error is fatal; keep it visible to the next prepare rather
+        // than letting it register new targets over still-acquired images.
+        if (!released) pending_packet_serial_ = packet.xr_frame.serial;
+        return true; // Encoding was canceled; a release error blocks the next prepare.
+    }
+
+    void NoteDisplayTiming(const OpenXRFrame& frame) {
+        last_display_time_ = frame.predicted_display_time;
+        last_display_period_ = frame.predicted_display_period;
+        last_should_render_ = frame.should_render;
+        timing_session_serial_ = runtime_->SessionRunSerial();
+    }
+
+    OpenXRBeginStatus BeginCompositorCycle() {
+        const auto status = runtime_->WaitFrame(active_frame_);
+        if (status != OpenXRFrameStatus::Ready) {
+            if (status == OpenXRFrameStatus::Error) Fail(BeginStatusOperation(status));
+            return status == OpenXRFrameStatus::SessionNotRunning ? OpenXRBeginStatus::SessionNotRunning
+                 : status == OpenXRFrameStatus::ExitRequested ? OpenXRBeginStatus::ExitRequested
+                                                             : OpenXRBeginStatus::Error;
+        }
+        NoteDisplayTiming(active_frame_);
+        if (!runtime_->BeginFrame(active_frame_)) {
+            Fail("xrBeginFrame failed for a D3D12 compositor cycle");
+            return OpenXRBeginStatus::Error;
+        }
+        frame_active_ = true;
+        return OpenXRBeginStatus::Ready;
+    }
+
+    OpenXRBeginStatus KeepAliveCycle() {
+        if (!bound_ || runtime_ == nullptr || frame_active_) {
+            Fail("KeepAliveCycle called before binding or with an active frame");
+            return OpenXRBeginStatus::Error;
+        }
+        const auto status = BeginCompositorCycle();
+        if (status != OpenXRBeginStatus::Ready) return status;
+        const bool ended = EndRetainedFrame(false);
+        frame_active_ = false;
+        active_frame_ = {};
+        if (!ended) {
+            Fail("OpenXR could not resubmit the retained D3D12 frame");
+            return OpenXRBeginStatus::Error;
+        }
+        return OpenXRBeginStatus::Ready;
+    }
+
+    OpenXRBeginStatus BeginFrameForPacket(const OpenXRBackendFrame& packet, OpenXRBackendFrame& frame) {
+        frame = {};
+        if (!bound_ || runtime_ == nullptr || frame_active_ || pending_packet_serial_ == 0 ||
+            packet.xr_frame.serial != pending_packet_serial_ || !packet.expects_gpu_submission ||
+            WaitForSubmission(packet, 0) != OpenXRSubmissionStatus::Success) {
+            Fail("BeginFrameForPacket requires the completed current D3D12 packet");
+            return OpenXRBeginStatus::Error;
+        }
+        const auto status = BeginCompositorCycle();
+        if (status != OpenXRBeginStatus::Ready) {
+            // Completion was already confirmed. A stopped session must not
+            // strand a packet and block preparation after the next READY event.
+            if (status == OpenXRBeginStatus::SessionNotRunning) {
+                const bool released = ReleaseAcquiredSwapchains();
+                pending_packet_serial_ = 0;
+                std::lock_guard lock(submission_mutex_);
+                awaiting_token_ = submitted_token_ = 0;
+                submission_arrived_ = submission_success_ = submission_unsafe_ = false;
+                if (!released) return OpenXRBeginStatus::Error;
+            }
+            return status;
+        }
+        frame = packet;
+        // Use the current compositor token/time but the original render poses.
+        frame.xr_frame.serial = active_frame_.serial;
+        frame.xr_frame.predicted_display_time = active_frame_.predicted_display_time;
+        frame.xr_frame.predicted_display_period = active_frame_.predicted_display_period;
+        frame.xr_frame.should_render = active_frame_.should_render;
+        active_frame_serial_ = frame.xr_frame.serial;
+        {
+            std::lock_guard lock(submission_mutex_);
+            awaiting_token_ = submitted_token_ = frame.xr_frame.serial;
+        }
+        pending_packet_serial_ = 0;
+        return OpenXRBeginStatus::Ready;
+    }
+
+    OpenXRSubmissionStatus CopyRenderedEyes(const OpenXRBackendFrame& frame) {
+        if (!frame_active_ || frame.xr_frame.serial != active_frame_serial_) {
+            Fail("CopyRenderedEyes received a stale D3D12 frame");
+            return OpenXRSubmissionStatus::Failed;
+        }
+        // The native bridge already queued the copy on the session's D3D12
+        // queue before publishing completion. There is no second copy on PC.
+        return WaitForSubmission(frame, 0);
     }
 
     OpenXRD3D12SubmissionStatus WaitForSubmission(const OpenXRD3D12Frame& frame,
@@ -456,6 +607,7 @@ public:
             !runtime_->BeginFrame(active_frame_)) {
             return Fail("OpenXR could not start a retained-frame compositor cycle");
         }
+        NoteDisplayTiming(active_frame_);
         frame_active_ = true;
         return true;
     }
@@ -577,6 +729,8 @@ public:
             active_frame_ = {};
         }
         DestroySwapchains();
+        pending_packet_serial_ = 0;
+        last_display_period_ = 0;
         if (owns_session_ && runtime_ != nullptr) {
             runtime_->DestroySession();
             owns_session_ = false;
@@ -779,7 +933,7 @@ private:
     }
 
     void EndActiveFrameWithoutLayers(const OpenXRFrame& frame) {
-        if (runtime_ != nullptr && runtime_->IsSessionRunning()) {
+        if (frame_active_ && runtime_ != nullptr && runtime_->IsSessionRunning()) {
             runtime_->EndFrameWithoutLayers(frame);
         }
         frame_active_ = false;
@@ -851,6 +1005,12 @@ private:
     bool submission_unsafe_ = false;
     bool shutting_down_ = false;
 
+    uint64_t pending_packet_serial_ = 0;
+    uint64_t next_packet_serial_ = 1ull << 40;
+    uint64_t timing_session_serial_ = 0;
+    XrTime last_display_time_ = 0;
+    XrDuration last_display_period_ = 0;
+    bool last_should_render_ = false;
     uint64_t active_frame_serial_ = 0;
     uint64_t render_session_serial_ = 0;
     uint64_t render_space_serial_ = 0;
@@ -897,6 +1057,20 @@ bool OpenXRD3D12Backend::FinishFrame(OpenXRD3D12Frame& frame, bool submit_layer)
 bool OpenXRD3D12Backend::RepeatFrame(const OpenXRD3D12Frame& frame) {
     return m_impl->RepeatFrame(frame);
 }
+
+OpenXRBeginStatus OpenXRD3D12Backend::PreparePacket(const OpenXRPresentation& presentation, OpenXRBackendFrame& packet) {
+    return m_impl->PreparePacket(presentation, packet);
+}
+bool OpenXRD3D12Backend::TryCancelPendingPacket(OpenXRBackendFrame& packet) {
+    return m_impl->TryCancelPendingPacket(packet);
+}
+OpenXRBeginStatus OpenXRD3D12Backend::BeginFrameForPacket(const OpenXRBackendFrame& packet, OpenXRBackendFrame& frame) {
+    return m_impl->BeginFrameForPacket(packet, frame);
+}
+OpenXRSubmissionStatus OpenXRD3D12Backend::CopyRenderedEyes(const OpenXRBackendFrame& frame) {
+    return m_impl->CopyRenderedEyes(frame);
+}
+OpenXRBeginStatus OpenXRD3D12Backend::KeepAliveCycle() { return m_impl->KeepAliveCycle(); }
 
 bool OpenXRD3D12Backend::Shutdown() { return m_impl->Shutdown(); }
 

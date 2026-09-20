@@ -81,6 +81,16 @@ public:
     // available, resubmits the retained layer using the current display time.
     bool FinishFrame(OpenXRD3D12Frame& frame, bool submit_layer);
 
+    // Render-first path when interpolation is off. Aurora renders into acquired
+    // non-retained XR images while no compositor frame is open. BeginFrameForPacket
+    // accepts only a completed packet; CopyRenderedEyes verifies the already queued
+    // bridge copy. FinishFrame releases the images and submits their original poses.
+    OpenXRBeginStatus PreparePacket(const OpenXRPresentation& presentation, OpenXRBackendFrame& packet);
+    bool TryCancelPendingPacket(OpenXRBackendFrame& packet);
+    OpenXRBeginStatus BeginFrameForPacket(const OpenXRBackendFrame& packet, OpenXRBackendFrame& frame);
+    OpenXRSubmissionStatus CopyRenderedEyes(const OpenXRBackendFrame& frame);
+    OpenXRBeginStatus KeepAliveCycle();
+
     // Call on the XR owner thread after Aurora's worker is idle and before
     // aurora_shutdown(). Safe to repeat. False means a submitted D3D12 command
     // could not be fenced; the caller must retain this backend and its runtime
