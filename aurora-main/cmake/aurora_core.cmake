@@ -38,7 +38,7 @@ if (AURORA_ENABLE_GX)
     # OpenXR-enabled runtime can fail back to desktop mode at runtime instead
     # of producing unresolved interop references.
     if (CMAKE_SYSTEM_NAME STREQUAL Windows)
-        target_sources(aurora_core PRIVATE lib/webgpu/d3d12_interop.cpp)
+        target_sources(aurora_core PRIVATE lib/webgpu/d3d12_interop.cpp lib/webgpu/vulkan_win32_interop.cpp)
     endif ()
     # Android/Vulkan counterpart: the AHardwareBuffer stereo bridge. The file
     # compiles to C ABI stubs on every other platform so the runtime's OpenXR

@@ -34,7 +34,7 @@
 #include "vr/openxr_input.h"
 #include "vr/openxr_runtime.h"
 #if defined(_WIN32)
-#include "vr/openxr_d3d12.h"
+#include "vr/openxr_windows.h"
 #define MKW_OPENXR_GRAPHICS_BACKEND 1
 #elif defined(__ANDROID__)
 #include "vr/openxr_android.h"
@@ -78,8 +78,8 @@ void ConfigurePolicy(bool enabled) noexcept {
 #if MKW_OPENXR_GRAPHICS_BACKEND
 
 #if defined(_WIN32)
-using GraphicsBackend = OpenXRD3D12Backend;
-inline constexpr const char* kGraphicsBackendName = "D3D12";
+using GraphicsBackend = OpenXRWindowsBackend;
+
 #else
 using GraphicsBackend = OpenXRVulkanBackend;
 inline constexpr const char* kGraphicsBackendName = "Vulkan";
@@ -360,7 +360,11 @@ public:
         }
 #endif
         runtime_ = std::make_unique<OpenXRRuntime>(logger_);
+#if defined(_WIN32)
+        backend_ = std::make_unique<GraphicsBackend>(logger_, kRequiredAuroraBackend == BACKEND_VULKAN);
+#else
         backend_ = std::make_unique<GraphicsBackend>(logger_);
+#endif
 
         OpenXRConfig config{};
         config.application_name = aurora_config.appName != nullptr ? aurora_config.appName
@@ -368,7 +372,7 @@ public:
         config.engine_name = "Aurora";
         config.resolution_scale = RuntimeConfigFile::VrRenderScale();
 #if defined(_WIN32)
-        config.required_extensions = {"XR_KHR_D3D12_enable"};
+        config.required_extensions = {kRequiredAuroraBackend == BACKEND_VULKAN ? "XR_KHR_vulkan_enable2" : "XR_KHR_D3D12_enable"};
         config.optional_extensions = {"XR_KHR_win32_convert_performance_counter_time",
                                       "XR_FB_display_refresh_rate", "XR_EXT_performance_settings"};
 #else
@@ -567,7 +571,8 @@ private:
     };
 
 #if defined(_WIN32)
-    static constexpr AuroraBackend kRequiredAuroraBackend = BACKEND_D3D12;
+    AuroraBackend kRequiredAuroraBackend = BACKEND_D3D12;
+    const char* kGraphicsBackendName = "D3D12";
 #else
     static constexpr AuroraBackend kRequiredAuroraBackend = BACKEND_VULKAN;
 #endif
@@ -576,6 +581,10 @@ private:
     static constexpr uint32_t kMaxConsecutiveSkips = 300;
 
     bool BackendMatchesConfiguredGraphicsApi(const AuroraConfig& aurora_config) {
+#if defined(_WIN32)
+        kRequiredAuroraBackend = aurora_config.desiredBackend == BACKEND_VULKAN ? BACKEND_VULKAN : BACKEND_D3D12;
+        kGraphicsBackendName = kRequiredAuroraBackend == BACKEND_VULKAN ? "Vulkan" : "D3D12";
+#endif
         if (aurora_config.desiredBackend == BACKEND_AUTO ||
             aurora_config.desiredBackend == kRequiredAuroraBackend) {
             return true;
@@ -589,6 +598,7 @@ private:
         aurora_config.desiredBackend = kRequiredAuroraBackend;
         aurora_config.xrInterop = true;
 #if defined(_WIN32)
+        if (kRequiredAuroraBackend != BACKEND_D3D12) return;
         const auto& requirements = backend_->GraphicsRequirements();
         aurora_config.hasD3D12AdapterLuid = true;
         aurora_config.d3d12AdapterLuidLow = requirements.adapter_luid_low;

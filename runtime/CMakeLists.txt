@@ -286,6 +286,15 @@ if(MKW_PROJECT_COMPILE_DEFINITIONS)
     add_compile_definitions(${MKW_PROJECT_COMPILE_DEFINITIONS})
 endif()
 
+if(MKW_PLATFORM_WINDOWS AND MKW_ENABLE_OPENXR)
+    include(FetchContent)
+    FetchContent_Declare(vulkan_headers
+        URL "https://github.com/KhronosGroup/Vulkan-Headers/archive/015e25c3c91b70eb1a754d36fb14c4ba6ad9b0b9.tar.gz"
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(vulkan_headers)
+    include_directories("${vulkan_headers_SOURCE_DIR}/include")
+endif()
+
 set(MKW_OPENXR_TARGET "")
 if(MKW_ENABLE_OPENXR)
     if(NOT MKW_PLATFORM_WINDOWS AND NOT MKW_PLATFORM_LINUX AND NOT MKW_PLATFORM_ANDROID)
@@ -340,6 +349,7 @@ endif()
 # a registration file is silently never compiled and never errors. The stale-glob
 # failure mode is worth far more than the milliseconds.
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
+set_source_files_properties(src/vr/openxr_vulkan_win32.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
 if(MKW_PLATFORM_MACOS)
     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory.cpp")
     # HostContext's Apple Silicon backend is implemented in a small assembly
@@ -453,6 +463,16 @@ if(MKW_ENABLE_OPENXR AND MKW_PLATFORM_WINDOWS)
     target_compile_features(mkw_openxr_replay_tests PRIVATE cxx_std_17)
     set_target_properties(mkw_openxr_replay_tests PROPERTIES UNITY_BUILD OFF)
     add_test(NAME mkw_openxr_replay_tests COMMAND mkw_openxr_replay_tests)
+    add_executable(mkw_openxr_vulkan_replay_tests
+        tests/openxr_d3d12_replay_tests.cpp src/vr/openxr_vulkan_win32.cpp src/vr/openxr_diagnostics.cpp)
+    target_include_directories(mkw_openxr_vulkan_replay_tests PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/include"
+        "${CMAKE_CURRENT_LIST_DIR}/../aurora-main/include"
+        "$<TARGET_PROPERTY:${MKW_OPENXR_TARGET},INTERFACE_INCLUDE_DIRECTORIES>")
+    target_compile_definitions(mkw_openxr_vulkan_replay_tests PRIVATE MKW_ENABLE_OPENXR=1 TEST_WINDOWS_VULKAN=1)
+    target_compile_features(mkw_openxr_vulkan_replay_tests PRIVATE cxx_std_17)
+    set_target_properties(mkw_openxr_vulkan_replay_tests PROPERTIES UNITY_BUILD OFF)
+    add_test(NAME mkw_openxr_vulkan_replay_tests COMMAND mkw_openxr_vulkan_replay_tests)
 endif()
 
 add_executable(mkw_nand_save_tests "${CMAKE_CURRENT_LIST_DIR}/tests/nand_save_tests.cpp")

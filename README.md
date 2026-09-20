@@ -50,7 +50,8 @@ The graphics layer is built on
 Play at several times the console's resolution.
 
 **Experimental OpenXR VR.**
-Windows builds can render through a D3D12 OpenXR runtime without CPU readback. Menus and
+Windows builds can render through an OpenXR runtime on D3D12, or on Vulkan with a custom Dawn
+build, without CPU readback. Menus and
 unsupported scenes appear as a head-locked virtual screen; a validated single-camera race switches
 to immersive stereo rendering. VR is opt-in and falls back to the normal desktop renderer if the
 runtime or headset is unavailable. See [`OPENXR.md`](OPENXR.md) for setup, configuration, and the
@@ -131,7 +132,8 @@ Saves and Miis use the normal installation's effective NAND; Retro Rewind retain
 XML-directed saves and ghosts. Graphics, VR preferences, caches, and compiled binaries stay separate.
 Uninstalling either backend in WheelWizard VR preserves configuration and shared progress.
 
-Managed VR launches enable OpenXR with D3D12. If the runtime or headset is unavailable, the game
+Managed VR launches enable OpenXR with D3D12; the Vulkan binding is opt-in through
+`video.graphics_api` (see [OPENXR.md](OPENXR.md)). If the runtime or headset is unavailable, the game
 continues on the desktop and displays the failure briefly; **F10 → VR** retains the explanation.
 See [OpenXR configuration](OPENXR.md) and [distribution and validation](DISTRIBUTION.md).
 

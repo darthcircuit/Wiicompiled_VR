@@ -3,7 +3,10 @@
 WiiCompiled has an opt-in OpenXR rendering path. The first functional backend is Windows D3D12.
 It asks the OpenXR runtime for the required GPU before Aurora creates Dawn, then copies each eye
 on that same D3D12 device and queue into the acquired OpenXR swapchain images. Eye submission
-stays on the GPU; there is no CPU texture readback and no second graphics device.
+stays on the GPU; there is no CPU texture readback and no second graphics device. Windows Vulkan is
+an opt-in second binding built on the same design: the OpenXR runtime creates Dawn's Vulkan instance
+and device (`XR_KHR_vulkan_enable2`) and eyes are copied on that same queue. It needs a custom Dawn
+build; see [Windows Vulkan](#windows-vulkan).
 
 This is an experimental renderer, not yet a release-ready VR mode.
 
@@ -11,14 +14,16 @@ This is an experimental renderer, not yet a release-ready VR mode.
 
 - A Windows OpenXR runtime selected as the system's active runtime.
 - A connected headset supported by that runtime.
-- A D3D12-capable GPU and driver accepted by both OpenXR and Dawn.
+- A D3D12-capable GPU and driver accepted by both OpenXR and Dawn, or for the opt-in Vulkan
+  binding a Vulkan 1.1+ driver plus the custom Dawn described under [Windows Vulkan](#windows-vulkan).
 - A build made with `MKW_ENABLE_OPENXR=ON`, which defaults on for Windows and off elsewhere while
   the Vulkan bridge remains capability-gated.
 
 For managed installation, use [WheelWizard VR](https://github.com/iChris4/WheelWizard_VR/releases/latest)
 and enable **Settings → Other → WiiCompiled (beta) → Enable WiiCompiled OpenXR VR (beta)**.
 The launcher sets `vr.enabled=true`, `vr.required=false`, and `video.graphics_api="d3d12"` before
-each VR launch, preserving other preferences. Its portable configuration lives at
+each VR launch, preserving other preferences. Setting `video.graphics_api = "vulkan"` in that
+configuration selects the Vulkan binding instead. Its portable configuration lives at
 `RecompVR/UserData/Config.toml` beneath WheelWizard's data folder. Normal graphics settings remain
 in `Recomp/UserData/Config.toml`. Both backends use the normal installation's effective NAND.
 
@@ -320,7 +325,7 @@ short-lived immutable stereo packet. Each sealed GX frame and immersive packet c
 policy-generation tag; a mismatch is rendered in mono and the acquired XR frame is canceled, so an
 asynchronous menu/race transition cannot replay race transforms over unsafe content.
 
-With interpolation off, both PC (D3D12) and standalone (Vulkan) pace render-first:
+With interpolation off, PC (D3D12 and Windows Vulkan) and standalone (Android Vulkan) pace render-first:
 the pacing thread locates views for an estimated display time (two periods past the last
 prediction), hands Aurora a packet without leaving a compositor frame open, and waits for
 rendering. A 50 ms stall repeats the retained layer; cancellation also advances a keep-alive
@@ -328,16 +333,17 @@ cycle to refresh timing. Once rendering is submitted, the thread calls xrWaitFra
 xrBeginFrame, completes backend-specific copy/release work, and ends the frame using the
 packet's original render poses with the current compositor display time.
 
-Vulkan renders into shared buffers and copies them into newly acquired XR images afterward.
-D3D12 acquires images from its non-retained swapchain pair before rendering; Aurora queues the
-copy on the session's D3D12 queue before reporting completion. PC therefore needs no additional
+Android Vulkan renders into shared buffers and copies them into newly acquired XR images afterward.
+Both PC bindings acquire images from their non-retained swapchain pair before rendering; Aurora
+queues the copy on the session's queue before reporting completion. PC therefore needs no additional
 copy in the short compositor cycle. Pending images remain acquired and separate from the
 retained pair until completion or confirmed cancellation before encoding. GPU failure still
 requires the existing queue-drain teardown. Rendered poses keep the session/reference-space
 serials recorded when the packet was prepared, so changes during rendering invalidate them.
 
 VR interpolation keeps the frame-first order on both backends because it renders for the
-frame's own predicted display time. The log announces `OpenXR D3D12 pacing: render-first` or
+frame's own predicted display time. The log announces `OpenXR D3D12 pacing: render-first` (or
+`OpenXR Vulkan pacing: …` on the Vulkan binding) or
 `frame-first (VR interpolation)` on each transition. For PC testing, disable **VR** frame
 interpolation for a race capture; changing desktop interpolation alone does not select this
 path. Menus use render-first even when VR interpolation is configured for races. Compare the
@@ -456,7 +462,7 @@ When it is on, `console.log` receives lines tagged `[runtime] [xr-diag]`
 | `poll-events`, `begin-call`, `locate-views` | Event polling, the xrBeginFrame call itself, and xrLocateViews. |
 | `input-sync`, `sync-actions` | Complete input update and its xrSyncActions call. |
 | `publish`, `withdraw` | Packet construction/publication and withdrawal, including mutex waits. |
-| `set-targets` | D3D12 bridge target registration, including its mutex wait. |
+| `set-targets` | D3D12/Vulkan bridge target registration, including its mutex wait. |
 | `submission-wait` | Actual time waiting for a render result, including timeout paths; compare against the requested 50 ms. |
 | `cancel` | Bridge cancellation attempt, whether it succeeds or fails. |
 | `cancel-age` | Publication to cancellation, including packets never picked up. |
@@ -491,11 +497,58 @@ The current `console.log` is copied through a shared-read stream while it is sti
 The copy runs on SDL's dialog thread (`runtime/src/log_export.cpp`), and the outcome is shown under
 the button. `mkw_openxr_diagnostics_tests` and `mkw_log_export_tests` cover both without a headset.
 
+## Windows Vulkan
+
+`video.graphics_api = "vulkan"` selects a second Windows binding, `runtime/src/vr/openxr_vulkan_win32.cpp`,
+with the same pacing thread, retained-layer protocol and policy as D3D12
+(`runtime/include/vr/openxr_windows.h` picks the backend at startup). It is opt-in. It has raced on
+a headset (SteamVR/OpenXR with a PlayStation VR2): immersive projection held the headset's full
+90 Hz with no skipped display slots, and a 646-second session recorded no rejected or discarded
+layers and no failed submissions. Other runtimes are still unexercised.
+
+**Why a custom Dawn.** The pinned prebuilt Dawn DLL exposes no native Vulkan device, so
+`aurora-main/patches/dawn` adds a small versioned C ABI to the pinned Dawn source
+(`aurora_dawn_vulkan_abi.h`, `AURORA_DAWN_VULKAN_ABI = 1`): hooks that let the OpenXR runtime
+create Dawn's `VkInstance`, choose the physical device and create the `VkDevice`; wrapping of a
+borrowed `VkImage` as a Dawn texture; the release barrier back to `COLOR_ATTACHMENT_OPTIMAL`; a
+device-guard lock; and a queue drain. `Launcher/Build-DawnVulkan.ps1` builds that DLL from the pinned
+revision on a machine with Visual Studio 2022, Python 3.12+ and CMake, and writes `aurora-vulkan.json`
+(revision, ABI, DLL hash). `Launcher/Prepare-Dependencies.ps1 -DawnVulkanPackage <dir>` installs it as
+`dawn_prebuilt` in a fresh dependency destination after checking that provenance; re-harvest
+`native_prebuilt` afterwards because the archives are pinned to the Dawn DLL hash. The runtime
+build also fetches Vulkan headers (`vulkan_headers` dependency).
+
+**Startup.** `QueryGraphicsRequirements` loads `xrGetVulkanGraphicsRequirements2KHR`,
+`xrCreateVulkanInstanceKHR`, `xrCreateVulkanDeviceKHR` and `xrGetVulkanGraphicsDevice2KHR`, then
+installs the hooks in Dawn. Without the custom DLL it fails with *"requires the custom Dawn library
+with Aurora Vulkan ABI 1"* and the game continues on the desktop renderer. During
+`aurora_initialize` the runtime creates Dawn's instance (Vulkan 1.2 is requested when the loader
+and runtime allow it, so that timeline semaphores, which PC runtimes create on the application's
+device, are a core feature the device hook can enable) and device on the runtime's physical GPU.
+`BindAurora` confirms that Dawn's physical device is the one the runtime selected, creates the
+session on Dawn's graphics queue, picks the sRGB sibling of Aurora's UNORM colour format (with
+`XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT`) so the compositor decodes the gamma-encoded bytes, and
+enables the bridge.
+
+**Frames.** Each acquired XR image is wrapped once as a Dawn texture and reused. Aurora's frame
+worker records the eye copies into its own command buffer; immediately after `queue.Submit`, still
+under Aurora's submit mutex, the bridge appends the release barrier through Dawn's queue and
+publishes the token that the pacing thread's `WaitForSubmission` consumes. The runtime may use
+the VkQueue only inside `xrBeginFrame`, `xrEndFrame`, `xrAcquireSwapchainImage` and
+`xrReleaseSwapchainImage`, so `OpenXRRuntime::LockGraphicsQueue` holds Dawn's device guard around
+exactly those four calls and never across `xrWaitFrame` or `xrWaitSwapchainImage`.
+
+**Tests.** `mkw_openxr_vulkan_replay_tests` compiles the real backend against the deterministic
+compositor of the D3D12 replay tests, including the queue-guard requirement on acquire and release.
+`vulkan_native_bridge_smoke` (aurora, `AURORA_GPU_SMOKE_TESTS=ON`, real GPU, no headset) drives the
+custom DLL's ABI through three borrowed-image copy/readback cycles; run it with that DLL beside it.
+
 ## Backend status
 
 | Backend | Status |
 | --- | --- |
 | Windows D3D12 | Implemented: same-adapter, same-device asynchronous OpenXR submission. |
+| Windows Vulkan | Implemented, opt-in (`video.graphics_api = "vulkan"`): the runtime creates Dawn's Vulkan instance and device through `XR_KHR_vulkan_enable2`, eyes are copied on the same queue, and Dawn's device guard is held around the four queue-touching OpenXR calls. Needs the custom Dawn from `Launcher/Build-DawnVulkan.ps1`. Raced on SteamVR/PSVR2 at the headset's full rate; other runtimes unexercised. See [Windows Vulkan](#windows-vulkan). |
 | Android Vulkan (Meta Quest) | Implemented and running on a Quest 3: the OpenXR side owns its own Vulkan device (`XR_KHR_vulkan_enable2`, `XR_KHR_vulkan_enable` fallback) and shares eyes with Dawn through `AHardwareBuffer`s ordered by sync-fd fences. Controllers arrive through OpenXR actions as a virtual SDL gamepad. See `docs/quest-port.md`. |
 | Linux Vulkan | Not wired. The pinned Dawn package does not expose a native Vulkan device, and the AHardwareBuffer bridge is Android-only; a dma-buf/opaque-fd variant of the same design would cover desktop Linux. |
 | Other platforms | Not wired yet. |

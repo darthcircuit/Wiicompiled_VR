@@ -724,6 +724,7 @@ bool OpenXRRuntime::BeginFrame(const OpenXRFrame& frame) {
 
     XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
     const XrResult result = diagnostics::Measure(diagnostics::Stage::BeginCall, [&] {
+        const auto queue_guard = LockGraphicsQueue();
         return xrBeginFrame(m_session, &begin_info);
     });
     if (XR_FAILED(result)) {
@@ -816,7 +817,10 @@ bool OpenXRRuntime::EndFrame(
     end_info.layerCount = layer_count;
     end_info.layers = layers;
     const diagnostics::Stopwatch end_timer;
-    const XrResult result = xrEndFrame(m_session, &end_info);
+    const XrResult result = [&] {
+        const auto queue_guard = LockGraphicsQueue();
+        return xrEndFrame(m_session, &end_info);
+    }();
     diagnostics::OnEndFrame(end_timer);
     m_frame_phase = FramePhase::Idle;
     m_active_frame_serial = 0;

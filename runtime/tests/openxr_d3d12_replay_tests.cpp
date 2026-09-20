@@ -1,6 +1,23 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Exercise the real backend against a deterministic compositor and Aurora sink.
 // No headset, graphics driver, OpenXR loader, or translated game is required.
+#if defined(TEST_WINDOWS_VULKAN)
+#define XR_USE_GRAPHICS_API_VULKAN
+#include <vulkan/vulkan.h>
+#include <openxr/openxr_platform.h>
+#include <aurora/vulkan_win32_interop.h>
+#include "vr/openxr_vulkan_win32.h"
+#define OpenXRD3D12Backend OpenXRWindowsVulkanBackend
+#define OpenXRD3D12BeginStatus OpenXRWindowsVulkanBeginStatus
+#define OpenXRD3D12SubmissionStatus OpenXRWindowsVulkanSubmissionStatus
+#define OpenXRD3D12Frame OpenXRWindowsVulkanFrame
+#define OpenXRD3D12Presentation OpenXRWindowsVulkanPresentation
+#define OpenXRD3D12FrameMode OpenXRWindowsVulkanFrameMode
+#define aurora_d3d12_enable_stereo_bridge aurora_vulkan_win32_enable
+#define aurora_d3d12_set_stereo_targets aurora_vulkan_win32_set_targets
+#define aurora_d3d12_cancel_stereo_targets aurora_vulkan_win32_cancel
+#define aurora_d3d12_disable_stereo_bridge aurora_vulkan_win32_disable
+#else
 #define CINTERFACE
 #define XR_USE_GRAPHICS_API_D3D12
 #ifndef NOMINMAX
@@ -10,8 +27,10 @@
 #include <openxr/openxr_platform.h>
 #include <aurora/d3d12_interop.h>
 #include "vr/openxr_d3d12.h"
+#endif
 
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <vector>
 
@@ -65,6 +84,26 @@ void Complete(bool success = true) {
     encoded = false;
 }
 
+#if defined(TEST_WINDOWS_VULKAN)
+AuroraDawnVulkanHooks hooks{};
+bool queue_locked = false;
+XrResult XRAPI_CALL Requirements(XrInstance, XrSystemId, XrGraphicsRequirementsVulkanKHR* out) {
+    out->minApiVersionSupported = XR_MAKE_VERSION(1, 1, 0);
+    out->maxApiVersionSupported = XR_MAKE_VERSION(1, 3, 0);
+    return XR_SUCCESS;
+}
+XrResult XRAPI_CALL Physical(XrInstance, const XrVulkanGraphicsDeviceGetInfoKHR*, VkPhysicalDevice* out) {
+    *out = reinterpret_cast<VkPhysicalDevice>(2); return XR_SUCCESS;
+}
+XrResult XRAPI_CALL CreateInstance(XrInstance, const XrVulkanInstanceCreateInfoKHR* info, VkInstance* out, VkResult* result) {
+    Require(info->vulkanCreateInfo->pApplicationInfo->apiVersion >= VK_API_VERSION_1_1);
+    *out = reinterpret_cast<VkInstance>(1); *result = VK_SUCCESS; return XR_SUCCESS;
+}
+XrResult XRAPI_CALL CreateDevice(XrInstance, const XrVulkanDeviceCreateInfoKHR* info, VkDevice* out, VkResult* result) {
+    Require(info->vulkanPhysicalDevice == reinterpret_cast<VkPhysicalDevice>(2));
+    *out = reinterpret_cast<VkDevice>(3); *result = VK_SUCCESS; return XR_SUCCESS;
+}
+#else
 HRESULT STDMETHODCALLTYPE FeatureSupport(ID3D12Device*, D3D12_FEATURE,
                                          void* data, UINT) {
     static_cast<D3D12_FEATURE_DATA_FEATURE_LEVELS*>(data)->MaxSupportedFeatureLevel =
@@ -77,10 +116,28 @@ XrResult XRAPI_CALL Requirements(XrInstance, XrSystemId,
     requirements->minFeatureLevel = D3D_FEATURE_LEVEL_11_0;
     return XR_SUCCESS;
 }
+#endif
 }
 
 // A COM vtable in its C representation supplies the single device operation
 // used by BindAurora. The production backend is compiled normally as C++.
+#if defined(TEST_WINDOWS_VULKAN)
+bool aurora_vulkan_win32_configure(const AuroraDawnVulkanHooks* value) {
+    hooks = value ? *value : AuroraDawnVulkanHooks{}; return true;
+}
+bool aurora_vulkan_win32_get_handles(AuroraDawnVulkanHandles* handles, int64_t* format) {
+    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    app.apiVersion = VK_API_VERSION_1_0;
+    VkInstanceCreateInfo instance{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO}; instance.pApplicationInfo = &app;
+    Require(hooks.createInstance(hooks.userdata, nullptr, &instance, nullptr, &handles->instance) == VK_SUCCESS);
+    Require(hooks.getPhysicalDevice(hooks.userdata, handles->instance, &handles->physicalDevice) == VK_SUCCESS);
+    VkDeviceCreateInfo device{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    Require(hooks.createDevice(hooks.userdata, nullptr, handles->physicalDevice, &device, nullptr, &handles->device) == VK_SUCCESS);
+    *format = VK_FORMAT_R8G8B8A8_UNORM; return true;
+}
+void* aurora_vulkan_win32_lock_queue() { Require(!queue_locked); queue_locked = true; return &queue_locked; }
+void aurora_vulkan_win32_unlock_queue(void*) { Require(queue_locked); queue_locked = false; }
+#else
 bool aurora_d3d12_get_native_handles(AuroraD3D12NativeHandles* handles) {
     static ID3D12DeviceVtbl vtable{};
     vtable.CheckFeatureSupport = FeatureSupport;
@@ -88,6 +145,7 @@ bool aurora_d3d12_get_native_handles(AuroraD3D12NativeHandles* handles) {
     *handles = {&device, &device, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 0};
     return true;
 }
+#endif
 bool aurora_d3d12_enable_stereo_bridge(AuroraD3D12StereoSubmittedCallback cb, void* data) {
     callback = cb;
     callback_data = data;
@@ -119,13 +177,21 @@ XrResult XRAPI_CALL xrCreateSwapchain(XrSession, const XrSwapchainCreateInfo*, X
 XrResult XRAPI_CALL xrEnumerateSwapchainImages(XrSwapchain handle, uint32_t capacity,
                                              uint32_t* count, XrSwapchainImageBaseHeader* images) {
     *count = 1; // Single-image swapchains also require a separate retained pair.
+#if defined(TEST_WINDOWS_VULKAN)
+    if (capacity) reinterpret_cast<XrSwapchainImageVulkanKHR*>(images)->image =
+        reinterpret_cast<VkImage>(&reinterpret_cast<Swapchain*>(handle)->image);
+#else
     if (capacity) reinterpret_cast<XrSwapchainImageD3D12KHR*>(images)->texture =
         reinterpret_cast<ID3D12Resource*>(&reinterpret_cast<Swapchain*>(handle)->image);
+#endif
     return XR_SUCCESS;
 }
 XrResult XRAPI_CALL xrAcquireSwapchainImage(XrSwapchain handle,
                                           const XrSwapchainImageAcquireInfo*, uint32_t* index) {
     auto& chain = *reinterpret_cast<Swapchain*>(handle);
+#if defined(TEST_WINDOWS_VULKAN)
+    Require(queue_locked);
+#endif
     Require(!chain.acquired);
     chain.acquired = true;
     chain.waited = false;
@@ -141,6 +207,9 @@ XrResult XRAPI_CALL xrWaitSwapchainImage(XrSwapchain handle, const XrSwapchainIm
 XrResult XRAPI_CALL xrReleaseSwapchainImage(XrSwapchain handle,
                                           const XrSwapchainImageReleaseInfo*) {
     auto& chain = *reinterpret_cast<Swapchain*>(handle);
+#if defined(TEST_WINDOWS_VULKAN)
+    Require(queue_locked); // The runtime may touch Dawn's VkQueue here.
+#endif
     Require(chain.acquired && chain.waited);
     chain.acquired = false;
     chain.released = true;
@@ -158,14 +227,24 @@ XrResult XRAPI_CALL xrDestroySwapchain(XrSwapchain handle) {
 namespace mkw::vr {
 OpenXRRuntime::OpenXRRuntime(OpenXRLogCallback) {
     m_instance = reinterpret_cast<XrInstance>(this);
+#if defined(TEST_WINDOWS_VULKAN)
+    m_swapchain_formats = {VK_FORMAT_R8G8B8A8_SRGB};
+#else
     m_swapchain_formats = {DXGI_FORMAT_R8G8B8A8_UNORM_SRGB};
+#endif
     for (auto& view : m_view_configuration) {
         view.render_width = 100;
         view.render_height = 80;
     }
 }
 OpenXRRuntime::~OpenXRRuntime() = default;
-bool OpenXRRuntime::GetInstanceProcAddress(const char*, PFN_xrVoidFunction* out) {
+bool OpenXRRuntime::GetInstanceProcAddress(const char* name, PFN_xrVoidFunction* out) {
+#if defined(TEST_WINDOWS_VULKAN)
+    if (std::strcmp(name, "xrCreateVulkanInstanceKHR") == 0) *out = reinterpret_cast<PFN_xrVoidFunction>(::CreateInstance);
+    else if (std::strcmp(name, "xrCreateVulkanDeviceKHR") == 0) *out = reinterpret_cast<PFN_xrVoidFunction>(CreateDevice);
+    else if (std::strcmp(name, "xrGetVulkanGraphicsDevice2KHR") == 0) *out = reinterpret_cast<PFN_xrVoidFunction>(Physical);
+    else
+#endif
     *out = reinterpret_cast<PFN_xrVoidFunction>(Requirements);
     return true;
 }

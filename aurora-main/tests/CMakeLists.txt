@@ -3,6 +3,18 @@ include(GoogleTest)
 
 option(AURORA_GPU_SMOKE_TESTS "Build opt-in tests requiring a desktop GPU" OFF)
 if (AURORA_GPU_SMOKE_TESTS AND AURORA_ENABLE_GX AND WIN32)
+  # Exercises the custom Dawn DLL's Aurora Vulkan ABI (patches/dawn). Run it with that
+  # webgpu_dawn.dll beside the executable; the stock prebuilt Dawn lacks the exports and the
+  # test reports that at startup. Vulkan headers come from the SDK or any tree on
+  # AURORA_TEST_VULKAN_INCLUDE (the runtime's FetchContent copy works).
+  find_path(AURORA_TEST_VULKAN_INCLUDE vulkan/vulkan.h HINTS "$ENV{VULKAN_SDK}/Include")
+  if (AURORA_TEST_VULKAN_INCLUDE)
+    add_executable(vulkan_native_bridge_smoke vulkan_native_bridge_smoke.cpp)
+    target_include_directories(vulkan_native_bridge_smoke PRIVATE ../include "${AURORA_TEST_VULKAN_INCLUDE}")
+    target_link_libraries(vulkan_native_bridge_smoke PRIVATE dawn::webgpu_dawn dawn::dawncpp_headers)
+  else ()
+    message(STATUS "vulkan_native_bridge_smoke skipped: no vulkan/vulkan.h (set VULKAN_SDK or AURORA_TEST_VULKAN_INCLUDE)")
+  endif ()
   add_executable(stereo_frame_worker_smoke stereo_frame_worker_smoke.cpp)
   target_include_directories(stereo_frame_worker_smoke PRIVATE ../lib)
   target_link_libraries(stereo_frame_worker_smoke PRIVATE aurora::core aurora::gx aurora::main aurora::vi
