@@ -21,9 +21,10 @@ This is an experimental renderer, not yet a release-ready VR mode.
 
 For managed installation, use [WheelWizard VR](https://github.com/iChris4/WheelWizard_VR/releases/latest)
 and enable **Settings → Other → WiiCompiled (beta) → Enable WiiCompiled OpenXR VR (beta)**.
-The launcher sets `vr.enabled=true`, `vr.required=false`, and `video.graphics_api="d3d12"` before
-each VR launch, preserving other preferences. Setting `video.graphics_api = "vulkan"` in that
-configuration selects the Vulkan binding instead. Its portable configuration lives at
+The launcher sets `vr.enabled=true` and `vr.required=false` before each VR launch, preserving other
+preferences. Its **Graphics API** row picks the binding, DirectX 12 or Vulkan, and keeps that choice;
+any other value is repaired to `d3d12` at launch, because OpenXR refuses the rest. Its portable
+configuration lives at
 `RecompVR/UserData/Config.toml` beneath WheelWizard's data folder. Normal graphics settings remain
 in `Recomp/UserData/Config.toml`. Both backends use the normal installation's effective NAND.
 
