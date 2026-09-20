@@ -251,7 +251,7 @@ extern "C" void GX__InitTexObj_801707f8(uint32_t oa, uint32_t da, uint32_t w, ui
     }
     const uint32_t canonicalDataAddr = CanonicalizeGxMainRamAddress(da);
     std::lock_guard<std::mutex> guard(g_texObjMutex); TexObjMeta& meta = GetTexObjMeta(oa);
-    meta.dataAddr=canonicalDataAddr; meta.width=(u16)w; meta.height=(u16)h; meta.format=f; meta.wrapS=ws; meta.wrapT=wt; meta.mipmap=(m!=0); meta.userData=0; meta.needsUpload=true;
+    meta.dataAddr=canonicalDataAddr; meta.width=(u16)w; meta.height=(u16)h; meta.format=f; meta.wrapS=ws; meta.wrapT=wt; meta.mipmap=(m!=0); meta.userData=0; meta.needsUpload=true; meta.reinitPending=true;
     // Also write to guest memory so reads work
     WriteGuestTexObj(oa, canonicalDataAddr, (u16)w, (u16)h, f, ws, wt, m != 0, false, 0);
 }
@@ -291,7 +291,7 @@ extern "C" void GX__InitTexObjCI_80170a04(uint32_t oa, uint32_t da, uint32_t w, 
     }
     const uint32_t canonicalDataAddr = CanonicalizeGxMainRamAddress(da);
     std::lock_guard<std::mutex> guard(g_texObjMutex); TexObjMeta& meta = GetTexObjMeta(oa);
-    meta.dataAddr=canonicalDataAddr; meta.width=(u16)w; meta.height=(u16)h; meta.format=f; meta.wrapS=ws; meta.wrapT=wt; meta.mipmap=(m!=0); meta.tlut=tl; meta.userData=0; meta.needsUpload=true;
+    meta.dataAddr=canonicalDataAddr; meta.width=(u16)w; meta.height=(u16)h; meta.format=f; meta.wrapS=ws; meta.wrapT=wt; meta.mipmap=(m!=0); meta.tlut=tl; meta.userData=0; meta.needsUpload=true; meta.reinitPending=true;
     // Also write to guest memory so reads work
     WriteGuestTexObj(oa, canonicalDataAddr, (u16)w, (u16)h, f, ws, wt, m != 0, true, tl);
     // GXInitTexObjCI clears bit1 in the flags byte; keep guest memory consistent.
@@ -528,7 +528,9 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
     load.objAddr = oa;
     load.tid = tid;
     load.upload = meta.needsUpload;
+    load.reinit = meta.reinitPending;
     meta.needsUpload = false;
+    meta.reinitPending = false;
     load.meta = meta;
     // Write through GetTexObjMeta so the DCStoreRange interval index is
     // told this entry's backing may have moved.
@@ -627,7 +629,10 @@ void GxHostLoadTexObj_gx(GxTexObjLoad load) {
     const uint32_t size = GXGetTexBufferSize(meta.width, meta.height, meta.format, (GXBool)meta.mipmap, maxLod);
     GxHostTexObjEntry& entry = g_gxHostTexObjs[oa];
     GXTexObj* obj = entry.host.constructed ? entry.host.PublicPtr() : nullptr;
-    const bool needsInit = obj == nullptr || !SameTexObjBuildMeta(entry.cached, meta);
+    // A guest GXInitTexObj always rebuilt the aurora object before this split;
+    // keeping that resets texDataVersion, so aurora's static upload cache keeps
+    // hitting for textures the game re-initialises every frame (menu captures).
+    const bool needsInit = obj == nullptr || load.reinit || !SameTexObjBuildMeta(entry.cached, meta);
     bool textureDataUploaded = false;
     try {
         if (needsInit) {

@@ -723,6 +723,23 @@ waited under 0.1 ms per frame in its two `GXDrawDone` drains and never for
 ring space, and the GX thread was 25 to 40% busy. Retro Rewind's menus were
 unaffected (prewarm 5.2 s, 60 fps).
 
+Two things the first day on it taught. The Retro Rewind menu with the blurred
+background fell to 14 to 18 fps, with the GX thread on or off, and the
+per-record profile that the `fpslog` line now carries (`costliest:`) put it
+all in the FIFO records: the game re-initialises its capture texture objects
+every frame, and the split had kept one aurora object per guest object alive
+across those re-initialisations, so `GXInitTexObjData` kept incrementing
+`texDataVersion`, which is part of aurora's static upload key, and every
+frame converted every such texture again (`convert_texture` 18% of the
+thread). A guest `GXInitTexObj` now rebuilds the aurora object, as it always
+had, so the version restarts and the upload cache hits. Second, that menu
+calls `GXDrawDone` 22 to 24 times per frame (the base main menu 9 times),
+and each drain cost about 1.5 ms while the game thread slept on a condition
+variable: both the drain and the idle consumer now spin for a few hundred
+microseconds before blocking, with a sequentially consistent sleep handshake,
+and the 22 drains cost 2.6 ms per frame in total; that screen runs at 60 with
+the thread on.
+
 Verified on device since: the menus on the virtual screen, controller input
 (the user has driven races), and an immersive Grand Prix start with all 12
 racers rendering correctly. Not yet verified: stereo comfort and scale,

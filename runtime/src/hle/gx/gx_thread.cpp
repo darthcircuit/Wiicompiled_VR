@@ -8,9 +8,11 @@
 #include <exception>
 #include <mutex>
 #include <thread>
+#include <algorithm>
 #if defined(_WIN32)
 #include <windows.h>
 #else
+#include <dlfcn.h>
 #include <pthread.h>
 #include <unistd.h>
 #if defined(__linux__)
@@ -30,7 +32,11 @@ constexpr uint32_t kRingBytes = 16u << 20;
 constexpr uint32_t kRingMask = kRingBytes - 1u;
 constexpr uint32_t kHeaderBytes = 16;
 constexpr uint32_t kFifoChunkBytes = 8192;
-constexpr uint32_t kConsumerSpinIterations = 4000;
+// An empty ring is usually a gap of microseconds between two bursts of the
+// same frame, so the consumer spins that long before it pays a futex sleep;
+// a drain likewise spins before blocking, since its backlog is normally short.
+constexpr std::chrono::microseconds kConsumerSpinBudget{50};
+constexpr std::chrono::microseconds kDrainSpinBudget{300};
 
 struct Header {
     uint64_t invoke;
@@ -78,6 +84,66 @@ uint64_t g_statSpaceWaitNs = 0;
 uint64_t g_statQueuePeakBytes = 0;
 std::atomic<uint64_t> g_statBusyNs{0};
 std::atomic<uint64_t> g_statFaults{0};
+
+// Per-record-kind profile for the frame-rate log: keyed by the back function
+// (or 1 for FIFO chunks, 2 for fences). Consumer-written; the producer reads
+// it when it formats the log line, which is diagnostics, not synchronisation.
+struct RecordProfile {
+    uintptr_t key = 0;
+    uint64_t ns = 0;
+    uint64_t count = 0;
+};
+constexpr size_t kProfileSlots = 128;
+constexpr uintptr_t kProfileKeyFifo = 1;
+constexpr uintptr_t kProfileKeyFence = 2;
+RecordProfile g_profile[kProfileSlots];
+
+void ProfileRecord(uintptr_t key, uint64_t ns) {
+    size_t slot = static_cast<size_t>(key >> 4) % kProfileSlots;
+    for (size_t probe = 0; probe < kProfileSlots; ++probe) {
+        RecordProfile& entry = g_profile[slot];
+        if (entry.key == key || entry.key == 0) {
+            entry.key = key;
+            entry.ns += ns;
+            ++entry.count;
+            return;
+        }
+        slot = (slot + 1) % kProfileSlots;
+    }
+}
+
+// Names a back function for the log: its symbol when the loader knows it,
+// otherwise its offset in the module, for llvm-symbolizer on the build's .so.
+std::string DescribeProfileKey(uintptr_t key) {
+    if (key == kProfileKeyFifo) {
+        return "fifo";
+    }
+    if (key == kProfileKeyFence) {
+        return "fence";
+    }
+    char buffer[96];
+#if defined(_WIN32)
+    HMODULE module = nullptr;
+    if (::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                             reinterpret_cast<LPCWSTR>(key), &module) && module != nullptr) {
+        std::snprintf(buffer, sizeof(buffer), "+0x%llx",
+                      static_cast<unsigned long long>(key - reinterpret_cast<uintptr_t>(module)));
+        return buffer;
+    }
+#else
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void*>(key), &info) != 0) {
+        if (info.dli_sname != nullptr && info.dli_saddr == reinterpret_cast<const void*>(key)) {
+            return info.dli_sname;
+        }
+        std::snprintf(buffer, sizeof(buffer), "+0x%llx",
+                      static_cast<unsigned long long>(key - reinterpret_cast<uintptr_t>(info.dli_fbase)));
+        return buffer;
+    }
+#endif
+    std::snprintf(buffer, sizeof(buffer), "0x%llx", static_cast<unsigned long long>(key));
+    return buffer;
+}
 
 uint64_t ElapsedNs(Clock::time_point since) {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - since).count());
@@ -128,7 +194,7 @@ void WaitWithCallback(std::condition_variable& cv, std::atomic<bool>& waitingFla
 }
 
 void NotifyConsumer() {
-    if (g_consumerSleeping.load(std::memory_order_acquire)) {
+    if (g_consumerSleeping.load(std::memory_order_seq_cst)) {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_cvData.notify_one();
     }
@@ -157,7 +223,9 @@ void PostRecordRaw(detail::Invoke invoke, const void* payload, uint32_t payloadB
         std::memcpy(g_ring + offset + kHeaderBytes, payload, payloadBytes);
     }
     g_localTail += stride;
-    g_tail.store(g_localTail, std::memory_order_release);
+    // seq_cst pairs with the consumer's sleeping flag: one of the two sides
+    // always sees the other's store, so a post never leaves the consumer asleep.
+    g_tail.store(g_localTail, std::memory_order_seq_cst);
     ++g_statRecords;
     g_statBytes += stride;
     const uint64_t queued = g_localTail - g_head.load(std::memory_order_relaxed);
@@ -184,25 +252,30 @@ void ConsumerLoop() {
     SetThreadName();
     uint64_t head = g_head.load(std::memory_order_relaxed);
     uint32_t spins = 0;
+    Clock::time_point spinStarted{};
     while (true) {
         const uint64_t tail = g_tail.load(std::memory_order_acquire);
         if (head == tail) {
             if (g_stop.load(std::memory_order_acquire)) {
                 break;
             }
-            if (spins < kConsumerSpinIterations) {
-                ++spins;
+            if (spins == 0) {
+                spinStarted = Clock::now();
+            }
+            ++spins;
+            if ((spins & 31u) != 0 || Clock::now() - spinStarted < kConsumerSpinBudget) {
                 std::this_thread::yield();
                 continue;
             }
-            g_consumerSleeping.store(true, std::memory_order_release);
+            g_consumerSleeping.store(true, std::memory_order_seq_cst);
             {
                 std::unique_lock<std::mutex> lock(g_mutex);
                 g_cvData.wait_for(lock, std::chrono::milliseconds(1), [&] {
-                    return g_tail.load(std::memory_order_acquire) != head || g_stop.load(std::memory_order_acquire);
+                    return g_tail.load(std::memory_order_seq_cst) != head || g_stop.load(std::memory_order_acquire);
                 });
             }
-            g_consumerSleeping.store(false, std::memory_order_release);
+            g_consumerSleeping.store(false, std::memory_order_seq_cst);
+            spins = 0;
             continue;
         }
         spins = 0;
@@ -211,6 +284,13 @@ void ConsumerLoop() {
         if (header.invoke != 0) {
             const auto started = Clock::now();
             const uint8_t* payload = g_ring + ((head + kHeaderBytes) & kRingMask);
+            uintptr_t profileKey = kProfileKeyFifo;
+            if (header.invoke == reinterpret_cast<uint64_t>(&FenceInvoke)) {
+                profileKey = kProfileKeyFence;
+            } else if (header.invoke != reinterpret_cast<uint64_t>(&FifoInvoke)) {
+                // Every call record starts with the back function's pointer.
+                std::memcpy(&profileKey, payload, sizeof(profileKey));
+            }
             try {
                 reinterpret_cast<detail::Invoke>(header.invoke)(payload, header.payloadBytes);
             } catch (const std::exception& ex) {
@@ -226,7 +306,9 @@ void ConsumerLoop() {
                             static_cast<unsigned long long>(faults));
                 }
             }
-            g_statBusyNs.fetch_add(ElapsedNs(started), std::memory_order_relaxed);
+            const uint64_t elapsed = ElapsedNs(started);
+            g_statBusyNs.fetch_add(elapsed, std::memory_order_relaxed);
+            ProfileRecord(profileKey, elapsed);
         }
         head += header.stride;
         g_head.store(head, std::memory_order_release);
@@ -296,12 +378,15 @@ void Drain() {
     const uint64_t sequence = ++g_fenceRequested;
     PostRecordRaw(&FenceInvoke, &sequence, sizeof(sequence));
     ++g_statDrains;
-    if (g_fenceCompleted.load(std::memory_order_acquire) >= sequence) {
-        return;
-    }
     const auto started = Clock::now();
-    WaitWithCallback(g_cvFence, g_producerWaiting,
-                     [&] { return g_fenceCompleted.load(std::memory_order_acquire) >= sequence; });
+    while (g_fenceCompleted.load(std::memory_order_acquire) < sequence) {
+        if (Clock::now() - started >= kDrainSpinBudget) {
+            WaitWithCallback(g_cvFence, g_producerWaiting,
+                             [&] { return g_fenceCompleted.load(std::memory_order_acquire) >= sequence; });
+            break;
+        }
+        std::this_thread::yield();
+    }
     g_statDrainWaitNs += ElapsedNs(started);
 }
 
@@ -340,8 +425,8 @@ std::string FormatStatsAndReset(double windowSeconds, uint32_t frames) {
     const double perFrame = frames != 0 ? 1.0 / static_cast<double>(frames) : 0.0;
     const double busyNs = static_cast<double>(g_statBusyNs.exchange(0, std::memory_order_relaxed));
     const double busyPercent = windowSeconds > 0.0 ? busyNs / (windowSeconds * 1e9) * 100.0 : 0.0;
-    char buffer[512];
-    std::snprintf(buffer, sizeof(buffer),
+    char buffer[1024];
+    const int written = std::snprintf(buffer, sizeof(buffer),
                   "GX thread: %.0f records/frame (%.1f KiB, %.0f FIFO chunks with %.1f KiB), queue peak %.1f KiB; "
                   "game thread waited %.2f ms/frame for ring space and %.2f ms/frame in %.1f drains/frame; "
                   "GX thread busy %.1f%%; faults %llu",
@@ -356,7 +441,19 @@ std::string FormatStatsAndReset(double windowSeconds, uint32_t frames) {
                   static_cast<unsigned long long>(g_statFaults.load(std::memory_order_relaxed)));
     g_statRecords = g_statFifoRecords = g_statFifoBytes = g_statBytes = 0;
     g_statDrains = g_statDrainWaitNs = g_statSpaceWaitNs = g_statQueuePeakBytes = 0;
-    return buffer;
+    // The costliest record kinds of the window, as ms per frame and calls per frame.
+    RecordProfile top[kProfileSlots];
+    std::memcpy(top, g_profile, sizeof(top));
+    std::memset(g_profile, 0, sizeof(g_profile));
+    std::sort(std::begin(top), std::end(top), [](const RecordProfile& a, const RecordProfile& b) { return a.ns > b.ns; });
+    std::string line = written > 0 ? std::string(buffer, static_cast<size_t>(std::min<int>(written, sizeof(buffer) - 1))) : std::string();
+    line += "; costliest:";
+    for (size_t i = 0; i < 6 && top[i].key != 0; ++i) {
+        std::snprintf(buffer, sizeof(buffer), " %s %.2f ms x%.0f", DescribeProfileKey(top[i].key).c_str(),
+                      static_cast<double>(top[i].ns) * perFrame / 1e6, static_cast<double>(top[i].count) * perFrame);
+        line += buffer;
+    }
+    return line;
 }
 
 namespace detail {

@@ -101,6 +101,10 @@ extern float g_projectionVector[7];
 struct TexObjMeta : GxTextureBindingContract::SamplerState {
     uint32_t userData = 0;
     bool needsUpload = true;
+    // GXInitTexObj/GXInitTexObjCI ran since the last load: the aurora object is
+    // rebuilt from scratch on the next load, as it always was, so its data
+    // version restarts and aurora's upload cache keys repeat across frames.
+    bool reinitPending = false;
 };
 
 // --- Host-side texture object storage (audit F9) ---
@@ -384,6 +388,7 @@ struct GxTexObjLoad {
     uint32_t objAddr = 0;
     uint32_t tid = 0;
     bool upload = false;
+    bool reinit = false;
 };
 void GxHostLoadTexObj_gx(GxTexObjLoad load);
 void GxHostBindPlaceholder_gx(uint32_t tid);

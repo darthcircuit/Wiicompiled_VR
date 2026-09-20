@@ -28,6 +28,7 @@
 #include "gfx/pipeline_cache.hpp"
 #endif
 #if defined(__ANDROID__)
+#include <pthread.h>
 #include <unistd.h>
 #endif
 #include "system_info.hpp"
@@ -355,6 +356,9 @@ void frame_worker_main() noexcept {
   }
 #if defined(__ANDROID__)
   g_frameWorkerNativeThreadId.store(static_cast<uint32_t>(gettid()), std::memory_order_release);
+  // A thread inherits its creator's name, and the producer that starts this
+  // worker may itself be a named thread; profiles should tell the two apart.
+  pthread_setname_np(pthread_self(), "aurora worker");
 #endif
 
 #ifdef AURORA_ENABLE_GX
