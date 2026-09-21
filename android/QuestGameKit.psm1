@@ -497,6 +497,19 @@ function Invoke-QuestGameBuild {
         $sources[$slot] = @($slotSources | ForEach-Object { if ($_.EndsWith('.S')) { & $toElf $_ } else { $_ } })
     }
     if ($sources.translated.Count -eq 0) { throw "No translated shards in $shards" }
+    # Online play needs the Retro-WFC payload translated into the mod (translate-mod
+    # --retro-wfc-payload). Without it the mod downloads the payload at run time and jumps into
+    # code that was never translated: the game crashes on entering Retro Rewind WFC.
+    if ($Product -eq 'retro_rewind') {
+        $dataPatches = @($sources.Values | ForEach-Object { $_ } |
+            Where-Object { [IO.Path]::GetFileName($_) -eq 'mod_data_patches.cpp' })
+        if ($dataPatches.Count -ne 1 -or
+            -not (Select-String -LiteralPath $dataPatches[0] -Pattern 'kRetroWfcInitializerAddress' -SimpleMatch -Quiet)) {
+            throw ('This Retro Rewind translation has no Retro-WFC payload, so online play would crash. ' +
+                'Translate the mod again with its payload (translate-mod --retro-wfc-payload, or repair ' +
+                'Retro Rewind in WiiCompiled with the payload download on), then build again.')
+        }
+    }
     foreach ($slot in $sources.Keys) {
         if ($sources[$slot].Count -eq 0) { throw "The $slot sources of a $Product game are missing from $shards" }
     }

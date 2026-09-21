@@ -35,7 +35,8 @@ import org.wiicompiled.quest.GameStorage
  *     game kit (assets/game_kit) into private storage;
  *  2. download the Android NDK files the build needs from Google, checked against the pins the
  *     toolchain carries (ndk.json);
- *  3. translate main.dol and StaticR.rel: translate-recursive, generate-data-init, emit-build-shards;
+ *  3. translate main.dol and StaticR.rel: translate-recursive, generate-data-init, emit-build-shards
+ *     (Retro Rewind adds translate-mod, with the Retro-WFC payload downloaded from rwfc.net);
  *  4. compile the generated sources with the kit's flags, several at a time;
  *  5. link them with the kit's objects and archives (kit.json link.lld);
  *  6. install libmain.so and its game.json like an imported game.
@@ -65,6 +66,12 @@ object GameBuild {
     private const val TRANSLATOR_THREADS = 4
     private const val EXPECTED_TRANSLATION_SECONDS = 600.0
     private const val COMPILE_MEMORY_BYTES = 700L * 1024 * 1024
+    // WiiCompiled Setup's fixed endpoint, size cap and staging layout
+    // (Launcher/WiiCompiled.Setup.Common/RetroWfcPayload.cs), which validate-retro-wfc-payload expects.
+    private const val RETRO_WFC_PAYLOAD_URL = "https://rwfc.net/api/wfc/payload?g=RMCPD00"
+    private const val RETRO_WFC_PAYLOAD_MAX_BYTES = 16 * 1024 * 1024
+    private const val RETRO_WFC_DIRECTORY = "retro-wfc"
+    private const val RETRO_WFC_PAYLOAD_FILE = "binary/payload.RMCPD00.bin"
 
     /** Builds [profile]'s game. Null on success, otherwise the message to show. */
     fun run(context: Context, profile: GameProfile, reporter: Reporter, cancelled: () -> Boolean, finishing: () -> Unit): String? {
@@ -276,13 +283,82 @@ object GameBuild {
             }
         }
 
+        /**
+         * The Retro-WFC payload Retro Rewind's online play runs. translate-mod lowers it into the
+         * mod; without it the mod downloads the payload while connecting and jumps into code that
+         * was never translated. Retried once, like Setup's download.
+         */
+        fun downloadRetroWfcPayload(): File {
+            val file = File(workspace, "$RETRO_WFC_DIRECTORY/$RETRO_WFC_PAYLOAD_FILE")
+            file.parentFile?.mkdirs()
+            log.line("Downloading the Retro-WFC payload from $RETRO_WFC_PAYLOAD_URL")
+            var failure: IOException? = null
+            for (attempt in 1..2) {
+                if (cancelled()) throw InterruptedIOException("Build cancelled")
+                try {
+                    file.writeBytes(fetchRetroWfcPayload())
+                    log.line("Retro-WFC payload: ${file.length()} bytes, sha256 ${BuildRecipe.hex(sha256(file))}")
+                    return file
+                } catch (e: IOException) {
+                    // A socket timeout is an InterruptedIOException too, which run() takes for a cancel.
+                    failure = e
+                    log.line("Retro-WFC payload download attempt $attempt failed: $e")
+                    if (attempt == 1) Thread.sleep(1_000)
+                }
+            }
+            if (cancelled()) throw InterruptedIOException("Build cancelled")
+            throw IOException(
+                "Retro Rewind's online play needs the Retro-WFC payload from rwfc.net, which could not be " +
+                    "downloaded (${failure?.message}). Check the headset's internet connection, then build again.",
+            )
+        }
+
+        fun fetchRetroWfcPayload(): ByteArray {
+            val connection = URL(RETRO_WFC_PAYLOAD_URL).openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = 30_000
+                connection.readTimeout = 30_000
+                // A redirect would fetch from a target other than the fixed endpoint; Setup refuses it too.
+                connection.instanceFollowRedirects = false
+                connection.setRequestProperty("Accept-Encoding", "identity")
+                val code = connection.responseCode
+                if (code != HttpURLConnection.HTTP_OK) throw IOException("rwfc.net answered $code")
+                connection.inputStream.use { input ->
+                    val bytes = java.io.ByteArrayOutputStream()
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        bytes.write(buffer, 0, read)
+                        if (bytes.size() > RETRO_WFC_PAYLOAD_MAX_BYTES) throw IOException("the payload is unexpectedly large")
+                    }
+                    return bytes.toByteArray()
+                }
+            } finally {
+                connection.disconnect()
+            }
+        }
+
         /** Translates the disc unless this workspace already holds a translation of the same inputs. */
         fun translate(tools: ToolProcess, identity: String): String? {
             val generated = File(workspace, "generated")
             val provenance = File(generated, "translation-provenance.txt")
+            // Fetched before anything else, so an unreachable server fails the build before the
+            // long base translation rather than after it.
+            val payload = if (profile.modPack) downloadRetroWfcPayload() else null
+            if (payload != null) {
+                translator(
+                    tools, "checking the Retro-WFC payload",
+                    "validate-retro-wfc-payload", "--directory", File(workspace, RETRO_WFC_DIRECTORY).absolutePath,
+                )?.let { return it }
+            }
             // A modded game needs a base translation that knows this Code.pul, so the pack's own
-            // identity is part of what the stored translation is reused for.
-            val modIdentity = if (profile.modPack) BuildRecipe.hex(sha256(GameStorage.modCodePul(context))) else ""
+            // identity (and the payload's) is part of what the stored translation is reused for.
+            val modIdentity = if (payload != null) {
+                "${BuildRecipe.hex(sha256(GameStorage.modCodePul(context)))} ${BuildRecipe.hex(sha256(payload))}"
+            } else {
+                ""
+            }
             val expected = "$identity ${profile.id} ${BuildConfig.DISC_DOL_SHA256} ${BuildConfig.DISC_REL_SHA256} $modIdentity"
             val shards = File(generated, "build_shards/shards.cmake")
             if (provenance.isFile && provenance.readText() == expected && shards.isFile) {
@@ -324,7 +400,7 @@ object GameBuild {
             }?.let { return it }
 
             // Retro Rewind's own code: its Code.pul translated against the base translation, as
-            // Launcher/LocalBuild.ps1 does on a PC. Online play needs a payload this cannot fetch.
+            // Launcher/LocalBuild.ps1 does on a PC, with the Retro-WFC payload for online play.
             val modOutput = "build/mods/retro_rewind_full_cpp"
             if (profile.modPack) {
                 report(350, Step.Translate, 2, steps)
@@ -342,7 +418,7 @@ object GameBuild {
                     "--code-pul", GameStorage.modCodePul(context).absolutePath,
                     "--mod-root", GameStorage.modDirectory(context).absolutePath,
                     "--mod-name", "Retro Rewind", "--region", "P", "--out", modOutput,
-                    "--prefer-cached-inputs", "--emit-cpp", "--skip-retro-wfc",
+                    "--prefer-cached-inputs", "--emit-cpp", "--retro-wfc-payload", payload!!.absolutePath,
                     "--threads", TRANSLATOR_THREADS.toString(),
                 )?.let { return it }
             }

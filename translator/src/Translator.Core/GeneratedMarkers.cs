@@ -94,24 +94,27 @@ public static partial class GeneratedMarkers
     /// <summary>
     /// The registration half of <c>PPC_NATIVE_OVERRIDE</c>: address and symbol
     /// only. Deliberately a prefix match, so an override whose argument list
-    /// contains a semicolon still registers.
+    /// contains a semicolon still registers. <c>GX_DEFERRED_OVERRIDE_VOID</c>
+    /// (runtime/src/hle/gx/gx_internal.h) takes the same arguments and expands
+    /// to <c>PPC_NATIVE_OVERRIDE_VOID</c>, which a source scan cannot see.
     /// </summary>
-    [GeneratedRegex(@"PPC_NATIVE_OVERRIDE(?:_VOID)?\s*\(\s*(?<address>[0-9A-Fa-f]{8})\s*,\s*(?<symbol>[A-Za-z_][A-Za-z0-9_]*)", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(?:PPC_NATIVE|GX_DEFERRED)_OVERRIDE(?:_VOID)?\s*\(\s*(?<address>[0-9A-Fa-f]{8})\s*,\s*(?<symbol>[A-Za-z_][A-Za-z0-9_]*)", RegexOptions.CultureInvariant)]
     public static partial Regex NativeOverridePattern();
 
     /// <summary>
-    /// The same macro read for its signature rather than its registration: the
-    /// effect analyzer needs the argument list, which only the full
-    /// statement-terminated form can capture.
+    /// The same macros read for their signature rather than their registration:
+    /// the effect analyzer needs the argument list, which only the full
+    /// statement-terminated form can capture. <c>deferred</c> marks the GX form,
+    /// whose hand-written body is <c>symbol_gx</c>.
     /// </summary>
-    [GeneratedRegex(@"PPC_NATIVE_OVERRIDE(?<void>_VOID)?\s*\(\s*(?<address>[0-9A-Fa-f]{8})\s*,\s*(?<symbol>[A-Za-z_][A-Za-z0-9_]*)\s*,?\s*(?<tail>[^;]*?)\);", RegexOptions.CultureInvariant | RegexOptions.Singleline)]
+    [GeneratedRegex(@"(?:PPC_NATIVE|(?<deferred>GX_DEFERRED))_OVERRIDE(?<void>_VOID)?\s*\(\s*(?<address>[0-9A-Fa-f]{8})\s*,\s*(?<symbol>[A-Za-z_][A-Za-z0-9_]*)\s*,?\s*(?<tail>[^;]*?)\);", RegexOptions.CultureInvariant | RegexOptions.Singleline)]
     public static partial Regex NativeOverrideSignaturePattern();
 
     /// <summary>
     /// The void-stub form read for its declared host parameter list, which is
     /// what the void-stub ABI provider infers argument registers from.
     /// </summary>
-    [GeneratedRegex(@"PPC_NATIVE_OVERRIDE_VOID\s*\(\s*(?<addr>[0-9A-Fa-f]+)\s*,\s*[^,]+,\s*\((?<args>[^)]*)\)\s*,", RegexOptions.CultureInvariant | RegexOptions.Singleline)]
+    [GeneratedRegex(@"(?:PPC_NATIVE|GX_DEFERRED)_OVERRIDE_VOID\s*\(\s*(?<addr>[0-9A-Fa-f]+)\s*,\s*[^,]+,\s*\((?<args>[^)]*)\)\s*,", RegexOptions.CultureInvariant | RegexOptions.Singleline)]
     public static partial Regex NativeOverrideVoidArgumentsPattern();
 
     [GeneratedRegex(@"GX_FATAL_STUB\s*\(\s*(?<address>[0-9A-Fa-f]{8})", RegexOptions.CultureInvariant)]

@@ -297,6 +297,17 @@ Home's main button becomes **Download Retro Rewind** whenever that game is selec
 missing, and Settings → About shows the installed version with an Update button. Building the mod on
 the headset needs the mod's `Code.pul`, which is part of the pack, so the same rule covers it.
 
+Online play (Retro Rewind WFC) needs the Retro-WFC payload translated into the mod, as on a PC:
+`translate-mod --retro-wfc-payload`, with the payload Setup downloads and verifies from
+`https://rwfc.net/api/wfc/payload?g=RMCPD00`. Without it the mod downloads `WWFC/Payload` while
+connecting and jumps into code that was never translated, and the game stops with a missing
+translated function (seen: `0x81895BF4`, called from `rr_kamek_*` on the `NHTTPi_CommThreadProc`
+thread, with `r3` pointing at `"WWFC/Payload"`). So the headset
+build downloads the payload before translating and checks it with `validate-retro-wfc-payload`, and
+`Invoke-QuestGameBuild` refuses a Retro Rewind translation whose `mod_data_patches.cpp` has no
+`kRetroWfcInitializerAddress`. The payload is fixed at build time: when rwfc.net publishes a new
+one, rebuild the game.
+
 ### Game packages (.wcgame) and Import from computer
 
 A `.wcgame` is a zip holding `game.json`, `libmain.so` and optionally `DATA/…` (the extracted
@@ -465,7 +476,7 @@ installer's `BuildWorkspace/generated`, produced by the normal Windows pipeline)
 powershell -ExecutionPolicy Bypass -File android/Prepare-QuestDependencies.ps1        # SDL3 3.4.4 AAR into android/app/libs
 powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Install             # the app, its game kit and toolchain, debug-signed
 powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Install         # your game, against that kit, into Import (or WheelWizard VR's Build for Quest)
-powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Product retro_rewind -Mod <RetroRewind6> -Install  # the mod and its pack (needs translate-mod output)
+powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Product retro_rewind -Mod <RetroRewind6> -Install  # the mod and its pack (needs translate-mod output with --retro-wfc-payload)
 adb push MarioKart.iso /sdcard/Download/                                               # then Select disc image in the launcher
 ```
 

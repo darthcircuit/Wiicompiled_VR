@@ -42,6 +42,10 @@ public static class RuntimeNativeGuestEffectAnalyzer
                 var address = ParseAddress(match.Groups["address"].Value);
                 stubAddresses.Add(address);
                 var symbol = match.Groups["symbol"].Value;
+                // GX_DEFERRED_OVERRIDE_VOID generates `symbol` itself, which only posts the
+                // hand-written `symbol_gx` to the GX thread with the same arguments.
+                if (match.Groups["deferred"].Success)
+                    symbol += "_gx";
                 var tail = match.Groups["tail"].Value;
                 var isVoid = match.Groups["void"].Success;
                 if (TryParseStubTail(tail, isVoid, out var returnType, out var arguments) &&

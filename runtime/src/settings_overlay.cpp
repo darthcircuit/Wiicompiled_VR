@@ -1875,6 +1875,12 @@ bool IsMouseActivity(const SDL_Event& event) {
 // Runs on the thread that pumps SDL events (the same one that calls Draw), so
 // the SDL cursor calls are safe here.
 void UpdateCursorAutoHide() {
+#if defined(__ANDROID__)
+    // No pointer icon to manage on a headset, and SDL changes it through Java,
+    // which ART aborts on from a guest fiber's stack: Draw runs on whichever
+    // guest thread advances the retrace. InitializeRuntimeSettings keeps
+    // ImGui's SDL backend off the cursor for the same reason.
+#else
     const bool shouldHide =
         !g_topBarVisible && Clock::now() - g_lastMouseActivity >= kCursorAutoHideDelay;
     if (shouldHide == g_cursorHidden) {
@@ -1889,6 +1895,7 @@ void UpdateCursorAutoHide() {
         ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
         SDL_ShowCursor();
     }
+#endif
 }
 
 // Alt+Enter toggles the display mode inside aurora without going through the
@@ -2045,6 +2052,11 @@ void DrawVrSettingsPanel() {
 } // namespace
 
 void InitializeRuntimeSettings() noexcept {
+#if defined(__ANDROID__)
+    // ImGui_ImplSDL3_NewFrame would otherwise call SDL_SetCursor/SDL_HideCursor
+    // (Java on Android) from the guest fiber that starts the next host frame.
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+#endif
     PAD_HLE_SetRumbleEnabled(g_rumbleEnabled);
     InputBindings::Reload();
     controller_mapping_wizard::LoadPersistedMappings();
