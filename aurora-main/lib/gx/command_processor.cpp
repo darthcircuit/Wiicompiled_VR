@@ -5,6 +5,7 @@
 #include "../gfx/texture_replacement.hpp"
 #include "dolphin/gx/GXAurora.h"
 #include "gx.hpp"
+#include "native_wheel.hpp"
 #include "gx_fmt.hpp"
 #include "pipeline.hpp"
 #include "shader_info.hpp"
@@ -2354,8 +2355,10 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   gfx::Range vertRange = push_draw_vertices(vertices, vtxCount, vtxSize);
   pos += totalVtxBytes;
 
-  // Try to merge with previous draw call
-  if (!g_gxState.stateDirty && !(aurora::stereo_frame_provider_active() && g_gxState.projType == GX_ORTHOGRAPHIC))
+  // Try to merge with previous draw call. A draw that binds a native-wheel source array is decided per draw
+  // (native_wheel_array), so it never folds into a neighbour that resolved the array differently.
+  if (!g_gxState.stateDirty && !(aurora::stereo_frame_provider_active() && g_gxState.projType == GX_ORTHOGRAPHIC) &&
+      !native_wheel_source(g_gxState.arrays[GX_VA_POS].data))
     LIKELY {
       auto* lastDraw = gfx::get_last_draw_command<DrawData>();
       // Only if the previous draw call was a single instance draw (no lines/points handling)
@@ -2419,6 +2422,27 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
     }
     auto& array = g_gxState.arrays[i];
     const u32 uploadStride = padded_upload_stride(array.stride);
+    if (i == GX_VA_POS && !nativeWheelArrays.empty())
+      UNLIKELY {
+        if (auto* nativeWheel = native_wheel_array(array, vertices, static_cast<u32>(vtxCount) * vtxStride, vtxStride,
+                                                   matrix_index_prefix_size(fmt))) {
+          static unsigned nativeWheelDrawLogs = 0;
+          if (nativeWheelDrawLogs++ < 4) Log.info("Native steering wheel: animated local vehicle vertex array");
+          // Never populate the shared source's cache with the animated copy: later draws of the same asset must
+          // still see the original vertices. The copy takes the same padded upload path as the original.
+          if (nativeWheel->uploaded.size == 0 || nativeWheel->uploadedStride != uploadStride) {
+            AttrArray animated{};
+            animated.data = nativeWheel->bytes.data();
+            animated.size = array.size;
+            animated.stride = array.stride;
+            animated.le = array.le;
+            nativeWheel->uploaded = push_vertex_array(animated, uploadStride);
+            nativeWheel->uploadedStride = uploadStride;
+          }
+          ranges.vaRanges[0] = nativeWheel->uploaded;
+          continue;
+        }
+      }
     if (array.cachedRange.size > 0 && array.cachedStride == uploadStride) {
       ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
     } else {

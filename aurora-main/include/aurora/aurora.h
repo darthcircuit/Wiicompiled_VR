@@ -251,6 +251,20 @@ void aurora_set_stereo_scene_anchor(const float anchorFromScene[12]);
 // Producer-thread, per-frame metadata, consumed by the next end_frame call.
 // One (the default) keeps full-frame replay. Desktop rendering is unaffected.
 void aurora_set_stereo_local_player_count(uint32_t count);
+/**
+ * VR native steering wheel: replacement position arrays for the local vehicle.
+ *
+ * GX (command processor) thread only, in order with the frame's draws: a host
+ * that runs GX on its own thread must post these there. `source` is the host
+ * pointer the game binds with GXSetArray; `replacement` is copied (at most 64
+ * KiB) and applies solely to draws that bind that array with a position matrix
+ * equal to `modelView` (row-major 3x4), so shared opponent models stay intact.
+ * Clearing reports how many draws the previous set matched.
+ */
+void aurora_clear_native_wheel_vertices(void);
+void aurora_set_native_wheel_vertices(const void* source, const void* replacement, uint32_t size,
+                                      const float* modelView);
+uint32_t aurora_native_wheel_draw_count(void);
 typedef void (*AuroraFrameWorkerWaitCallback)();
 // Called from the producer thread at bounded intervals while Aurora waits for
 // the asynchronous frame worker. The callback must not enter Aurora.
