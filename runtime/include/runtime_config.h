@@ -21,6 +21,7 @@
 #include <toml.hpp>
 #include "platform/host_platform.h"
 #include "vr/frame_interpolation_pacing.h"
+#include "vr/steering_wheel.h"
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -69,6 +70,18 @@ struct RuntimeUserConfig {
     std::optional<bool> vrFirstPersonHideDriver;
     std::optional<int32_t> vrFirstPersonHiddenModel;
     std::optional<std::string> vrFirstPersonRotation;
+    std::optional<std::string> vrFirstPersonSeat;
+    std::optional<float> vrCockpitUnitsPerMeter;
+    std::optional<bool> vrSteeringWheel;
+    std::optional<bool> vrNativeSteeringWheel;
+    std::optional<bool> vrHandSteering;
+    std::optional<float> vrWheelKartDegrees;
+    std::optional<float> vrWheelBikeDegrees;
+    std::optional<float> vrWheelGrabDistance;
+    std::optional<float> vrWheelGrabAssist;
+    std::optional<float> vrWheelResponse;
+    std::optional<float> vrWheelTrackingGrace;
+    std::optional<bool> vrWheelHaptics;
     std::optional<std::string> vrPerformanceLevel;
     std::optional<std::string> vrRecenterKey;
     std::optional<float> vrLeanBackDegrees;
@@ -192,6 +205,31 @@ inline constexpr const char* kVrFirstPersonRotationDefault = "yaw";
 inline bool IsSupportedVrFirstPersonRotation(std::string_view value) {
     return value == "yaw" || value == "yaw_pitch" || value == "full";
 }
+// Where the first-person head sits, matching FirstPersonSeat: "cockpit" at the
+// driver's own eyes behind the wheel, "custom" at the head offsets above.
+inline constexpr const char* kVrFirstPersonSeatDefault = "cockpit";
+
+inline bool IsSupportedVrFirstPersonSeat(std::string_view value) {
+    return value == "cockpit" || value == "custom";
+}
+// The cockpit seat's world scale before the character's height is allowed for.
+inline constexpr float kVrCockpitUnitsPerMeterDefault = 100.0f;
+inline constexpr float kVrCockpitUnitsPerMeterMin = 20.0f;
+inline constexpr float kVrCockpitUnitsPerMeterMax = 400.0f;
+// The vehicle's steering wheel or handlebar turns with the steering; the
+// vehicle's own model is animated unless native_steering_wheel is off, which
+// draws a separate VR wheel instead. Hand steering (grabbing that wheel with
+// the tracked controllers, by heurazy) is opt-in. The WheelWizard VR launcher
+// registers hand_steering with this same default.
+inline constexpr bool kVrSteeringWheelDefault = true;
+inline constexpr bool kVrNativeSteeringWheelDefault = true;
+inline constexpr bool kVrHandSteeringDefault = false;
+// Hand steering tuning ranges; the defaults are mkw::vr::WheelTuning's.
+inline constexpr float kVrWheelDegreesMin = 20.0f, kVrWheelDegreesMax = 180.0f;
+inline constexpr float kVrWheelGrabDistanceMin = 0.15f, kVrWheelGrabDistanceMax = 0.8f;
+inline constexpr float kVrWheelGrabAssistMin = 0.7f, kVrWheelGrabAssistMax = 2.0f;
+inline constexpr float kVrWheelResponseMin = 0.5f, kVrWheelResponseMax = 2.0f;
+inline constexpr float kVrWheelTrackingGraceMin = 0.05f, kVrWheelTrackingGraceMax = 0.5f;
 // The performance level asked of the OpenXR runtime (XR_EXT_performance_settings) for its CPU and
 // GPU domains. Standalone headsets clock their cores by this request: a Quest 3 ran the game
 // thread at 1.92 GHz with the runtime's own choice while its fast cores reach 2.36 GHz. "default"
@@ -462,14 +500,21 @@ inline void EnsureConfigFile() {
               "skip_copy_clears = true\n"
               "# Put the camera at the Player 1 driver's head instead of behind\n"
               "# the kart, with the horizon kept level. Changeable live from the\n"
-              "# F10 menu, and only during a single-screen race. The world scale\n"
-              "# below replaces world_units_per_meter while it is engaged: 10 is\n"
-              "# life-size, where the 500 above makes the race a small diorama.\n"
+              "# F10 menu, and only during a single-screen race.\n"
               "first_person = false\n"
-              "first_person_units_per_meter = 30.0\n"
-              "# Where the head sits in the kart's own frame, in metres.\n"
-              "first_person_head_up_meters = 3.0\n"
-              "first_person_head_forward_meters = 12.0\n"
+              "# Where the head sits: \"cockpit\" puts it at the driver's own eyes,\n"
+              "# behind the steering wheel, at a life-size scale that allows for\n"
+              "# the character's height, so the wheel is within reach.\n"
+              "# \"custom\" uses the world scale and head offsets below instead.\n"
+              "first_person_seat = \"cockpit\"\n"
+              "cockpit_units_per_meter = 100.0\n"
+              "# The custom seat's world scale, replacing world_units_per_meter\n"
+              "# while first person is engaged; the 500 above makes the race a\n"
+              "# small diorama.\n"
+              "first_person_units_per_meter = 50.0\n"
+              "# Where the custom seat's head sits in the kart's own frame, in metres.\n"
+              "first_person_head_up_meters = 1.5\n"
+              "first_person_head_forward_meters = 0.0\n"
               "first_person_head_right_meters = 0.0\n"
               "# In first person the driver sits where your eyes are. Hiding\n"
               "# the driver removes the head that would otherwise be in the\n"
@@ -481,7 +526,28 @@ inline void EnsureConfigFile() {
               "# Where the view's orientation comes from: \"yaw\" levels the\n"
               "# horizon, \"yaw_pitch\" adds the kart's climb but no roll, and\n"
               "# \"full\" takes the kart's whole orientation so the view banks.\n"
-              "first_person_rotation = \"yaw\"\n\n"
+              "first_person_rotation = \"yaw\"\n"
+              "# In the cockpit the vehicle's steering wheel or handlebar turns\n"
+              "# with the steering. native_steering_wheel animates the vehicle's\n"
+              "# own model; false draws a separate VR wheel instead.\n"
+              "steering_wheel = true\n"
+              "native_steering_wheel = true\n"
+              "# Hand steering (by heurazy): squeeze a grip near the wheel or\n"
+              "# handlebar to take hold of it with the tracked controllers, and\n"
+              "# turn it to steer. Releasing both grips gives steering back to the\n"
+              "# stick. The tuning below: degrees of turn for full lock on karts\n"
+              "# and bikes, how far (metres) and how generously a grip reaches\n"
+              "# the wheel, how quickly the wheel follows the hands, how long\n"
+              "# (seconds) a hand that loses tracking keeps hold, and a short\n"
+              "# pulse on grab and release. All changeable live from the F10 menu.\n"
+              "hand_steering = false\n"
+              "wheel_kart_degrees = 90.0\n"
+              "wheel_bike_degrees = 45.0\n"
+              "wheel_grab_distance = 0.35\n"
+              "wheel_grab_assist = 1.0\n"
+              "wheel_response = 1.0\n"
+              "wheel_tracking_grace = 0.2\n"
+              "wheel_haptics = true\n\n"
               "# Performance level asked of the headset's runtime for its CPU and\n"
               "# GPU: \"boost\", \"sustained_high\", \"sustained_low\", \"power_savings\",\n"
               "# or \"default\" to leave the runtime's own choice. Standalone headsets\n"
@@ -730,6 +796,28 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
         value && *value >= -1 && *value <= 31) {
         config.vrFirstPersonHiddenModel = static_cast<int32_t>(*value);
     }
+    if (auto value = FindConfigValue<std::string>(document, "vr", "first_person_seat");
+        value && IsSupportedVrFirstPersonSeat(*value)) {
+        config.vrFirstPersonSeat = *value;
+    }
+    const auto readRangedFloat = [&](std::string_view key, float low, float high) -> std::optional<float> {
+        auto value = FindConfigFloat(document, "vr", key);
+        return value && *value >= low && *value <= high ? value : std::nullopt;
+    };
+    config.vrCockpitUnitsPerMeter =
+        readRangedFloat("cockpit_units_per_meter", kVrCockpitUnitsPerMeterMin, kVrCockpitUnitsPerMeterMax);
+    config.vrSteeringWheel = FindConfigValue<bool>(document, "vr", "steering_wheel");
+    config.vrNativeSteeringWheel = FindConfigValue<bool>(document, "vr", "native_steering_wheel");
+    config.vrHandSteering = FindConfigValue<bool>(document, "vr", "hand_steering");
+    config.vrWheelKartDegrees = readRangedFloat("wheel_kart_degrees", kVrWheelDegreesMin, kVrWheelDegreesMax);
+    config.vrWheelBikeDegrees = readRangedFloat("wheel_bike_degrees", kVrWheelDegreesMin, kVrWheelDegreesMax);
+    config.vrWheelGrabDistance =
+        readRangedFloat("wheel_grab_distance", kVrWheelGrabDistanceMin, kVrWheelGrabDistanceMax);
+    config.vrWheelGrabAssist = readRangedFloat("wheel_grab_assist", kVrWheelGrabAssistMin, kVrWheelGrabAssistMax);
+    config.vrWheelResponse = readRangedFloat("wheel_response", kVrWheelResponseMin, kVrWheelResponseMax);
+    config.vrWheelTrackingGrace =
+        readRangedFloat("wheel_tracking_grace", kVrWheelTrackingGraceMin, kVrWheelTrackingGraceMax);
+    config.vrWheelHaptics = FindConfigValue<bool>(document, "vr", "wheel_haptics");
     config.diagnosticsOpenXRLogging = FindConfigValue<bool>(document, "diagnostics", "openxr_logging");
 
     auto readVolume = [&](std::string_view key) -> std::optional<float> {
@@ -1056,6 +1144,62 @@ inline bool SetVrPerformanceLevel(std::string value) {
     }
     Mutable().vrPerformanceLevel = value;
     return WriteSetting("vr", "performance_level", FormatString(value));
+}
+
+inline bool SetVrFirstPersonSeat(std::string value) {
+    if (!IsSupportedVrFirstPersonSeat(value)) {
+        return false;
+    }
+    Mutable().vrFirstPersonSeat = value;
+    return WriteSetting("vr", "first_person_seat", FormatString(value));
+}
+
+inline bool SetVrCockpitUnitsPerMeter(float value) {
+    value = std::clamp(value, kVrCockpitUnitsPerMeterMin, kVrCockpitUnitsPerMeterMax);
+    Mutable().vrCockpitUnitsPerMeter = value;
+    std::ostringstream formatted;
+    formatted << value;
+    return WriteSetting("vr", "cockpit_units_per_meter", formatted.str());
+}
+
+inline bool SetVrSteeringWheel(bool value) {
+    Mutable().vrSteeringWheel = value;
+    return WriteSetting("vr", "steering_wheel", value ? "true" : "false");
+}
+
+inline bool SetVrNativeSteeringWheel(bool value) {
+    Mutable().vrNativeSteeringWheel = value;
+    return WriteSetting("vr", "native_steering_wheel", value ? "true" : "false");
+}
+
+inline bool SetVrHandSteering(bool value) {
+    Mutable().vrHandSteering = value;
+    return WriteSetting("vr", "hand_steering", value ? "true" : "false");
+}
+
+inline bool SetVrWheelTuning(const mkw::vr::WheelTuning& tuning) {
+    auto& config = Mutable();
+    const auto write = [](const char* key, std::optional<float>& slot, float value, float low, float high) {
+        value = std::clamp(value, low, high);
+        slot = value;
+        std::ostringstream formatted;
+        formatted << value;
+        return WriteSetting("vr", key, formatted.str());
+    };
+    bool ok = write("wheel_kart_degrees", config.vrWheelKartDegrees, tuning.kartDegrees, kVrWheelDegreesMin,
+                    kVrWheelDegreesMax);
+    ok = write("wheel_bike_degrees", config.vrWheelBikeDegrees, tuning.bikeDegrees, kVrWheelDegreesMin,
+               kVrWheelDegreesMax) && ok;
+    ok = write("wheel_grab_distance", config.vrWheelGrabDistance, tuning.grabDistance, kVrWheelGrabDistanceMin,
+               kVrWheelGrabDistanceMax) && ok;
+    ok = write("wheel_grab_assist", config.vrWheelGrabAssist, tuning.grabAssist, kVrWheelGrabAssistMin,
+               kVrWheelGrabAssistMax) && ok;
+    ok = write("wheel_response", config.vrWheelResponse, tuning.response, kVrWheelResponseMin,
+               kVrWheelResponseMax) && ok;
+    ok = write("wheel_tracking_grace", config.vrWheelTrackingGrace, tuning.trackingGrace,
+               kVrWheelTrackingGraceMin, kVrWheelTrackingGraceMax) && ok;
+    config.vrWheelHaptics = tuning.haptics;
+    return WriteSetting("vr", "wheel_haptics", tuning.haptics ? "true" : "false") && ok;
 }
 
 inline bool SetVrFirstPersonHiddenModel(int32_t value) {
@@ -1433,6 +1577,47 @@ inline std::string VrPerformanceLevel(std::string fallback = kVrPerformanceLevel
 
 inline int32_t VrFirstPersonHiddenModel(int32_t fallback = kVrFirstPersonHiddenModelDefault) {
     return std::clamp(Get().vrFirstPersonHiddenModel.value_or(fallback), -1, 31);
+}
+
+inline std::string VrFirstPersonSeat(std::string fallback = kVrFirstPersonSeatDefault) {
+    const auto& value = Get().vrFirstPersonSeat;
+    return value && IsSupportedVrFirstPersonSeat(*value) ? *value : std::move(fallback);
+}
+
+inline float VrCockpitUnitsPerMeter(float fallback = kVrCockpitUnitsPerMeterDefault) {
+    return std::clamp(Get().vrCockpitUnitsPerMeter.value_or(fallback), kVrCockpitUnitsPerMeterMin,
+                      kVrCockpitUnitsPerMeterMax);
+}
+
+inline bool VrSteeringWheel(bool fallback = kVrSteeringWheelDefault) {
+    return Get().vrSteeringWheel.value_or(fallback);
+}
+
+inline bool VrNativeSteeringWheel(bool fallback = kVrNativeSteeringWheelDefault) {
+    return Get().vrNativeSteeringWheel.value_or(fallback);
+}
+
+inline bool VrHandSteering(bool fallback = kVrHandSteeringDefault) {
+    return Get().vrHandSteering.value_or(fallback);
+}
+
+inline mkw::vr::WheelTuning VrWheelTuning() {
+    const auto& config = Get();
+    mkw::vr::WheelTuning tuning{};
+    tuning.kartDegrees =
+        std::clamp(config.vrWheelKartDegrees.value_or(tuning.kartDegrees), kVrWheelDegreesMin, kVrWheelDegreesMax);
+    tuning.bikeDegrees =
+        std::clamp(config.vrWheelBikeDegrees.value_or(tuning.bikeDegrees), kVrWheelDegreesMin, kVrWheelDegreesMax);
+    tuning.grabDistance = std::clamp(config.vrWheelGrabDistance.value_or(tuning.grabDistance),
+                                     kVrWheelGrabDistanceMin, kVrWheelGrabDistanceMax);
+    tuning.grabAssist = std::clamp(config.vrWheelGrabAssist.value_or(tuning.grabAssist), kVrWheelGrabAssistMin,
+                                   kVrWheelGrabAssistMax);
+    tuning.response =
+        std::clamp(config.vrWheelResponse.value_or(tuning.response), kVrWheelResponseMin, kVrWheelResponseMax);
+    tuning.trackingGrace = std::clamp(config.vrWheelTrackingGrace.value_or(tuning.trackingGrace),
+                                      kVrWheelTrackingGraceMin, kVrWheelTrackingGraceMax);
+    tuning.haptics = config.vrWheelHaptics.value_or(tuning.haptics);
+    return tuning;
 }
 
 inline std::string GraphicsApi(std::string fallback = "auto") {

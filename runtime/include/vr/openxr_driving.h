@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#pragma once
+
+// Steering wheel and hand steering in the first-person cockpit.
+//
+// The OpenXR pacing thread locates the controllers in the seated frame, runs
+// the SteeringWheel (steering_wheel.h, ported from heurazy's
+// mario-kart-wii-VR-port) and publishes one DrivingSnapshot per XR frame. The
+// guest thread reads the latest one to turn the vehicle's own wheel mesh, and
+// the pacing thread hands the same state to Aurora's cockpit overlay. Nothing
+// in this header depends on OpenXR, so the guest side builds without it and
+// the rules below are tested headlessly (tests/vr_hand_steering_tests.cpp).
+//
+// The seated frame is the application space re-based on the immersive head
+// position and turned by the lean-back angle, in metres: +X right, +Y up, -Z
+// forward. It is the frame the first-person anchor places the vehicle in, so
+// hands, wheel geometry and eye transforms all meet there.
+
+#include "vr/openxr_wii_remote.h"
+#include "vr/steering_wheel.h"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+
+namespace mkw::vr {
+
+// One tracked hand in the seated frame.
+struct DrivingHand {
+    bool tracked = false;
+    bool held = false;
+    float squeeze = 0.0f;
+    // Row-major 3x4 from the controller's grip space into the seated frame.
+    std::array<float, 12> seat_from_grip{1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+};
+
+struct DrivingSnapshot {
+    // The first-person cockpit is engaged and the controllers are mapped into it.
+    bool cockpit_active = false;
+    // Hand steering is on: a squeezed grip near the wheel takes hold of it.
+    bool hand_steering = false;
+    std::array<bool, 2> held{};
+    // The steering the game receives, -1..1: the wheel while a hand holds it,
+    // otherwise the left stick.
+    float steering_input = 0.0f;
+    // What the wheel or handlebar shows, in radians. Positive turns it
+    // clockwise as the driver sees it, i.e. to the right.
+    float visual_angle = 0.0f;
+    std::array<DrivingHand, 2> hands{};
+};
+
+// Pacing thread publishes; any thread reads the latest. A default snapshot
+// (nothing held, centred) is returned before the first publication.
+void OpenXRPublishDriving(const DrivingSnapshot& snapshot) noexcept;
+DrivingSnapshot OpenXRReadDriving() noexcept;
+
+namespace driving {
+
+inline bool IsFinite(float value) noexcept {
+    // Bit test: the runtime may be built with -ffast-math.
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return (bits & 0x7F800000u) != 0x7F800000u;
+}
+
+// The wheel angle at full steering lock, in radians.
+inline float MaxWheelAngle(bool bike, const WheelTuning& tuning) noexcept {
+    const float degrees = bike ? tuning.bikeDegrees : tuning.kartDegrees;
+    const float clamped = IsFinite(degrees) ? std::clamp(degrees, 20.0f, 180.0f) : (bike ? 45.0f : 90.0f);
+    return clamped * 0.01745329252f;
+}
+
+// Grips only grab. While a hand holds the wheel its squeeze is released for the
+// game, where it would press C on the Nunchuk or a shoulder on the gamepad, and
+// the wheel replaces the left stick's X axis, which both controller modes steer
+// with. The stick's Y axis keeps aiming items forwards and backwards.
+inline void ApplyHandSteering(std::array<wii_remote::HandInputs, 2>& hands, const WheelState& wheel) noexcept {
+    for (size_t hand = 0; hand < hands.size(); ++hand) {
+        if (wheel.held[hand]) {
+            hands[hand].squeeze = 0.0f;
+        }
+    }
+    if ((wheel.held[0] || wheel.held[1]) && IsFinite(wheel.steering)) {
+        hands[0].stick_x = std::clamp(wheel.steering, -1.0f, 1.0f);
+    }
+}
+
+// The angle the wheel shows. A held wheel shows the hands' own angle; otherwise
+// it follows the stick at the configured full-lock angle, eased so a flicked
+// stick does not snap it round.
+class WheelVisual {
+public:
+    float Update(bool held, float held_angle, float stick_x, float max_angle, float dt) noexcept {
+        if (!IsFinite(dt)) {
+            dt = 0.0f;
+        }
+        if (held && IsFinite(held_angle)) {
+            angle_ = held_angle;
+            return angle_;
+        }
+        const float stick = IsFinite(stick_x) ? std::clamp(stick_x, -1.0f, 1.0f) : 0.0f;
+        const float target = stick * (IsFinite(max_angle) ? max_angle : 0.0f);
+        angle_ += (target - angle_) * (1.0f - std::exp(-15.0f * std::clamp(dt, 0.0f, 0.1f)));
+        return angle_;
+    }
+    void Reset() noexcept { angle_ = 0.0f; }
+
+private:
+    float angle_ = 0.0f;
+};
+
+// Where the seated frame is: the immersive head position in the application
+// space, turned about +X by the lean-back angle.
+struct SeatFrame {
+    bool valid = false;
+    std::array<float, 3> base{};
+    float lean_back_radians = 0.0f;
+};
+
+// A pose in the application space (position, then a unit quaternion x, y, z, w)
+// as a row-major 3x4 in the seated frame: R_lean^T * (p - base) for the
+// position and R_lean^T * R for the orientation. The inverse of how the eye
+// transforms place the seated frame (world = base + R_lean * seat).
+inline std::array<float, 12> SeatFromApp(const SeatFrame& seat, const std::array<float, 3>& position,
+                                         const std::array<float, 4>& orientation) noexcept {
+    float x = orientation[0], y = orientation[1], z = orientation[2], w = orientation[3];
+    const float length = std::sqrt(x * x + y * y + z * z + w * w);
+    if (IsFinite(length) && length > 1e-6f) {
+        x /= length;
+        y /= length;
+        z /= length;
+        w /= length;
+    } else {
+        x = y = z = 0.0f;
+        w = 1.0f;
+    }
+    const float r[9]{1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w),
+                     2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
+                     2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)};
+    const float c = std::cos(seat.lean_back_radians), s = std::sin(seat.lean_back_radians);
+    // R_lean about +X is rows (1,0,0), (0,c,-s), (0,s,c); its transpose applied to v:
+    const auto unlean = [c, s](float vx, float vy, float vz) {
+        return std::array<float, 3>{vx, c * vy + s * vz, -s * vy + c * vz};
+    };
+    std::array<float, 12> out{};
+    for (int col = 0; col < 3; ++col) {
+        const auto column = unlean(r[col], r[3 + col], r[6 + col]);
+        out[col] = column[0];
+        out[4 + col] = column[1];
+        out[8 + col] = column[2];
+    }
+    const auto p = unlean(position[0] - seat.base[0], position[1] - seat.base[1], position[2] - seat.base[2]);
+    out[3] = p[0];
+    out[7] = p[1];
+    out[11] = p[2];
+    return out;
+}
+
+} // namespace driving
+
+} // namespace mkw::vr

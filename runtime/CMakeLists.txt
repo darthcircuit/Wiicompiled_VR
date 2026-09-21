@@ -407,6 +407,17 @@ target_include_directories(mkw_vr_first_person_tests PRIVATE "${CMAKE_CURRENT_LI
 target_compile_features(mkw_vr_first_person_tests PRIVATE cxx_std_17)
 add_test(NAME mkw_vr_first_person_tests COMMAND mkw_vr_first_person_tests)
 
+# The first-person cockpit (seated eye, wheel and handlebar geometry, level seat,
+# native wheel vertices) and hand steering (grab, turn, hand-off to the game),
+# ported from heurazy's mario-kart-wii-VR-port. All header-only.
+foreach(test_name mkw_steering_wheel_tests mkw_vr_cockpit_tests mkw_vr_hand_steering_tests)
+    string(REGEX REPLACE "^mkw_" "" test_source "${test_name}")
+    add_executable(${test_name} "${CMAKE_CURRENT_LIST_DIR}/tests/${test_source}.cpp")
+    target_include_directories(${test_name} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
+    target_compile_features(${test_name} PRIVATE cxx_std_17)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+endforeach()
+
 # The VR controllers' Wii Remote presentation (accelerometer frame, pointer
 # raycast, debounce, button profile) is header-only for the same reason.
 add_executable(mkw_vr_wii_remote_tests "${CMAKE_CURRENT_LIST_DIR}/tests/vr_wii_remote_tests.cpp")
