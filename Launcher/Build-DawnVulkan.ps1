@@ -4,6 +4,8 @@
 param(
     [string]$WorkDirectory = (Join-Path $PSScriptRoot 'artifacts\dawn-vulkan-build'),
     [string]$Destination = (Join-Path $PSScriptRoot 'artifacts\dawn-vulkan'),
+    # Source of the DirectX shader compiler DLLs, which Dawn's install does not produce.
+    [string]$StockDawnDirectory = (Join-Path $PSScriptRoot 'artifacts\dependencies\dawn_prebuilt'),
     [string]$Python = 'python',
     [int]$Jobs = 8
 )
@@ -46,6 +48,18 @@ if ($LASTEXITCODE -ne 0) { throw 'Dawn build failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Dawn installation failed.' }
 $dll = Join-Path $Destination 'bin\webgpu_dawn.dll'
 if (-not (Test-Path -LiteralPath $dll)) { throw "Dawn DLL missing: $dll" }
+# Dawn's own install stages only its DLL, but this package replaces dawn_prebuilt wholesale and
+# LocalBuild.ps1 copies the DirectX shader compiler out of it into the product. Dawn loads those
+# two at run time rather than importing them, so leaving them out breaks D3D12 shader compilation
+# long after installation instead of failing here.
+foreach ($name in @('dxcompiler.dll', 'dxil.dll')) {
+    if (Test-Path -LiteralPath (Join-Path $Destination "bin\$name")) { continue }
+    $stock = Join-Path $StockDawnDirectory "bin\$name"
+    if (-not (Test-Path -LiteralPath $stock)) {
+        throw "The pinned Dawn package has no $name; point -StockDawnDirectory at the prepared dawn_prebuilt."
+    }
+    Copy-Item -LiteralPath $stock -Destination (Join-Path $Destination 'bin')
+}
 [ordered]@{
     SourceRevision = $revision
     AuroraVulkanAbi = 1
