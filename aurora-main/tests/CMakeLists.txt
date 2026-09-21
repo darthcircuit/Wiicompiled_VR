@@ -27,6 +27,13 @@ if (AURORA_GPU_SMOKE_TESTS AND AURORA_ENABLE_GX AND WIN32)
   target_include_directories(efb_ram_lifetime_smoke PRIVATE ../lib)
   target_link_libraries(efb_ram_lifetime_smoke PRIVATE aurora::core aurora::gx aurora::main aurora::vi
                         dawn::dawncpp_headers)
+  # VR cockpit overlay (hands, synthetic wheel) against real scene depth. Standalone: it
+  # defines the GPU globals itself and needs only the header.
+  add_executable(cockpit_gpu_smoke cockpit_gpu_smoke.cpp)
+  target_include_directories(cockpit_gpu_smoke PRIVATE ../include ../lib)
+  target_compile_definitions(cockpit_gpu_smoke PRIVATE AURORA TARGET_PC WEBGPU_DAWN)
+  target_link_libraries(cockpit_gpu_smoke PRIVATE fmt::fmt xxhash absl::flat_hash_map absl::btree
+                        dawn::webgpu_dawn dawn::dawncpp_headers TracyClient ${AURORA_SDL3_TARGET})
 endif ()
 
 if (NOT TARGET gtest)
@@ -49,6 +56,7 @@ if (AURORA_ENABLE_GX)
     stereo_interpolation_test.cpp
     stereo_mirror_test.cpp
     native_wheel_test.cpp
+    cockpit_geometry_test.cpp
     texture_bind_group_cache_key_test.cpp
     ../lib/gfx/efb_ram_encoder.cpp
     # GX API implementations (encoders)

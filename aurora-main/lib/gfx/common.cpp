@@ -9,6 +9,7 @@
 #include "../gx/pipeline.hpp"
 #include "pipeline_cache.hpp"
 #include "stereo_replay.hpp"
+#include "cockpit.hpp"
 #include "tex_copy_conv.hpp"
 #include "tex_palette_conv.hpp"
 #include "texture_replacement.hpp"
@@ -158,6 +159,9 @@ uint32_t g_mergedDrawCallCount = 0;
 
 using CommandList = std::vector<Command>;
 struct RenderPass {
+  // The world depth mapping of this pass's last full-view perspective draw, for
+  // the VR cockpit overlay (set by prepare_stereo_replay_uniforms).
+  cockpit::SceneDepth cockpitDepth{};
   wgpu::TextureView colorView;
   wgpu::TextureView resolveView; // MSAA resolve target; null if msaaSamples == 1
   wgpu::TextureView depthView;
@@ -1057,6 +1061,7 @@ void initialize() {
 }
 
 void shutdown() {
+  cockpit::shutdown();
   shutdown_pipeline_cache();
   gx::clear_shader_module_cache();
   efb_ram::shutdown();
@@ -1512,6 +1517,7 @@ static bool prepare_stereo_replay_uniforms(const StereoReplayFrame& stereoFrame,
   std::array<uint8_t, gx::MaxUniformSize> sourceUniform;
   std::array<uint8_t, gx::MaxUniformSize> eyeUniform;
   for (auto& pass : g_renderPasses) {
+    pass.cockpitDepth = {};
     if (!pass.efbTarget) {
       continue;
     }
@@ -1541,6 +1547,19 @@ static bool prepare_stereo_replay_uniforms(const StereoReplayFrame& stereoFrame,
       std::memcpy(sourceUniform.data(), g_uniforms.data() + draw.uniformRange.offset, draw.uniformRange.size);
       Mat4x4<float> gameProjection;
       std::memcpy(&gameProjection, sourceUniform.data() + layout.projectionOffset, sizeof(gameProjection));
+      // The VR cockpit overlay (hands, synthetic wheel) is drawn in metres and
+      // depth-tested against the world, so it needs the world's own depth
+      // mapping: the backend depth row of a full-view world draw, with this
+      // viewport's depth range folded in because the overlay draws with 0..1.
+      // Camera-attached effects share the camera's projection, so any full-view
+      // perspective draw describes the same mapping.
+      if (layout.perspective && !layout.nativeEfbEffect && gameProjection.m2[3] != 0.0f &&
+          drawViewport.width >= displayRegion.width * 0.9f && drawViewport.height >= displayRegion.height * 0.9f) {
+        const auto row = stereo_replay::backend_ndc_depth_row(gameProjection);
+        const float low = std::clamp(std::min(drawViewport.znear, drawViewport.zfar), 0.f, 1.f);
+        const float high = std::clamp(std::max(drawViewport.znear, drawViewport.zfar), 0.f, 1.f);
+        pass.cockpitDepth = {row[2] * (high - low) - low, row[3] * (high - low), true};
+      }
       // Only a genuinely affine projection carries its NDC position in its clip
       // position, which is what the virtual screen reprojection consumes. GX
       // tracks the projection type separately from the matrix, so a 2D draw
@@ -1733,6 +1752,13 @@ struct RenderInvocation {
   bool encodeTextureBakes = true;
   bool encodeResolves = true;
   bool captureDepth = true;
+  // VR cockpit overlay, drawn inside the scene's pass just before the first
+  // virtual-screen draw so the 2D layer's depth cannot hide it (see render_stereo_eye).
+  const StereoReplayFrame* cockpitFrame = nullptr;
+  wgpu::CommandEncoder* cockpitEncoder = nullptr;
+  cockpit::SceneDepth cockpitDepth{};
+  bool* cockpitDrawn = nullptr;
+  bool* sceneDrawn = nullptr;
 };
 
 static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vector<RenderPass>& passes, u32 idx,
@@ -2025,6 +2051,18 @@ void render_stereo_eye(SealedFrame& frame, wgpu::CommandEncoder& cmd, const Ster
   // The eye is a fresh per-frame attachment, not the reused EFB, so replaying
   // past that copy blanks the very image the game presented.
   const int32_t lastPass = get_stereo_stop_at_display_copy() ? displaySource.lastDisplayCopyPass : -1;
+  cockpit::SceneDepth cockpitDepth{};
+  for (size_t i = 0; i < frame.data().passes.size(); ++i) {
+    if (lastPass >= 0 && i > static_cast<size_t>(lastPass)) {
+      break;
+    }
+    if (frame.data().passes[i].cockpitDepth.valid) {
+      cockpitDepth = frame.data().passes[i].cockpitDepth;
+    }
+  }
+  bool cockpitDrawn = false;
+  bool sceneDrawn = false;
+  const bool cockpitActive = stereoFrame.cockpit.active && cockpitDepth.valid;
   render_impl(frame.data().passes, cmd,
               RenderInvocation{
                   .stereoEye = eye,
@@ -2038,7 +2076,17 @@ void render_stereo_eye(SealedFrame& frame, wgpu::CommandEncoder& cmd, const Ster
                   .encodeTextureBakes = false,
                   .encodeResolves = false,
                   .captureDepth = false,
+                  .cockpitFrame = cockpitActive ? &stereoFrame : nullptr,
+                  .cockpitEncoder = &cmd,
+                  .cockpitDepth = cockpitDepth,
+                  .cockpitDrawn = &cockpitDrawn,
+                  .sceneDrawn = &sceneDrawn,
               });
+  // A frame without a virtual-screen draw after its world still gets the
+  // overlay, in a pass of its own over the finished eye.
+  if (cockpitActive && !cockpitDrawn) {
+    cockpit::render(cmd, stereoFrame, eye, cockpitDepth);
+  }
 }
 
 void render(wgpu::CommandEncoder& cmd, int32_t interpolatedFrame, bool finalize) {
@@ -2452,6 +2500,24 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
                    draw.gx.interpolatedUniformRanges[invocation.interpolatedFrame].size != 0) {
           uniformOverride = &draw.gx.interpolatedUniformRanges[invocation.interpolatedFrame];
         }
+        // Draw the VR cockpit against the world's depth before the first HUD
+        // draw can write a screen-plane depth over it, inside this open pass.
+        if (invocation.cockpitFrame != nullptr && overrideTarget) {
+          if (draw.gx.uniformReplayLayout.perspective) {
+            *invocation.sceneDrawn = true;
+          }
+          if (virtualScreenDraw && *invocation.sceneDrawn && !*invocation.cockpitDrawn) {
+            cockpit::render(*invocation.cockpitEncoder, *invocation.cockpitFrame, invocation.stereoEye,
+                            invocation.cockpitDepth, &pass);
+            *invocation.cockpitDrawn = true;
+            encodeState = {};
+            encodeState.boundTextureBindGroup = gx::g_emptyTextureBindGroup.Get();
+            pass.SetBindGroup(0, g_staticBindGroup);
+            pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
+            scissorStateKnown = false;
+            viewportStateKnown = false;
+          }
+        }
         // Such a draw no longer lands where the game aimed it, while the
         // recorded scissor still describes the rectangle it occupied on the flat
         // frame (Mario Kart clips the item roulette that way). Honouring that
@@ -2707,3 +2773,32 @@ void aurora_pop_debug_group() {
 }
 
 const AuroraStats* aurora_get_stats() { return &aurora::gfx::g_stats; }
+
+void aurora_set_vr_hand_mesh(uint32_t hand, const AuroraVRHandVertex* vertices, uint32_t vertexCount,
+                             const uint16_t* indices, uint32_t indexCount, const float* bindPoses,
+                             const int32_t* parents, uint32_t jointCount) {
+  using namespace aurora::gfx::cockpit;
+  if (hand >= 2) {
+    return;
+  }
+  std::shared_ptr<HandMesh> mesh;
+  if (vertices && indices && bindPoses && parents && jointCount == 26 && vertexCount > 0 && vertexCount <= 65535 &&
+      indexCount <= 100000 && indexCount % 3 == 0) {
+    for (uint32_t i = 0; i < indexCount; ++i) {
+      if (indices[i] >= vertexCount) {
+        return;
+      }
+    }
+    mesh = std::make_shared<HandMesh>();
+    mesh->vertices.assign(vertices, vertices + vertexCount);
+    mesh->indices.assign(indices, indices + indexCount);
+    for (int j = 0; j < 26; ++j) {
+      mesh->bind[j] = from_pose(bindPoses + j * 7);
+      mesh->inverseBind[j] = inverse(mesh->bind[j]);
+      mesh->parents[j] = parents[j];
+    }
+  }
+  std::lock_guard lock(meshMutex);
+  meshes[hand] = std::move(mesh);
+  ++meshRevision;
+}

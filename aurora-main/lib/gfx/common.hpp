@@ -314,6 +314,8 @@ struct StereoReplayEye {
 
 struct StereoReplayFrame {
   std::array<StereoReplayEye, AURORA_STEREO_EYE_COUNT> eyes;
+  // VR hands and synthetic wheel, drawn per eye after the world (gfx/cockpit.hpp).
+  AuroraCockpit cockpit{};
 };
 
 void end_frame(const wgpu::CommandEncoder& cmd);

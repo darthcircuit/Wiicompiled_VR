@@ -113,6 +113,9 @@ struct StereoSceneAnchor {
   };
   bool active = false;
   uint32_t localPlayerCount = 1;
+  // World units per metre the anchor was built with, or zero when the packet's
+  // own scale applies (aurora_set_stereo_scene_anchor_scaled).
+  float unitsPerMeter = 0.f;
 };
 // Producer thread only, between aurora_set_stereo_scene_anchor() and the seal
 // that consumes it. Cleared at every seal so a producer that stops publishing
@@ -713,6 +716,27 @@ std::optional<AuroraStereoFrame> request_stereo_frame(uint32_t logicalFrame, uin
       return std::nullopt;
     }
   }
+  // The cockpit overlay is optional: a bad one is dropped, never the frame.
+  if (frame.cockpit.active) {
+    const auto& cockpit = frame.cockpit;
+    bool valid = finite(&cockpit.wheelAngle, 1) && finite(&cockpit.handlebarRadius, 1) &&
+                 finite(&cockpit.unitsPerMeter, 1) && cockpit.unitsPerMeter > 0.f &&
+                 finite(cockpit.seatFromHandlebar, 12);
+    for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
+      valid = valid && finite(cockpit.eyeFromSeat[eye], 12);
+    }
+    for (const auto& hand : cockpit.hands) {
+      valid = valid && finite(&hand.squeeze, 1) && finite(hand.seatFromGrip, 12);
+    }
+    if (!valid) {
+      static bool cockpitRejectionLogged = false;
+      if (!cockpitRejectionLogged) {
+        cockpitRejectionLogged = true;
+        Log.warn("Stereo frame {} carries a non-finite VR cockpit; drawing it without the cockpit", logicalFrame);
+      }
+      frame.cockpit = {};
+    }
+  }
   return frame;
 }
 
@@ -720,6 +744,16 @@ gfx::StereoReplayFrame make_stereo_replay_frame(const AuroraStereoFrame& input, 
   Mat3x4<float> anchorFromScene;
   std::memcpy(&anchorFromScene, sceneAnchor.anchorFromScene.data(), sizeof(anchorFromScene));
   gfx::StereoReplayFrame replay{};
+  replay.cockpit = input.cockpit;
+  // The sealed guest frame owns its scale. The packet may have been sampled
+  // just before a change of scale (a character swap, a lightning strike), so
+  // only its head/IPD translation is rescaled to the frame's.
+  const float frameUnits = sceneAnchor.active && sceneAnchor.unitsPerMeter > 0.f ? sceneAnchor.unitsPerMeter
+                                                                                  : input.cockpit.unitsPerMeter;
+  const float unitRatio = input.cockpit.unitsPerMeter > 0.f && frameUnits > 0.f
+                              ? frameUnits / input.cockpit.unitsPerMeter
+                              : 1.f;
+  replay.cockpit.unitsPerMeter = frameUnits;
   for (uint32_t eye = 0; eye < AURORA_STEREO_EYE_COUNT; ++eye) {
     ensure_stereo_eye_target(eye, input.eyes[eye].width, input.eyes[eye].height);
     const auto& owned = g_stereoEyeTargets[eye];
@@ -737,6 +771,11 @@ gfx::StereoReplayFrame make_stereo_replay_frame(const AuroraStereoFrame& input, 
     };
     std::memcpy(&view.projection, input.eyes[eye].projection, sizeof(view.projection));
     std::memcpy(&view.viewFromCenter, input.eyes[eye].viewFromCenter, sizeof(view.viewFromCenter));
+    if (unitRatio != 1.f) {
+      view.viewFromCenter.m0[3] *= unitRatio;
+      view.viewFromCenter.m1[3] *= unitRatio;
+      view.viewFromCenter.m2[3] *= unitRatio;
+    }
     // World draws already carry the recorded camera, so they need the anchor
     // folded in; the virtual screen is authored in the anchored camera's space
     // and keeps viewFromCenter.
@@ -2606,6 +2645,14 @@ extern "C" void aurora_imgui_host_frame_release(void* imguiFrame) {
 }
 void aurora_set_stereo_scene_anchor(const float anchorFromScene[12]) {
   aurora::set_stereo_scene_anchor(anchorFromScene);
+}
+void aurora_set_stereo_scene_anchor_scaled(const float anchorFromScene[12], float unitsPerMeter) {
+  aurora::set_stereo_scene_anchor(anchorFromScene);
+  uint32_t bits = 0;
+  std::memcpy(&bits, &unitsPerMeter, sizeof(bits));
+  if (aurora::g_pendingSceneAnchor.active && (bits & 0x7f800000u) != 0x7f800000u && unitsPerMeter > 0.f) {
+    aurora::g_pendingSceneAnchor.unitsPerMeter = unitsPerMeter;
+  }
 }
 void aurora_set_stereo_local_player_count(uint32_t count) {
   aurora::g_pendingStereoLocalPlayerCount = count >= 1 && count <= 4 ? count : 1;

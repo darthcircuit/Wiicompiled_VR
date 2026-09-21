@@ -117,6 +117,46 @@ typedef enum {
 #define AURORA_STEREO_CONTENT_TAG_UNKNOWN UINT64_MAX
 
 /**
+ * VR cockpit overlay: tracked hands and, when the vehicle's own wheel cannot be
+ * animated, a synthetic steering wheel or handlebar. Everything is in metres
+ * in a seated frame (+X right, +Y up, -Z forward) whose origin is the headset's
+ * immersive base position. Aurora draws it per eye after the scene, depth-tested
+ * against the scene with the scene's own depth mapping.
+ */
+typedef struct {
+  bool tracked;
+  bool held;
+  float squeeze;
+  float seatFromGrip[12];
+} AuroraCockpitHand;
+
+typedef struct {
+  bool active;
+  float wheelAngle;
+  // The vehicle's own wheel is animated in the scene, so no synthetic wheel is drawn.
+  bool nativeWheel;
+  bool bike;
+  float handlebarRadius;
+  // World units per metre used to build this packet's eye transforms.
+  float unitsPerMeter;
+  float seatFromHandlebar[12];
+  float eyeFromSeat[AURORA_STEREO_EYE_COUNT][12];
+  AuroraCockpitHand hands[2];
+} AuroraCockpit;
+
+typedef struct {
+  float position[3];
+  int16_t joints[4];
+  float weights[4];
+} AuroraVRHandVertex;
+
+// Copies optional runtime-provided hand meshes (XR_FB_hand_tracking_mesh, 26
+// joints). Null clears to the procedural glove. Bind poses: x,y,z,w,px,py,pz.
+void aurora_set_vr_hand_mesh(uint32_t hand, const AuroraVRHandVertex* vertices, uint32_t vertexCount,
+                             const uint16_t* indices, uint32_t indexCount, const float* bindPoses,
+                             const int32_t* parents, uint32_t jointCount);
+
+/**
  * Stereo data for one sealed GX frame. frameToken is opaque to Aurora and is
  * forwarded unchanged to the internal stereo output sink. contentTag must
  * match the tag latched by aurora_end_frame_tagged() for immersive replay.
@@ -130,6 +170,8 @@ typedef struct {
   // Predicted display time converted to std::chrono::steady_clock nanoseconds.
   // Zero disables temporal interpolation for this packet.
   uint64_t displayTimeNanos;
+  // Optional; inactive when zero-initialised.
+  AuroraCockpit cockpit;
 } AuroraStereoFrame;
 
 /**
@@ -247,6 +289,10 @@ void aurora_set_frame_log_callback(AuroraFrameLogCallback callback);
  * provider, which cannot know which frame will consume its packet.
  */
 void aurora_set_stereo_scene_anchor(const float anchorFromScene[12]);
+// As above, also naming the world units per metre the anchor was built with.
+// The sealed frame then owns that scale: each eye's head/IPD translation is
+// rescaled from the packet's AuroraCockpit::unitsPerMeter to it.
+void aurora_set_stereo_scene_anchor_scaled(const float anchorFromScene[12], float unitsPerMeter);
 // Select Player 1's subview for immersive replay of 2-4 local screens.
 // Producer-thread, per-frame metadata, consumed by the next end_frame call.
 // One (the default) keeps full-frame replay. Desktop rendering is unaffected.
