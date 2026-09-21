@@ -70,6 +70,24 @@
         <item name="android:duplicateParentState">true</item>
     </style>
 
+    <!-- The Patches page's Import, WheelWizard's Default button with its FileImport icon. -->
+    <style name="Launcher.ImportButton">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">40dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingStart">16dp</item>
+        <item name="android:paddingEnd">18dp</item>
+        <item name="android:background">@drawable/bg_button_secondary</item>
+        <item name="android:drawableStart">@drawable/ic_file_import</item>
+        <item name="android:drawablePadding">10dp</item>
+        <item name="android:drawableTint">@color/neutral_100</item>
+        <item name="android:text">@string/patches_import</item>
+        <item name="android:textColor">@color/neutral_100</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+    </style>
+
     <style name="Launcher.Tab">
         <item name="android:layout_width">wrap_content</item>
         <item name="android:layout_height">44dp</item>

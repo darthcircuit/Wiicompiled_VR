@@ -33,12 +33,20 @@ object GameStorage {
 
     fun modDirectory(context: Context): File = File(gameRoot(context), MOD_DIRECTORY)
 
+    /** Mods imported on the Patches page, one folder each, as WheelWizard keeps them on a computer. */
+    const val MODS_DIRECTORY = "Mods"
+
     /** The pack's own Code.pul, which is what a modded game and a mod translation both need. */
     fun modCodePul(context: Context): File = File(modDirectory(context), "Binaries/Code.pul")
 
     /** Whether the pack a profile needs is there. Always true for the unmodded game. */
     fun modContentReady(context: Context, profile: GameProfile): Boolean =
         !profile.modPack || modCodePul(context).isFile
+
+    fun modsDirectory(context: Context): File = File(gameRoot(context), MODS_DIRECTORY)
+
+    /** The pack's Patches folder, which its Riivolution XML maps onto the disc; refilled from Mods at each start. */
+    fun patchesDirectory(context: Context): File = File(modDirectory(context), "Patches")
 
     fun configFile(context: Context): File = File(gameRoot(context), "Config.toml")
 

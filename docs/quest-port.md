@@ -173,6 +173,22 @@ mode, vibration, the Wii Remote mapping), Audio, and About (paths, OpenXR
 logging). The launch-time geometry (`render_scale`, `hud_distance_meters`,
 `hud_width_meters`) is only reachable here, not from the in-headset panel.
 
+**Patches**, between the two, is the PC launcher's mods page without its mod
+browser (`PatchesPage`, `ModLibrary`). Import takes one or more picked files,
+asks for a name and makes them one mod under `WiiCompiledOpenXRVR/Mods/<name>/`
+with the PC's `<name>.ini` (Name, Author, ModID, IsEnabled, Priority), so a
+`Mods` folder copied from WheelWizard reads the same. Unlike the PC's Import, a
+picked `.zip` is unpacked, since there is no browser to install downloaded mods;
+`.7z` and `.rar` are refused. Each mod can be switched off, moved up or down,
+renamed or deleted. As on the PC, mods only change Retro Rewind: its Play first
+flattens the enabled mods into `RetroRewind6/Patches` exactly like
+`ModsLaunchService.PrepareModsForLaunch` (the top of the list wins a file both
+carry, `<name>.<tag>.szs` archives take their mod's priority as a prefix, and
+loose files no mod provides are removed). With no mod enabled, a Patches folder
+that still holds files is only cleared if the player says so. The pack's
+Riivolution XML maps that folder onto `/patches` and `/sound`. `ModLibraryTest`
+covers the rules.
+
 The launcher follows the runtime's rules exactly. `TomlConfig` edits one line
 the way `RuntimeConfigFile::WriteSetting` does, and every edit re-reads the file,
 so values the in-headset panel wrote are kept. Each row reads its key with the

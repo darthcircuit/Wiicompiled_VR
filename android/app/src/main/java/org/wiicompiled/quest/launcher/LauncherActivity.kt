@@ -28,7 +28,8 @@ import org.wiicompiled.quest.R
 
 /**
  * The app's entry point on the headset: a 2D panel modelled on the PC launcher (WheelWizard VR),
- * with a Home page that sets up and starts the game and a Settings page that edits Config.toml.
+ * with a Home page that sets up and starts the game, a Patches page that imports mods for Retro
+ * Rewind, and a Settings page that edits Config.toml.
  *
  * The APK carries no game code. Playing needs two things the player owns: the game files (DATA,
  * extracted from their disc image here or on a PC) and the game itself (libmain.so, built from
@@ -41,14 +42,16 @@ import org.wiicompiled.quest.R
  */
 class LauncherActivity : Activity() {
 
-    private enum class Page { Home, Settings }
+    private enum class Page { Home, Patches, Settings }
 
     /** What Home's main and secondary buttons do. */
     private enum class Action { Play, Resume, SelectDisc, ImportGame, BuildGame, DownloadModPack, Reset }
 
     private lateinit var navHome: View
+    private lateinit var navPatches: View
     private lateinit var navSettings: View
     private lateinit var homePage: View
+    private lateinit var patchesView: View
     private lateinit var settingsView: View
     private lateinit var trails: WheelTrailsView
     private lateinit var playButton: View
@@ -64,6 +67,7 @@ class LauncherActivity : Activity() {
     private lateinit var homeTitle: TextView
     private lateinit var gameToggle: LinearLayout
     private lateinit var settings: SettingsPage
+    private lateinit var patches: PatchesPage
 
     /** The games this APK carries a kit for, and the one the player picked. */
     private val profiles: List<GameProfile> by lazy { GameProfile.available(this) }
@@ -71,6 +75,8 @@ class LauncherActivity : Activity() {
 
     private var page = Page.Home
     private var launching = false
+    /** Play is copying the enabled mods into Retro Rewind's Patches folder before starting it. */
+    private var installingPatches = false
     private var trailsAway = true
     private var setupKind: Class<*>? = null
     private var mainAction = Action.Play
@@ -95,8 +101,10 @@ class LauncherActivity : Activity() {
         }
 
         navHome = findViewById(R.id.nav_home)
+        navPatches = findViewById(R.id.nav_patches)
         navSettings = findViewById(R.id.nav_settings)
         homePage = findViewById(R.id.page_home)
+        patchesView = findViewById(R.id.page_patches)
         settingsView = findViewById(R.id.page_settings)
         trails = findViewById(R.id.home_trails)
         playButton = findViewById(R.id.home_play)
@@ -129,11 +137,15 @@ class LauncherActivity : Activity() {
             downloadModPack = ::downloadModPack,
             resetInstallation = ::resetInstallation,
         )
+        patches = PatchesPage(this, patchesView) {
+            openPicker(REQUEST_PATCH_FILES, multiple = true, noPicker = R.string.patches_no_picker)
+        }
         savedInstanceState?.getString(KEY_TAB)?.let { name ->
             SettingsPage.Tab.entries.firstOrNull { it.name == name }?.let(settings::select)
         }
 
         navHome.setOnClickListener { showPage(Page.Home) }
+        navPatches.setOnClickListener { showPage(Page.Patches) }
         navSettings.setOnClickListener { showPage(Page.Settings) }
         playButton.setOnClickListener { perform(mainAction) }
         secondary.setOnClickListener { secondaryAction?.let(::perform) }
@@ -182,8 +194,16 @@ class LauncherActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        val uri = data?.data ?: return
-        if (resultCode != RESULT_OK) return
+        if (resultCode != RESULT_OK || data == null) return
+        if (requestCode == REQUEST_PATCH_FILES) {
+            // Several files arrive as clip data, a single one as the data URI.
+            val clip = data.clipData
+            val uris = if (clip != null) (0 until clip.itemCount).map { clip.getItemAt(it).uri } else listOfNotNull(data.data)
+            showPage(Page.Patches)
+            patches.importPicked(uris)
+            return
+        }
+        val uri = data.data ?: return
         val task = when (requestCode) {
             REQUEST_DISC_IMAGE -> GameSetup.Task.ExtractDisc
             REQUEST_GAME_PACKAGE -> GameSetup.Task.ImportPackage
@@ -197,8 +217,10 @@ class LauncherActivity : Activity() {
     private fun showPage(target: Page) {
         page = target
         navHome.isSelected = target == Page.Home
+        navPatches.isSelected = target == Page.Patches
         navSettings.isSelected = target == Page.Settings
         homePage.visibility = if (target == Page.Home) View.VISIBLE else View.GONE
+        patchesView.visibility = if (target == Page.Patches) View.VISIBLE else View.GONE
         settingsView.visibility = if (target == Page.Settings) View.VISIBLE else View.GONE
         if (target == Page.Home) {
             trailsAway = true
@@ -209,6 +231,7 @@ class LauncherActivity : Activity() {
     private fun refresh() {
         when (page) {
             Page.Home -> refreshHome()
+            Page.Patches -> patches.refresh()
             Page.Settings -> settings.refresh()
         }
     }
@@ -278,10 +301,14 @@ class LauncherActivity : Activity() {
             setup is GameSetup.State.Finishing -> getString(R.string.home_finishing)
             else -> getString(label(mainAction))
         }
+        if (installingPatches) {
+            playButton.isEnabled = false
+            playText.setText(R.string.home_installing_patches)
+        }
         secondary.visibility = if (secondaryAction != null) View.VISIBLE else View.GONE
         secondaryAction?.let { secondary.setText(label(it)) }
 
-        progress.visibility = if (settingUp) View.VISIBLE else View.GONE
+        progress.visibility = if (settingUp || installingPatches) View.VISIBLE else View.GONE
         progress.isIndeterminate = setup !is GameSetup.State.Working
         if (setup is GameSetup.State.Working && setup.total > 0) {
             progress.progress = (setup.done * progress.max / setup.total).toInt()
@@ -549,18 +576,19 @@ class LauncherActivity : Activity() {
             .show()
     }
 
-    private fun openPicker(requestCode: Int) {
-        // Disc images and game files have no reliable MIME type, so every file is offered
-        // and the task checks the name and contents.
+    private fun openPicker(requestCode: Int, multiple: Boolean = false, noPicker: Int = R.string.home_no_picker) {
+        // Disc images, game files and mod files have no reliable MIME type, so every file is
+        // offered and the task checks the name and contents.
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
             .addCategory(Intent.CATEGORY_OPENABLE)
             .setType("*/*")
+            .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple)
         try {
             @Suppress("DEPRECATION")
             startActivityForResult(intent, requestCode)
         } catch (e: ActivityNotFoundException) {
             Log.w(TAG, "No document picker", e)
-            Toast.makeText(this, R.string.home_no_picker, Toast.LENGTH_LONG).show()
+            Toast.makeText(this, noPicker, Toast.LENGTH_LONG).show()
         }
     }
 
@@ -585,6 +613,66 @@ class LauncherActivity : Activity() {
     }
 
     private fun play() {
+        if (launching) {
+            return
+        }
+        // Resume only brings the running game back, and its files must not change under it.
+        if (profile.modPack && !isGameRunning()) {
+            preparePatches()
+            return
+        }
+        startGame()
+    }
+
+    /**
+     * Retro Rewind reads its pack's Patches folder, so the enabled mods are copied into it before
+     * every start, as the PC launcher does (ModsLaunchService.PrepareModsForLaunch). With none
+     * enabled, a folder that still holds files is only cleared if the player says so.
+     */
+    private fun preparePatches() {
+        val mods = ModLibrary.load(GameStorage.modsDirectory(this))
+        when {
+            ModLibrary.shouldAskToClear(mods, GameStorage.patchesDirectory(this)) ->
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.patches_clear_title)
+                    .setMessage(R.string.patches_clear_message)
+                    .setPositiveButton(R.string.patches_delete) { _, _ -> installPatches(mods, clear = true) }
+                    .setNegativeButton(R.string.patches_keep) { _, _ -> startGame() }
+                    .show()
+            mods.any { it.enabled } -> installPatches(mods, clear = false)
+            else -> startGame()
+        }
+    }
+
+    private fun installPatches(mods: List<ModLibrary.Mod>, clear: Boolean) {
+        if (launching) return
+        launching = true
+        installingPatches = true
+        refreshHome()
+        val modsDir = GameStorage.modsDirectory(this)
+        val patchesDir = GameStorage.patchesDirectory(this)
+        ModLibrary.background({ ModLibrary.prepareForLaunch(modsDir, patchesDir, mods, clear) }) { result ->
+            installingPatches = false
+            launching = false
+            if (isDestroyed) return@background
+            val error = result.getOrElse { it.message ?: it.toString() }
+            if (error != null) {
+                Log.w(TAG, "Mods could not be installed: $error")
+                refreshHome()
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.home_patches_failed)
+                    .setMessage(error)
+                    .setPositiveButton(android.R.string.ok, null)
+                    .show()
+                return@background
+            }
+            Log.i(TAG, "Patches folder ready: ${mods.count { it.enabled }} of ${mods.size} mods enabled")
+            refreshHome()
+            startGame()
+        }
+    }
+
+    private fun startGame() {
         if (launching) {
             return
         }
@@ -630,6 +718,7 @@ class LauncherActivity : Activity() {
         const val PROCESS_EXIT_GRACE_MS = 1000L
         const val REQUEST_DISC_IMAGE = 1
         const val REQUEST_GAME_PACKAGE = 2
+        const val REQUEST_PATCH_FILES = 3
         const val PREFERENCES = "launcher"
         const val KEY_LAST_DROPPED_IMPORT = "lastDroppedImport"
         const val EXTRA_DEBUG_BUILD_GAME = "org.wiicompiled.quest.debug.BUILD_GAME"
