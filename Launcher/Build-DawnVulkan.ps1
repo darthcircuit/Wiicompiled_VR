@@ -23,7 +23,9 @@ if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant
 }
 $source = Join-Path $WorkDirectory "dawn-$revision"
 if (-not (Test-Path -LiteralPath $source)) {
-    & $Python -c 'import sys,tarfile; tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter="data")' $archive $WorkDirectory
+    # Single quotes inside: Windows PowerShell drops the inner double quotes when it builds a
+    # native command line, and Python then reads filter=data as a name.
+    & $Python -c "import sys,tarfile; tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter='data')" $archive $WorkDirectory
     if ($LASTEXITCODE -ne 0) { throw 'Dawn source extraction failed (Python 3.12+ required).' }
 }
 $patch = Join-Path $PSScriptRoot '..\aurora-main\patches\dawn\apply.py'
