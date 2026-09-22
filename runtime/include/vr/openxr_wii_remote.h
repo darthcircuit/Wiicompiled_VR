@@ -48,6 +48,9 @@ OpenXRControllerMode OpenXRGetControllerMode() noexcept;
 // Guest side. True when `sdl_joystick_id` is the OpenXR virtual gamepad and the
 // controllers are currently presented as a Wii Remote.
 bool OpenXRWiiRemoteOwnsGamepad(uint32_t sdl_joystick_id) noexcept;
+// True when `sdl_joystick_id` is the VR controllers' virtual gamepad, in either
+// presentation.
+bool OpenXRIsControllerGamepad(uint32_t sdl_joystick_id) noexcept;
 // Latest published sample; false before the first one or after withdrawal.
 bool OpenXRReadWiiRemote(OpenXRWiiRemoteSample& sample) noexcept;
 // WPADControlMotor for the emulated remote.

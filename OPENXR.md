@@ -48,6 +48,7 @@ hud_virtual_screen = true
 stop_at_display_copy = true
 skip_copy_clears = true
 first_person = false
+first_person_toggle_click = true
 first_person_seat = "cockpit"
 cockpit_units_per_meter = 100.0
 first_person_units_per_meter = 50.0
@@ -173,11 +174,12 @@ Touch controllers. The port is served through KPAD like a Bluetooth remote
 | Left trigger | Z |
 | Left grip | C |
 | Left Y | Settings panel (not a Wii button) |
+| Right stick click | First-person camera on / off (not a Wii button) |
 | Right controller motion and aim | Wii Remote accelerometer and pointer |
 | Left controller motion | Nunchuk accelerometer |
 
-Analog inputs count as pressed past half travel. Right B, right stick left / right and the stick
-clicks are unbound, and no controller button presses HOME. The game's Wii Remote rumble vibrates
+Analog inputs count as pressed past half travel. Right B, right stick left / right and the left
+stick click are unbound, and no controller button presses HOME. The game's Wii Remote rumble vibrates
 both controllers, subject to the ordinary controller-vibration switch.
 
 **Motion.** Each XR frame the aim and grip poses are located at the measured current time
@@ -221,7 +223,7 @@ own motion detection still reads them, so a sharp enough turn can read as a shak
 A/B → South/East, X/Y → West/North, index triggers → trigger axes, grips → shoulders, thumbsticks
 → sticks (clicks → stick buttons), left menu → Start. Every binding in the F10 controller menu
 applies. Left Y is GameCube Y here, so clicking both thumbsticks together opens the settings panel
-instead.
+instead. The right thumbstick click on its own still toggles the first-person camera.
 
 Bindings are suggested for `oculus/touch_controller` (Quest 2, 3 and Pro) and
 `khr/simple_controller`. `mkw_vr_wii_remote_tests` checks the accelerometer frame, the pointer
@@ -288,6 +290,17 @@ to the local driver's head instead, at one of two seats:
   companions in the kart's own frame, at `first_person_units_per_meter`.
 
 Both are a matter of taste rather than properties of the game, so the F10 bar exposes them.
+
+**Toggling it from a controller.** Clicking the right thumbstick turns first person on or off
+exactly as the F10 checkbox does, and the choice is saved the same way. It works on the VR
+controllers in either presentation (the right controller gives a short tick), and on any other
+gamepad while VR is running. A click counts on release, and only if the left thumbstick stayed up
+and the settings panel stayed closed throughout, so clicking both thumbsticks to open the panel in
+gamepad mode never toggles the camera. A gamepad whose right thumbstick click is bound to a
+GameCube control on its port, as a button or in an input expression, keeps it for the game instead.
+Toggled in a menu, the change applies from the next race. `first_person_toggle_click = false`, or
+the F10 checkbox under the camera toggle, turns the click off. `mkw_vr_camera_toggle_tests` covers
+the click rule.
 
 The kart is selected through the game's local-screen-to-racer mapping, including online races
 where your racer is not slot zero. First person requires a locally controlled racer; spectating

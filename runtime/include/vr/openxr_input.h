@@ -4,6 +4,7 @@
 
 #if defined(MKW_ENABLE_OPENXR)
 
+#include "vr/camera_toggle.h"
 #include "vr/openxr_driving.h"
 #include "vr/openxr_runtime.h"
 #include "vr/openxr_settings_panel.h"
@@ -63,6 +64,9 @@ struct OpenXRPointerScreen {
 // steering wheel or handlebar takes hold of it; while held, the wheel replaces
 // the left stick's X axis in both presentations and that grip no longer reaches
 // the game (C on the Nunchuk, a shoulder on the gamepad).
+//
+// A right-thumbstick click on its own toggles the first-person camera, as its
+// F10 checkbox does (first_person_toggle_click).
 //
 // Left Y (both thumbsticks clicked together as a gamepad) opens the in-headset
 // settings panel (openxr_settings_panel.h). While it is open, and until every
@@ -166,6 +170,7 @@ private:
     bool m_haptics_active[kHands]{};
     uint32_t m_joystick_id = 0; // SDL_JoystickID; 0 when detached
     void* m_joystick = nullptr; // SDL_Joystick*
+    ClickToggle m_first_person_click;
     SteeringWheel m_wheel;
     WheelReferenceLatch m_wheel_reference;
     driving::WheelVisual m_wheel_visual;

@@ -63,6 +63,7 @@ struct RuntimeUserConfig {
     std::optional<std::string> vrControllerMode;
     std::optional<uint32_t> vrFrameInterpolationFps;
     std::optional<bool> vrFirstPerson;
+    std::optional<bool> vrFirstPersonToggleClick;
     std::optional<float> vrFirstPersonUnitsPerMeter;
     std::optional<float> vrFirstPersonHeadUpMeters;
     std::optional<float> vrFirstPersonHeadForwardMeters;
@@ -502,6 +503,9 @@ inline void EnsureConfigFile() {
               "# the kart, with the horizon kept level. Changeable live from the\n"
               "# F10 menu, and only during a single-screen race.\n"
               "first_person = false\n"
+              "# Clicking the right thumbstick, on the VR controllers or on any\n"
+              "# gamepad while VR runs, toggles first_person as the F10 checkbox does.\n"
+              "first_person_toggle_click = true\n"
               "# Where the head sits: \"cockpit\" puts it at the driver's own eyes,\n"
               "# behind the steering wheel, at a life-size scale that allows for\n"
               "# the character's height, so the wheel is within reach.\n"
@@ -742,6 +746,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.vrStopAtDisplayCopy = FindConfigValue<bool>(document, "vr", "stop_at_display_copy");
     config.vrSkipCopyClears = FindConfigValue<bool>(document, "vr", "skip_copy_clears");
     config.vrFirstPerson = FindConfigValue<bool>(document, "vr", "first_person");
+    config.vrFirstPersonToggleClick = FindConfigValue<bool>(document, "vr", "first_person_toggle_click");
     if (auto value = FindConfigFloat(document, "vr", "first_person_units_per_meter");
         value && *value >= 1.0f && *value <= 10000.0f) {
         config.vrFirstPersonUnitsPerMeter = *value;
@@ -1064,6 +1069,11 @@ inline bool SetVrSkipCopyClears(bool value) {
 inline bool SetVrFirstPerson(bool value) {
     Mutable().vrFirstPerson = value;
     return WriteSetting("vr", "first_person", value ? "true" : "false");
+}
+
+inline bool SetVrFirstPersonToggleClick(bool value) {
+    Mutable().vrFirstPersonToggleClick = value;
+    return WriteSetting("vr", "first_person_toggle_click", value ? "true" : "false");
 }
 
 inline bool SetVrFirstPersonUnitsPerMeter(float value) {
@@ -1508,6 +1518,10 @@ inline bool VrSkipCopyClears(bool fallback = true) {
 
 inline bool VrFirstPerson(bool fallback = false) {
     return Get().vrFirstPerson.value_or(fallback);
+}
+
+inline bool VrFirstPersonToggleClick(bool fallback = true) {
+    return Get().vrFirstPersonToggleClick.value_or(fallback);
 }
 
 inline float VrFirstPersonUnitsPerMeter(float fallback = kVrFirstPersonUnitsPerMeterDefault) {

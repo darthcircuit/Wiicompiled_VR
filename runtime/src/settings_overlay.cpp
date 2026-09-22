@@ -11,6 +11,7 @@
 #include "music_attenuation.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
+#include "vr/camera_toggle.h"
 #include "vr/mkw_vr_first_person.h"
 #include "vr/mkw_vr_policy.h"
 #include "vr/openxr_diagnostics.h"
@@ -33,6 +34,7 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <unordered_map>
 #include <cctype>
 #include <cfloat>
 #include <charconv>
@@ -140,6 +142,11 @@ bool g_vrStopAtDisplayCopy = RuntimeConfigFile::VrStopAtDisplayCopy(true);
 bool g_vrSkipCopyClears = RuntimeConfigFile::VrSkipCopyClears(true);
 bool g_vrHudVirtualScreen = RuntimeConfigFile::VrHudVirtualScreen(true);
 bool g_vrFirstPerson = RuntimeConfigFile::VrFirstPerson(false);
+bool g_vrFirstPersonToggleClick = RuntimeConfigFile::VrFirstPersonToggleClick();
+// Set from any thread by the right-thumbstick click, applied on the game thread.
+std::atomic<bool> g_firstPersonToggleRequested{false};
+// Per physical gamepad; the VR controllers keep theirs on the XR side.
+std::unordered_map<SDL_JoystickID, mkw::vr::ClickToggle> g_gamepadFirstPersonClicks;
 float g_vrFirstPersonUnitsPerMeter = RuntimeConfigFile::VrFirstPersonUnitsPerMeter();
 // 0 = cockpit, 1 = custom, matching kVrFirstPersonSeatNames.
 constexpr std::array<const char*, 2> kVrFirstPersonSeatNames{"cockpit", "custom"};
@@ -1478,6 +1485,12 @@ void DrawVrSettings() {
         mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
     }
     if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Also toggled by clicking the right thumbstick, on the VR controllers or on a gamepad.");
+    }
+    if (ImGui::Checkbox("Right thumbstick click toggles it", &g_vrFirstPersonToggleClick)) {
+        RuntimeConfigFile::SetVrFirstPersonToggleClick(g_vrFirstPersonToggleClick);
+    }
+    if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
             "Moves the camera to the Player 1 driver's head and keeps the horizon level, "
             "instead of riding behind the kart. Applies during a single-screen race; menus "
@@ -1611,6 +1624,65 @@ void DrawVrSettings() {
         RuntimeConfigFile::SetVrFirstPersonHiddenModel(g_vrFirstPersonHiddenModel);
         mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
         ApplyVrHudVirtualScreen();
+    }
+}
+
+// The right-thumbstick click: flips the first-person camera exactly as its
+// checkbox does. Game thread.
+void ToggleFirstPersonCamera() {
+    g_vrFirstPerson = !g_vrFirstPerson;
+    RuntimeConfigFile::SetVrFirstPerson(g_vrFirstPerson);
+    mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+    RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] first-person camera " << (g_vrFirstPerson ? "on" : "off")
+                           << " (right thumbstick click)" << std::endl;
+}
+
+// A gamepad whose right thumbstick click reaches the game (bound to a
+// GameCube control on its port) keeps it; toggling the camera as well would
+// fire both.
+bool RightStickDrivesGame(SDL_Gamepad* gamepad) {
+    if (gamepad == nullptr) {
+        return false;
+    }
+    for (uint32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
+        const s32 index = PADGetIndexForPort(port);
+        if (index < 0 || PADGetSDLGamepadForIndex(static_cast<u32>(index)) != gamepad) {
+            continue;
+        }
+        for (auto* mappings : {&PADGetButtonMappings, &PADGetAltButtonMappings}) {
+            u32 count = 0;
+            const PADButtonMapping* list = (*mappings)(port, &count);
+            for (u32 i = 0; list != nullptr && i < count; ++i) {
+                if (list[i].nativeButton == SDL_GAMEPAD_BUTTON_RIGHT_STICK) {
+                    return true;
+                }
+            }
+        }
+        for (size_t control = 0; control < InputBindings::kControls.size(); ++control) {
+            const std::string expression = InputBindings::GetExpression(port, control);
+            if (expression.find("Thumb R") != std::string::npos || expression.find("Button 11") != std::string::npos) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// A physical gamepad's right-thumbstick click, while VR runs.
+void HandleGamepadFirstPersonClick(const SDL_GamepadButtonEvent& event) {
+    const bool right = event.button == SDL_GAMEPAD_BUTTON_RIGHT_STICK;
+    const bool left = event.button == SDL_GAMEPAD_BUTTON_LEFT_STICK;
+    if ((!right && !left) || mkw::vr::OpenXRIsControllerGamepad(event.which)) {
+        return;
+    }
+    SDL_Gamepad* gamepad = SDL_GetGamepadFromID(event.which);
+    auto& click = g_gamepadFirstPersonClicks[event.which];
+    const bool held = right ? event.down : click.Held();
+    const bool partner = left ? event.down : gamepad != nullptr && SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_LEFT_STICK);
+    const bool blocked = g_rebind.active || InputBindings::InputBlocked();
+    if (click.Update(held, partner, blocked) && g_vrFirstPersonToggleClick && mkw::vr::OpenXRIsRunning() &&
+        !RightStickDrivesGame(gamepad)) {
+        ToggleFirstPersonCamera();
     }
 }
 
@@ -2217,6 +2289,8 @@ void InitializeRuntimeSettings() noexcept {
 
 void RefreshVrHudVirtualScreen() noexcept { ApplyVrHudVirtualScreen(); }
 
+void RequestFirstPersonToggle() noexcept { g_firstPersonToggleRequested.store(true, std::memory_order_release); }
+
 void HandleEvents(const AuroraEvent* events) noexcept {
     if (!events) {
         return;
@@ -2236,6 +2310,9 @@ void HandleEvents(const AuroraEvent* events) noexcept {
                                 IsToggleKey(ev->sdl, SDL_SCANCODE_DELETE))) {
             CompleteRebind(g_rebind.kind == RebindKind::Controller ? PAD_NATIVE_BUTTON_DISABLED
                                                                   : static_cast<uint32_t>(PAD_KEY_INVALID));
+        }
+        if (ev->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || ev->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+            HandleGamepadFirstPersonClick(ev->sdl.gbutton);
         }
         if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_F10)) {
             SetTopBarVisible(!g_topBarVisible);
@@ -2312,6 +2389,9 @@ void Draw() noexcept {
     // its "communications interrupted" prompt without polling pads). Same guest
     // thread as PADRead, so no concurrent access to the scanner's state.
     WiiRemoteInput::Poll();
+    if (g_firstPersonToggleRequested.exchange(false, std::memory_order_acq_rel)) {
+        ToggleFirstPersonCamera();
+    }
     ApplyConfiguredMappings();
     PersistDisplayModeIfChanged();
     UpdateCursorAutoHide();

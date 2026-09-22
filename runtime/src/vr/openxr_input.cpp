@@ -12,6 +12,7 @@
 #include "vr/openxr_input.h"
 #include "physical_wheel.h"
 #include "runtime_config.h"
+#include "settings_overlay.h"
 #include "vr/mkw_vr_first_person.h"
 #include "vr/openxr_diagnostics.h"
 
@@ -497,6 +498,7 @@ void OpenXRInput::Idle() {
     m_last_input_time = 0;
     m_panel_select_held = false;
     OpenXRPublishSettingsPanelPointer(false, 0.0f, 0.0f, false, 0.0f);
+    m_first_person_click.Reset();
     ResetDriving();
     StopRumble();
     // Nothing stays held on the gamepad either while input is away.
@@ -621,6 +623,17 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     PublishSettingsPanel(input_time, settings_panel, panel);
     if (open != was_open) {
         OpenXRSetSettingsPanelOpen(open);
+    }
+
+    // A clean right-thumbstick click toggles the first-person camera. It fires
+    // on release, so the two-thumbstick panel chord never toggles it, and
+    // never while the panel has the controllers.
+    if (m_first_person_click.Update(hands[1].thumbstick_click, hands[0].thumbstick_click,
+                                    panel.open || panel.withheld) &&
+        RuntimeConfigFile::VrFirstPersonToggleClick()) {
+        settings_overlay::RequestFirstPersonToggle();
+        constexpr XrDuration kToggleTickNs = 20'000'000;
+        ApplyHaptic(1, 0.35f, kToggleTickNs);
     }
 
     // The cockpit's wheel before the game reads the controllers: a held wheel
