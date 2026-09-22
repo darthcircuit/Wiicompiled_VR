@@ -407,6 +407,13 @@ the copy (for 30 frames running; the race's opening pan does this) a separate VR
 which is also what `native_steering_wheel = false` draws. The copy keeps being published, so the
 vehicle's own wheel returns as soon as draws take it again, and the log notes both switches.
 
+The substitution is decided per draw, and a draw that folds into a neighbour renders through that
+neighbour's array binding, so only draws that reached the same decision may merge. Deciding this
+per array instead, and so refusing to merge every primitive that binds the vehicle's array, cost 6 ms
+of GPU time a frame on a Quest 3 (a race frame has 228 such primitives, recorded once and replayed in
+the mono pass and both eyes) and took a 56 FPS race down to 42. `debug.wiicompiled.fpslog 1` reports
+the draw calls a frame and the primitives merged away, which is where that shows up first.
+
 The copy is matched against the race camera's view (`RaceCamera::GetViewMtx` with no dolly offset),
 because the scene camera is only set once the draws run. The log reports, once a second, how far
 that view is from the scene camera at the seal (`[mkw-vr] cockpit: race camera view vs scene view`)
