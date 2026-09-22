@@ -2422,6 +2422,8 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
     }
     auto& array = g_gxState.arrays[i];
     const u32 uploadStride = padded_upload_stride(array.stride);
+    if (i == GX_VA_POS && nativeWheelArrays.empty() && !nativeWheelPreviousSources.empty())
+      UNLIKELY { native_wheel_note_outside(array.data); }
     if (i == GX_VA_POS && !nativeWheelArrays.empty())
       UNLIKELY {
         if (auto* nativeWheel = native_wheel_array(array, vertices, static_cast<u32>(vtxCount) * vtxStride, vtxStride,

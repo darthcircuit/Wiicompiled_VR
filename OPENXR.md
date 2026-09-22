@@ -352,15 +352,22 @@ the copy to the GX thread; Aurora substitutes it into the draws that bind that a
 player's own model-view matrix (`aurora_set_native_wheel_vertices`), checking each changed vertex's
 matrix slot, so an opponent sharing the asset and other joints of the same draw are untouched. The
 guest's own vertices are never written, and the copies are dropped after the frame's draws. Bikes
-turn their handle part in the game already; its copy is only re-seated on the level cockpit frame so
-the bars stay with your hands while the bike banks. If no draw takes the copy for 30 frames the log
-says so and the vehicle falls back to a separate VR wheel, which is also what
-`native_steering_wheel = false` draws.
+turn their handle part in the game already; its copy is only re-seated on the cockpit frame so the
+bars stay with your hands while the bike banks. The wheel rides in the same frame as the view: the
+level seat for `"yaw"`, the kart's own orientation for `"yaw_pitch"` and `"full"`. While no draw takes
+the copy (for 30 frames running; the race's opening pan does this) a separate VR wheel stands in,
+which is also what `native_steering_wheel = false` draws. The copy keeps being published, so the
+vehicle's own wheel returns as soon as draws take it again, and the log notes both switches.
 
 The copy is matched against the race camera's view (`RaceCamera::GetViewMtx` with no dolly offset),
 because the scene camera is only set once the draws run. The log reports, once a second, how far
 that view is from the scene camera at the seal (`[mkw-vr] cockpit: race camera view vs scene view`)
 and how many draws took the copy; the F10 bar shows the same under the steering-wheel settings.
+Aurora adds a line after about half a second, five seconds and a minute of copies
+(`Native steering wheel: N sets; draws binding a replaced array ...`) counting the draws that bound a
+copied array, those that bound one outside the window it was set for, the matches, and how far the
+closest position matrix was from the expected one; the first such line with a bound draw also prints
+both matrices.
 
 **Hand steering.** `hand_steering = true` (off by default; also in WheelWizard's OpenXR VR settings)
 lets you take hold of the wheel or handlebar with the tracked controllers. Squeeze a grip near it:

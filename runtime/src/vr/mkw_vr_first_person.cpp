@@ -166,9 +166,11 @@ constexpr uint32_t kScnMdlWorldMtxArrayOffset = 0xECu;
 // ResVtxPosData: data offset +8, component count +0x14 (1 = XYZ), type +0x18,
 // fraction bits +0x1C, stride +0x1D, count +0x1E, bounds min +0x20, max +0x2C.
 constexpr uint32_t kMdl0Magic = 0x4D444C30u;
-// Frames of published wheel copies that no draw took before falling back to
-// the separate VR wheel for this vehicle.
+// Frames of published wheel copies that no draw took before the separate VR
+// wheel stands in; it steps aside again as soon as a draw takes one.
 constexpr uint32_t kNativeWheelUnmatchedFrames = 30;
+// Fallback switches logged per race.
+constexpr uint32_t kNativeWheelSwitchLogs = 8;
 
 // Frames the last good anchor survives a failed read before the camera returns
 // to the game's own. Rides out a transient null during a respawn or transition
@@ -328,6 +330,10 @@ struct FirstPersonState {
         uint32_t body = 0;
         // The level seat frame: simulation position and driving direction.
         Mtx34 stable_body = kIdentityMtx34;
+        // The frame the seat rides in, and the wheel with it: the level frame
+        // for "yaw", otherwise the kart's own orientation around the same seat
+        // position, so the wheel always stays where the view puts it.
+        Mtx34 seat_body = kIdentityMtx34;
         std::array<float, 3> player_scale{1.0f, 1.0f, 1.0f};
         Mtx34 body_pose = kIdentityMtx34;
         bool grips_valid = false;
@@ -352,7 +358,9 @@ struct FirstPersonState {
     bool wheel_arrays_posted = false;
     uint32_t native_wheel_body = 0;
     uint32_t native_wheel_unmatched = 0;
-    bool native_wheel_disabled = false;
+    // The VR wheel is standing in: recent copies have not been taken.
+    bool native_wheel_fallback = false;
+    uint32_t native_wheel_switch_logs = 0;
 };
 
 std::mutex g_mutex;
@@ -874,6 +882,13 @@ void LatchCockpitLocked(uint64_t guest_frame_index) noexcept {
                          : 1.0f / 60.0f;
     g_state.stabilized_frame = guest_frame_index;
     latch.stable_body = g_state.stabilizer.Update(simulation, damage_type != UINT32_MAX, dt);
+    latch.seat_body = latch.stable_body;
+    if (g_state.rotation != FirstPersonRotation::YawOnly) {
+        latch.seat_body = pose;
+        latch.seat_body[3] = latch.stable_body[3];
+        latch.seat_body[7] = latch.stable_body[7];
+        latch.seat_body[11] = latch.stable_body[11];
+    }
     latch.player_scale = ReadPlayerScale(kart.accessor);
     latch.body = kart.body;
     latch.grips_valid = ReadGuestMtx34(kart.body + kKartBodyLeftGripOffset, latch.left_grip) &&
@@ -898,10 +913,10 @@ void LatchCockpitLocked(uint64_t guest_frame_index) noexcept {
     if (g_state.native_wheel_body != kart.body) {
         g_state.native_wheel_body = kart.body;
         g_state.native_wheel_unmatched = 0;
-        g_state.native_wheel_disabled = false;
+        g_state.native_wheel_fallback = false;
     }
     if (!latch.grips_valid || !latch.predicted_view_valid || !g_state.steering_wheel ||
-        !g_state.native_steering_wheel || g_state.native_wheel_disabled) {
+        !g_state.native_steering_wheel) {
         return;
     }
     const DrivingSnapshot driving = OpenXRReadDriving();
@@ -918,7 +933,7 @@ void LatchCockpitLocked(uint64_t guest_frame_index) noexcept {
             return;
         }
         const auto stable_handle = ScaleModelBasis(
-            ComposeMtx(ComposeMtx(latch.stable_body, inverse_body), latch.handle_pose), latch.player_scale);
+            ComposeMtx(ComposeMtx(latch.seat_body, inverse_body), latch.handle_pose), latch.player_scale);
         const auto rendered_handle = ScaleModelBasis(latch.handle_pose, latch.player_scale);
         if (!InvertMtx(rendered_handle, inverse_handle)) {
             return;
@@ -938,7 +953,7 @@ void LatchCockpitLocked(uint64_t guest_frame_index) noexcept {
         latch.mesh_published = PublishNativeWheelMesh(
             kart.body, ComposeMtx(latch.predicted_view, rendered_body), latch.left_grip, latch.right_grip,
             driving.visual_angle, false,
-            ComposeMtx(inverse_rendered, ScaleModelBasis(latch.stable_body, latch.player_scale)));
+            ComposeMtx(inverse_rendered, ScaleModelBasis(latch.seat_body, latch.player_scale)));
     }
 }
 
@@ -1001,20 +1016,14 @@ bool ComputeCockpitAnchorLocked(const Mtx34& view_from_world, const KartPoseRead
     }
     render_units *= scale[1];
 
-    // "yaw" takes the kart's own driving direction, level, rather than the
-    // chase camera's lagging heading; the other modes keep the kart's
-    // orientation around the same seat.
-    Mtx34 kart_frame = latch.stable_body;
-    FirstPersonRotation rotation = FirstPersonRotation::YawPitch;
-    if (g_state.rotation != FirstPersonRotation::YawOnly) {
-        kart_frame = pose;
-        kart_frame[3] = latch.stable_body[3];
-        kart_frame[7] = latch.stable_body[7];
-        kart_frame[11] = latch.stable_body[11];
-        rotation = g_state.rotation;
-    }
+    // "yaw" takes the kart's own driving direction from the level seat frame,
+    // rather than the chase camera's lagging heading; the other modes take the
+    // kart's orientation around the same seat (LatchCockpitLocked).
+    (void)pose;
+    const FirstPersonRotation rotation =
+        g_state.rotation == FirstPersonRotation::YawOnly ? FirstPersonRotation::YawPitch : g_state.rotation;
     Mtx34 anchor{};
-    if (!ComputeFirstPersonAnchor(view_from_world, kart_frame, eye[0], eye[1], eye[2], rotation, anchor)) {
+    if (!ComputeFirstPersonAnchor(view_from_world, latch.seat_body, eye[0], eye[1], eye[2], rotation, anchor)) {
         failed_step = "cockpit anchor math (degenerate camera or kart frame)";
         return false;
     }
@@ -1029,14 +1038,14 @@ bool ComputeCockpitAnchorLocked(const Mtx34& view_from_world, const KartPoseRead
         const detail::Vec3 left{latch.left_grip[3], latch.left_grip[7], latch.left_grip[11]};
         const detail::Vec3 right{latch.right_grip[3], latch.right_grip[7], latch.right_grip[11]};
         const auto seat_from_world = ComposeMtx(anchor, view_from_world);
-        const auto seat_from_body = ComposeMtx(seat_from_world, ScaleModelBasis(latch.stable_body, scale));
+        const auto seat_from_body = ComposeMtx(seat_from_world, ScaleModelBasis(latch.seat_body, scale));
         if (!latch.bike) {
             out.native_wheel = ComputeNativeWheelGeometry(seat_from_body, left, right, render_units);
         } else if (latch.handle_valid) {
             Mtx34 inverse_body{};
             if (InvertMtx(latch.body_pose, inverse_body)) {
                 const auto stable_handle = ScaleModelBasis(
-                    ComposeMtx(ComposeMtx(latch.stable_body, inverse_body), latch.handle_pose), scale);
+                    ComposeMtx(ComposeMtx(latch.seat_body, inverse_body), latch.handle_pose), scale);
                 out.native_wheel = ComputeNativeHandlebarGeometry(ComposeMtx(seat_from_world, stable_handle),
                                                                   seat_from_body, left, right, render_units);
             }
@@ -1045,31 +1054,43 @@ bool ComputeCockpitAnchorLocked(const Mtx34& view_from_world, const KartPoseRead
     // Waiting counts as prepared, so the separate VR wheel does not flash up for
     // the frame or two the XR side takes to engage.
     out.native_mesh_prepared =
-        (latch.mesh_published || latch.waiting_for_driving) && !g_state.native_wheel_disabled;
+        (latch.mesh_published || latch.waiting_for_driving) && !g_state.native_wheel_fallback;
     return true;
 }
 
-// After the frame's draws: drop the wheel copies, and give up on the vehicle's
-// own wheel if no draw has been taking them.
+// After the frame's draws: drop the wheel copies, and let the VR wheel stand
+// in while no draw takes them (the race's opening pan, for one). Copies keep
+// being published, so the vehicle's own wheel returns as soon as they match.
 void FinishNativeWheelFrameLocked() noexcept {
     if (!g_state.wheel_arrays_posted) {
         return;
     }
     DropNativeWheelLocked();
-    if (!g_state.cockpit.mesh_published || g_state.native_wheel_disabled) {
+    if (!g_state.cockpit.mesh_published) {
         return;
     }
+    const bool log = g_state.native_wheel_switch_logs < kNativeWheelSwitchLogs;
     // Lags a frame or two with the GX thread on; the threshold allows for it.
     if (GxNativeWheel::LastDrawCount() > 0) {
+        if (g_state.native_wheel_fallback && log) {
+            ++g_state.native_wheel_switch_logs;
+            RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] native steering wheel: draws take the animated copy of vehicle 0x"
+                                   << std::hex << g_state.cockpit.body << std::dec
+                                   << " again; back to the vehicle's own wheel" << std::endl;
+        }
+        g_state.native_wheel_fallback = false;
         g_state.native_wheel_unmatched = 0;
         return;
     }
-    if (++g_state.native_wheel_unmatched >= kNativeWheelUnmatchedFrames) {
-        g_state.native_wheel_disabled = true;
-        RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] native steering wheel: no draw took the animated copy of vehicle 0x"
-                               << std::hex << g_state.cockpit.body << std::dec << " in "
-                               << kNativeWheelUnmatchedFrames
-                               << " frames; drawing the VR steering wheel instead" << std::endl;
+    if (!g_state.native_wheel_fallback && ++g_state.native_wheel_unmatched >= kNativeWheelUnmatchedFrames) {
+        g_state.native_wheel_fallback = true;
+        if (log) {
+            ++g_state.native_wheel_switch_logs;
+            RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] native steering wheel: no draw took the animated copy of vehicle 0x"
+                                   << std::hex << g_state.cockpit.body << std::dec << " in "
+                                   << kNativeWheelUnmatchedFrames
+                                   << " frames; drawing the VR steering wheel until one does" << std::endl;
+        }
     }
 }
 
@@ -1212,7 +1233,7 @@ void MkwVRFirstPersonApplyConfiguredSettings() noexcept {
         g_state.cockpit_units_per_meter = cockpit_units;
         g_state.steering_wheel = RuntimeConfigFile::VrSteeringWheel();
         g_state.native_steering_wheel = RuntimeConfigFile::VrNativeSteeringWheel();
-        g_state.native_wheel_disabled = false;
+        g_state.native_wheel_fallback = false;
         g_state.native_wheel_unmatched = 0;
     }
     // The cockpit publishes its exact per-frame scale with each anchor; this
@@ -1246,7 +1267,8 @@ void MkwVRFirstPersonReset() noexcept {
     g_state.cockpit_forward.reset();
     g_state.native_wheel_body = 0;
     g_state.native_wheel_unmatched = 0;
-    g_state.native_wheel_disabled = false;
+    g_state.native_wheel_fallback = false;
+    g_state.native_wheel_switch_logs = 0;
 }
 
 void MkwVRFirstPersonUpdate(uint64_t guest_frame_index, uint32_t race_camera_address) noexcept {
