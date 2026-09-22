@@ -2276,7 +2276,13 @@ void record_frame_telemetry() {
     if (fpsLog) {
       static auto windowStart = std::chrono::steady_clock::now();
       static uint32_t windowFrames = 0;
+      // Draw calls are what a recorded frame costs three times over (mono and both eyes), so they belong beside the
+      // GPU timings: an overlay that stops draws merging shows up here long before it shows up as a frame rate.
+      static uint64_t windowDraws = 0;
+      static uint64_t windowMerged = 0;
       ++windowFrames;
+      windowDraws += gfx::g_stats.drawCallCount;
+      windowMerged += gfx::g_stats.mergedDrawCallCount;
       const auto now = std::chrono::steady_clock::now();
       const std::chrono::duration<double> elapsed = now - windowStart;
       if (elapsed.count() >= 5.0) {
@@ -2292,9 +2298,14 @@ void record_frame_telemetry() {
         const double encode = msPerFrame(g_workerEncodeNs);
         Log.info("Game frame rate {:.1f} FPS ({} frames in {:.2f} s); per frame the producer waited {:.2f} ms for "
                  "DONE and {:.2f} ms for SEALED; the worker spent {:.2f} ms sealing, {:.2f} ms waiting for the "
-                 "prepare permit, {:.2f} ms preparing the next frame and {:.2f} ms encoding",
+                 "prepare permit, {:.2f} ms preparing the next frame and {:.2f} ms encoding; {:.0f} draw calls a "
+                 "frame ({:.0f} primitives merged away)",
                  windowFrames / elapsed.count(), windowFrames, elapsed.count(), waitDone, waitSealed, seal,
-                 permitWait, prepare, encode);
+                 permitWait, prepare, encode,
+                 static_cast<double>(windowDraws) / std::max(windowFrames, 1u),
+                 static_cast<double>(windowMerged) / std::max(windowFrames, 1u));
+        windowDraws = 0;
+        windowMerged = 0;
         if (const std::string gpuTiming = gfx::gpu_timing_report(); !gpuTiming.empty()) {
           Log.info("{}", gpuTiming);
         }
