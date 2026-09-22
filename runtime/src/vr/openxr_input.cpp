@@ -10,6 +10,8 @@
 #endif
 
 #include "vr/openxr_input.h"
+#include "runtime_config.h"
+#include "vr/mkw_vr_first_person.h"
 #include "vr/openxr_diagnostics.h"
 
 #include <SDL3/SDL_gamepad.h>
@@ -451,6 +453,7 @@ void OpenXRInput::DetachVirtualGamepad() {
 void OpenXRInput::Destroy() {
     // The game must stop reading a remote whose controllers are going away.
     OpenXRWithdrawWiiRemote();
+    ResetDriving();
     if (m_created) {
         StopRumble();
     }
@@ -493,6 +496,7 @@ void OpenXRInput::Idle() {
     m_last_input_time = 0;
     m_panel_select_held = false;
     OpenXRPublishSettingsPanelPointer(false, 0.0f, 0.0f, false, 0.0f);
+    ResetDriving();
     StopRumble();
     // Nothing stays held on the gamepad either while input is away.
     if (m_joystick != nullptr) {
@@ -507,7 +511,7 @@ void OpenXRInput::Idle() {
 }
 
 void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen& screen,
-                       const OpenXRPointerScreen& settings_panel) {
+                       const OpenXRPointerScreen& settings_panel, const driving::SeatFrame& seat) {
     if (!m_created || m_runtime == nullptr) {
         return;
     }
@@ -617,6 +621,10 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     if (open != was_open) {
         OpenXRSetSettingsPanelOpen(open);
     }
+
+    // The cockpit's wheel before the game reads the controllers: a held wheel
+    // steers through the left stick and keeps its grips from the game.
+    UpdateDriving(predicted_display_time, seat, hands, panel.withheld);
 
     // While the panel has the controllers, the game sees them idle.
     static const std::array<wii_remote::HandInputs, kHands> kIdleHands{};
@@ -766,6 +774,117 @@ void OpenXRInput::PublishWiiRemote(XrTime input_time, const OpenXRPointerScreen&
         }
     }
     OpenXRPublishWiiRemote(m_joystick_id, sample);
+}
+
+void OpenXRInput::ResetDriving() {
+    m_wheel = {};
+    WheelGeometry unused{};
+    m_wheel_reference.Resolve(unused, false, false, false, false, 0, 0.0f);
+    m_wheel_visual.Reset();
+    m_wheel_held = {};
+    m_wheel_time = 0;
+    m_driving = {};
+    OpenXRPublishDriving(m_driving);
+}
+
+void OpenXRInput::UpdateDriving(XrTime display_time, const driving::SeatFrame& seat,
+                                std::array<wii_remote::HandInputs, kHands>& hands, bool withheld) {
+    const FirstPersonAnchor anchor = MkwVRFirstPersonGetAnchor();
+    if (!seat.valid || !anchor.valid || !anchor.cockpit) {
+        if (m_driving.cockpit_active || m_wheel_time != 0) {
+            ResetDriving();
+        }
+        return;
+    }
+    const WheelTuning tuning = RuntimeConfigFile::VrWheelTuning();
+    const bool hand_steering = RuntimeConfigFile::VrHandSteering();
+    const bool steering_wheel = RuntimeConfigFile::VrSteeringWheel();
+    const bool native_steering_wheel = RuntimeConfigFile::VrNativeSteeringWheel();
+    const float dt = m_wheel_time != 0 && display_time > m_wheel_time
+                         ? static_cast<float>(display_time - m_wheel_time) * 1.0e-9f
+                         : 1.0f / 90.0f;
+    m_wheel_time = display_time;
+
+    DrivingSnapshot snapshot{};
+    snapshot.cockpit_active = true;
+    snapshot.hand_steering = hand_steering;
+    snapshot.bike = anchor.bike;
+    // The vehicle's own control is the one turning (or none is shown at all),
+    // so the overlay adds no separate wheel.
+    snapshot.synthetic_control =
+        steering_wheel && !(native_steering_wheel && anchor.native_mesh_prepared);
+
+    // Which control the hands reach for: the vehicle's own wherever its
+    // geometry is known and no separate wheel is drawn, a handlebar always
+    // (held over a brief gap while gripped), otherwise the VR wheel in front
+    // of the seat.
+    WheelGeometry geometry = anchor.native_wheel;
+    const bool geometry_valid = m_wheel_reference.Resolve(geometry, true, geometry.valid,
+                                                          m_wheel_held[0] || m_wheel_held[1], anchor.bike,
+                                                          anchor.vehicle_identity, dt);
+    if (anchor.bike && !geometry_valid) {
+        geometry = {};
+        geometry.center = {0.0f, SteeringWheel::Height, SteeringWheel::Depth};
+        geometry.right = {1.0f, 0.0f, 0.0f};
+        geometry.up = {0.0f, 0.0f, -1.0f};
+        geometry.normal = {0.0f, 1.0f, 0.0f};
+        geometry.radius = 0.25f;
+        geometry.valid = true;
+    }
+    const bool uses_geometry = anchor.bike || (geometry_valid && !snapshot.synthetic_control);
+    if (uses_geometry != m_wheel_uses_geometry || anchor.bike != m_wheel_bike) {
+        m_wheel = {};
+        m_wheel_uses_geometry = uses_geometry;
+        m_wheel_bike = anchor.bike;
+    }
+    snapshot.control = geometry;
+
+    constexpr XrSpaceLocationFlags kPoseValid =
+        XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    std::array<WheelHand, kHands> wheel_hands{};
+    for (uint32_t hand = 0; hand < kHands; ++hand) {
+        bool tracked = false;
+        std::array<float, 12> seat_from_grip = snapshot.hands[hand].seat_from_grip;
+        if (m_grip_spaces[hand] != XR_NULL_HANDLE) {
+            XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+            if (XR_SUCCEEDED(xrLocateSpace(m_grip_spaces[hand], m_runtime->AppSpace(), display_time, &location)) &&
+                (location.locationFlags & kPoseValid) == kPoseValid) {
+                tracked = true;
+                const auto& pose = location.pose;
+                seat_from_grip = driving::SeatFromApp(seat, {pose.position.x, pose.position.y, pose.position.z},
+                                                      {pose.orientation.x, pose.orientation.y,
+                                                       pose.orientation.z, pose.orientation.w});
+            }
+        }
+        const float squeeze = hands[hand].squeeze;
+        // Hands are shown only while they can steer.
+        snapshot.hands[hand] = {tracked && hand_steering, false, squeeze, seat_from_grip};
+        wheel_hands[hand] = {seat_from_grip[3], seat_from_grip[7], seat_from_grip[11], squeeze, tracked};
+        if (uses_geometry) {
+            wheel_hands[hand] = geometry.ToWheel(wheel_hands[hand]);
+        }
+    }
+    const bool active = hand_steering && !withheld;
+    const WheelState wheel = m_wheel.Update(wheel_hands, active, dt,
+                                            uses_geometry ? geometry.radius : SteeringWheel::Radius,
+                                            anchor.bike, tuning);
+    for (uint32_t hand = 0; hand < kHands; ++hand) {
+        if (wheel.held[hand] != m_wheel_held[hand] && active && tuning.haptics) {
+            constexpr XrDuration kGrabPulseNs = 25'000'000;
+            constexpr XrDuration kReleasePulseNs = 15'000'000;
+            ApplyHaptic(hand, wheel.held[hand] ? 0.25f : 0.12f, wheel.held[hand] ? kGrabPulseNs : kReleasePulseNs);
+        }
+        snapshot.hands[hand].held = wheel.held[hand];
+    }
+    m_wheel_held = wheel.held;
+    snapshot.held = wheel.held;
+    driving::ApplyHandSteering(hands, wheel);
+    snapshot.steering_input = withheld ? 0.0f : hands[0].stick_x;
+    snapshot.visual_angle =
+        m_wheel_visual.Update(wheel.held[0] || wheel.held[1], wheel.visualAngle, snapshot.steering_input,
+                              driving::MaxWheelAngle(anchor.bike, tuning), dt);
+    m_driving = snapshot;
+    OpenXRPublishDriving(snapshot);
 }
 
 void OpenXRInput::UpdateRumble() {

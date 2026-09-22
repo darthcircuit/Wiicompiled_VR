@@ -4,9 +4,11 @@
 
 #if defined(MKW_ENABLE_OPENXR)
 
+#include "vr/openxr_driving.h"
 #include "vr/openxr_runtime.h"
 #include "vr/openxr_settings_panel.h"
 #include "vr/openxr_wii_remote.h"
+#include "vr/steering_wheel.h"
 
 #include <array>
 #include <cstdint>
@@ -56,6 +58,12 @@ struct OpenXRPointerScreen {
 // Both are bound for the Oculus Touch profile; khr/simple_controller gets
 // select/menu and the poses so an unknown runtime still offers something.
 //
+// In the first-person cockpit (openxr_driving.h) the grip poses are located in
+// the seated frame every frame. With hand steering on, a squeezed grip near the
+// steering wheel or handlebar takes hold of it; while held, the wheel replaces
+// the left stick's X axis in both presentations and that grip no longer reaches
+// the game (C on the Nunchuk, a shoulder on the gamepad).
+//
 // Left Y (both thumbsticks clicked together as a gamepad) opens the in-headset
 // settings panel (openxr_settings_panel.h). While it is open, and until every
 // button has been released after it closes, the game sees idle controllers: the
@@ -83,9 +91,13 @@ public:
     // xrSyncActions + state reads, then publishes to the virtual gamepad and
     // the Wii Remote bridge. predicted_display_time is the frame's XrTime;
     // screen is where the Wii Remote pointer can land this frame, and
-    // settings_panel where the settings panel is (its whole rectangle).
+    // settings_panel where the settings panel is (its whole rectangle). seat is
+    // the immersive seated frame, invalid outside an immersive race.
     void Sync(XrTime predicted_display_time, const OpenXRPointerScreen& screen,
-              const OpenXRPointerScreen& settings_panel);
+              const OpenXRPointerScreen& settings_panel, const driving::SeatFrame& seat);
+
+    // The cockpit state the last Sync published (also OpenXRReadDriving()).
+    const DrivingSnapshot& Driving() const noexcept { return m_driving; }
 
     // Publishes a remote with nothing held, at rest and not pointing, and stops
     // the haptics, for frames without focused input.
@@ -116,6 +128,11 @@ private:
                           bool withheld);
     void PublishSettingsPanel(XrTime input_time, const OpenXRPointerScreen& panel,
                               const settings_panel::Frame& frame);
+    // Hand steering: locates the grips in the seated frame, runs the wheel and
+    // hands its steering to `hands` before the game sees them.
+    void UpdateDriving(XrTime display_time, const driving::SeatFrame& seat,
+                       std::array<wii_remote::HandInputs, kHands>& hands, bool withheld);
+    void ResetDriving();
     void UpdateRumble();
     void StopRumble();
     bool Check(XrResult result, const char* operation);
@@ -149,6 +166,14 @@ private:
     bool m_haptics_active[kHands]{};
     uint32_t m_joystick_id = 0; // SDL_JoystickID; 0 when detached
     void* m_joystick = nullptr; // SDL_Joystick*
+    SteeringWheel m_wheel;
+    WheelReferenceLatch m_wheel_reference;
+    driving::WheelVisual m_wheel_visual;
+    std::array<bool, kHands> m_wheel_held{};
+    XrTime m_wheel_time = 0;
+    bool m_wheel_uses_geometry = false;
+    bool m_wheel_bike = false;
+    DrivingSnapshot m_driving{};
     bool m_created = false;
     bool m_logged_sync_failure = false;
     bool m_logged_pointer = false;

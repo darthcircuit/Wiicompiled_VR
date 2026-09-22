@@ -50,6 +50,12 @@ struct DrivingSnapshot {
     // clockwise as the driver sees it, i.e. to the right.
     float visual_angle = 0.0f;
     std::array<DrivingHand, 2> hands{};
+    // What the cockpit overlay draws: a separate VR wheel or handlebar when the
+    // vehicle's own is not the one turning. `control` places the handlebar
+    // (and, when its geometry is valid, is what the hands reach for).
+    bool synthetic_control = false;
+    bool bike = false;
+    WheelGeometry control{};
 };
 
 // Pacing thread publishes; any thread reads the latest. A default snapshot

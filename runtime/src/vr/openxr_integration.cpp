@@ -31,6 +31,7 @@
 
 #if defined(MKW_ENABLE_OPENXR)
 #include "vr/openxr_backend.h"
+#include "vr/openxr_hand_mesh.h"
 #include "vr/openxr_input.h"
 #include "vr/openxr_runtime.h"
 #if defined(_WIN32)
@@ -178,6 +179,16 @@ XrPosef ScreenPoseAhead(const OpenXRFrame& frame, float distance) noexcept {
     pose.position = {center[0] - std::sin(yaw) * distance, center[1],
                      center[2] - std::cos(yaw) * distance};
     return pose;
+}
+
+// Hand steering draws the player's hands, in the runtime's own hand mesh where
+// it offers one (XR_FB_hand_tracking_mesh). Only asked for when hand steering
+// is on at launch; turning it on later uses the procedural gloves.
+void AddHandMeshExtensions(OpenXRConfig& config) {
+    if (RuntimeConfigFile::VrHandSteering()) {
+        config.optional_extensions.push_back("XR_EXT_hand_tracking");
+        config.optional_extensions.push_back("XR_FB_hand_tracking_mesh");
+    }
 }
 
 void IdentityEye(AuroraStereoEye& eye) noexcept {
@@ -375,6 +386,7 @@ public:
         config.required_extensions = {kRequiredAuroraBackend == BACKEND_VULKAN ? "XR_KHR_vulkan_enable2" : "XR_KHR_D3D12_enable"};
         config.optional_extensions = {"XR_KHR_win32_convert_performance_counter_time",
                                       "XR_FB_display_refresh_rate", "XR_EXT_performance_settings"};
+        AddHandMeshExtensions(config);
 #else
         // Either Vulkan binding extension is acceptable; the backend picks
         // whichever the runtime enabled, preferring enable2.
@@ -383,6 +395,7 @@ public:
                                       "XR_KHR_convert_timespec_time",
                                       "XR_KHR_android_thread_settings",
                                       "XR_FB_display_refresh_rate", "XR_EXT_performance_settings"};
+        AddHandMeshExtensions(config);
         config.instance_create_next = OpenXRAndroidInstanceCreateNext();
 #endif
         if (!runtime_->Initialize(config)) {
@@ -880,7 +893,7 @@ private:
                 // After the screen is placed, so the pointer aims at this
                 // frame's screen rather than the previous one's.
                 input_->Sync(frame.xr_frame.predicted_display_time, PointerScreen(frame, policy, immersive),
-                             SettingsPanelScreen(frame, policy, immersive));
+                             SettingsPanelScreen(frame, policy, immersive), InputSeatFrame(immersive));
             }
 
             if (!frame.expects_gpu_submission) {
@@ -1061,7 +1074,7 @@ private:
         if (input_ != nullptr) {
             const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
             input_->Sync(packet.xr_frame.predicted_display_time, PointerScreen(packet, policy, immersive),
-                         SettingsPanelScreen(packet, policy, immersive));
+                         SettingsPanelScreen(packet, policy, immersive), InputSeatFrame(immersive));
         }
         if (!packet.expects_gpu_submission) {
             // Nothing to render (no rendering requested or no tracking): keep the compositor fed.
@@ -1228,6 +1241,61 @@ private:
                          position_valid && base_position_valid_, units_per_meter,
                          lean_back_radians, destination.eyes[eye].viewFromCenter);
         }
+        BuildCockpit(source, position_valid, units_per_meter, lean_back_radians, destination.cockpit);
+    }
+
+    // The first-person cockpit's hands and separate wheel, in the seated frame
+    // the eye transforms place at base + lean * seat (metres). Always carries
+    // the packet's world scale, which Aurora rescales to the sealed frame's.
+    void BuildCockpit(const OpenXRBackendFrame& source, bool position_valid, float units_per_meter,
+                      float lean_back_radians, AuroraCockpit& cockpit) noexcept {
+        cockpit.unitsPerMeter = units_per_meter;
+        const DrivingSnapshot driving = input_ != nullptr ? input_->Driving() : DrivingSnapshot{};
+        if (driving.hand_steering && !hand_meshes_loaded_ && runtime_ != nullptr) {
+            hand_meshes_loaded_ = true;
+            const bool loaded = LoadRuntimeHandMeshes(*runtime_);
+            RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] cockpit hands: "
+                                   << (loaded ? "the runtime's hand mesh" : "procedural gloves (no runtime hand mesh)")
+                                   << std::endl;
+        }
+        cockpit.active = driving.cockpit_active && position_valid && base_position_valid_ &&
+                         (driving.synthetic_control || driving.hand_steering);
+        if (!cockpit.active) {
+            return;
+        }
+        cockpit.wheelAngle = driving.visual_angle;
+        cockpit.nativeWheel = !driving.synthetic_control;
+        cockpit.bike = driving.bike;
+        cockpit.handlebarRadius = driving.control.radius;
+        for (int row = 0; row < 3; ++row) {
+            cockpit.seatFromHandlebar[row * 4 + 0] = driving.control.right[row];
+            cockpit.seatFromHandlebar[row * 4 + 1] = driving.control.up[row];
+            cockpit.seatFromHandlebar[row * 4 + 2] = driving.control.normal[row];
+            cockpit.seatFromHandlebar[row * 4 + 3] = driving.control.center[row];
+        }
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            ViewFromBase(source.xr_frame.views[eye].pose, base_position_, true, 1.0f, lean_back_radians,
+                         cockpit.eyeFromSeat[eye]);
+        }
+        for (size_t hand = 0; hand < 2; ++hand) {
+            auto& target = cockpit.hands[hand];
+            const auto& from = driving.hands[hand];
+            target.tracked = from.tracked;
+            target.held = from.held;
+            target.squeeze = from.squeeze;
+            std::copy(from.seat_from_grip.begin(), from.seat_from_grip.end(), target.seatFromGrip);
+        }
+    }
+
+    // The seated frame the controllers are located in for hand steering: the
+    // immersive base the eye transforms use, from the previous frame (this
+    // frame's is latched after input).
+    driving::SeatFrame InputSeatFrame(bool immersive) const noexcept {
+        driving::SeatFrame seat;
+        seat.valid = immersive && base_position_valid_ && last_immersive_;
+        seat.base = base_position_;
+        seat.lean_back_radians = lean_back_degrees_.load(std::memory_order_relaxed) * kDegreesToRadians;
+        return seat;
     }
 
     // Runs once per located frame, before the virtual screen is placed and
@@ -1569,6 +1637,7 @@ private:
     XrPosef virtual_screen_pose_{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
     bool virtual_screen_pose_valid_ = false;
     bool last_immersive_ = false;
+    bool hand_meshes_loaded_ = false;
     uint64_t applied_session_run_serial_ = 0;
     bool session_was_active_ = false;
     bool requested_ = false;
