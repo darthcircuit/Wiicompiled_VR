@@ -112,6 +112,47 @@ TEST_F(CockpitGeometry, TrackedHandDrawsAGloveAtItsGrip) {
   }
 }
 
+// The grip space OpenXR defines: -Z up the curled fingers' tube towards the
+// thumb, +X out of the palm. So the fingers run along Y (+Y on the right hand,
+// -Y on the left) and close towards +X, never out of the back of the hand.
+TEST_F(CockpitGeometry, GloveFingersRunAlongTheHandAndCloseIntoThePalm) {
+  for (int side = 0; side < 2; ++side) {
+    const float forward = side == 0 ? -1.0f : 1.0f;
+    const auto build = [&](float squeeze) {
+      AuroraCockpit cockpit{};
+      cockpit.nativeWheel = true;
+      cockpit.hands[side].tracked = true;
+      cockpit.hands[side].squeeze = squeeze;
+      set_identity(cockpit.hands[side].seatFromGrip, {0.0f, 0.0f, 0.0f});
+      return aurora::gfx::cockpit::geometry(cockpit);
+    };
+    struct Extent {
+      float reach = 0.0f;   // furthest along the fingers
+      float palm = 0.0f;    // furthest towards the palm's normal
+      float back = 0.0f;    // furthest out of the back of the hand
+      float across = 0.0f;  // furthest across the knuckles
+    };
+    const auto measure = [&](const std::vector<Vertex>& vertices) {
+      Extent e{};
+      for (const auto& vertex : vertices) {
+        e.reach = std::max(e.reach, vertex.position[1] * forward);
+        e.palm = std::max(e.palm, vertex.position[0]);
+        e.back = std::min(e.back, vertex.position[0]);
+        e.across = std::max(e.across, std::abs(vertex.position[2]));
+      }
+      return e;
+    };
+    const auto open = measure(build(0.0f));
+    const auto closed = measure(build(1.0f));
+    EXPECT_GT(open.reach, 0.09f) << "open fingers reach along the hand, side " << side;
+    EXPECT_LT(open.palm, 0.05f) << "an open hand is flat, side " << side;
+    EXPECT_LT(closed.reach, open.reach - 0.02f) << "closing shortens the reach, side " << side;
+    EXPECT_GT(closed.palm, open.palm + 0.02f) << "closing moves the fingers into the palm, side " << side;
+    EXPECT_GT(closed.back, -0.03f) << "fingers never bend out of the back of the hand, side " << side;
+    EXPECT_LT(closed.across, 0.07f) << "fingers stay across the knuckles, side " << side;
+  }
+}
+
 TEST_F(CockpitGeometry, RuntimeHandMeshIsSkinnedWithoutNans) {
   using namespace aurora::gfx::cockpit;
   auto mesh = std::make_shared<HandMesh>();
