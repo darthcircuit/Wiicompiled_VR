@@ -116,8 +116,11 @@ TEST_F(CockpitGeometry, TrackedHandDrawsAGloveAtItsGrip) {
 // thumb, +X out of the palm. So the fingers run along Y (+Y on the right hand,
 // -Y on the left) and close towards +X, never out of the back of the hand.
 TEST_F(CockpitGeometry, GloveFingersRunAlongTheHandAndCloseIntoThePalm) {
+  // Both grips carry the same orientation when the hands hold a wheel symmetrically, so the fingers
+  // run along -Y on both and it is the palm side that mirrors: +X on the left hand, -X on the right.
+  // Building the right hand's fingers on +Y instead pointed them at the player (PC, 2026-09-23).
   for (int side = 0; side < 2; ++side) {
-    const float forward = side == 0 ? -1.0f : 1.0f;
+    const float palmSide = side == 0 ? 1.0f : -1.0f;
     const auto build = [&](float squeeze) {
       AuroraCockpit cockpit{};
       cockpit.nativeWheel = true;
@@ -135,9 +138,9 @@ TEST_F(CockpitGeometry, GloveFingersRunAlongTheHandAndCloseIntoThePalm) {
     const auto measure = [&](const std::vector<Vertex>& vertices) {
       Extent e{};
       for (const auto& vertex : vertices) {
-        e.reach = std::max(e.reach, vertex.position[1] * forward);
-        e.palm = std::max(e.palm, vertex.position[0]);
-        e.back = std::min(e.back, vertex.position[0]);
+        e.reach = std::max(e.reach, -vertex.position[1]);
+        e.palm = std::max(e.palm, vertex.position[0] * palmSide);
+        e.back = std::min(e.back, vertex.position[0] * palmSide);
         e.across = std::max(e.across, std::abs(vertex.position[2]));
       }
       return e;

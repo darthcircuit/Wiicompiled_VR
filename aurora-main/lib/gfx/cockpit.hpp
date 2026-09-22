@@ -94,34 +94,38 @@ inline void ellipsoid(std::vector<Vertex>& vertices,V center,V radii,V color) {
 }
 // Rounded palm and individually articulated fingers, in the controller's grip
 // space as OpenXR defines it: the origin is the palm centroid, -Z runs up the
-// tube the curled fingers form (little finger towards thumb), and +X is the
-// palm's outward normal, so the fingers close towards +X. +Y completes the
-// right-handed frame, which leaves it along the fingers on the right hand and
-// against them on the left. Building the fingers on any other axis bends them
-// out of the back of the hand (seen on a Quest 3 on 2026-09-22).
+// tube the curled fingers form (little finger towards thumb), and +X is normal
+// to the palm - *away* from it on the left hand, *into* it on the right. That
+// asymmetry is what makes both grips carry the same orientation when the hands
+// hold a wheel symmetrically, so the fingers run along -Y on both, and it is
+// the geometry across the palm that mirrors: fingers close towards +X on the
+// left hand and -X on the right, with the thumb on the same side. Building the
+// fingers on any other axis bends them out of the back of the hand (seen on a
+// Quest 3 on 2026-09-22) or, for the right hand alone, points them at the
+// player (seen on the PC on 2026-09-23).
 inline void glove(std::vector<Vertex>& v, const AuroraCockpitHand& hand, int side) {
   const size_t start=v.size();
   const V white{0.91f,0.95f,1.0f};
-  const float forward=side==0?-1.0f:1.0f; // hand 0 is the left one
+  const float palm=side==0?1.0f:-1.0f; // hand 0 is the left one
   const float curl=std::clamp(hand.held?0.85f:hand.squeeze,0.0f,1.0f);
   // Thin through the palm's normal, a little wider across the knuckles than
   // the palm is long.
   ellipsoid(v,{0,0,0},{0.018f,0.043f,0.041f},white);
   for(int finger=0;finger<4;++finger) {
     // Index finger nearest the thumb (-Z), little finger last.
-    V a{0.0f,forward*0.030f,-0.025f+finger*0.017f};
+    V a{0.0f,-0.030f,-0.025f+finger*0.017f};
     const float length=finger==0||finger==3?0.021f:0.026f;
     for(int joint=0;joint<3;++joint) {
       const float angle=curl*(0.55f+joint*0.8f);
-      V b=add(a,{std::sin(angle)*length,forward*std::cos(angle)*length,0.0f});
+      V b=add(a,{palm*std::sin(angle)*length,-std::cos(angle)*length,0.0f});
       tube(v,a,b,0.008f,white);
       ellipsoid(v,b,{0.008f,0.008f,0.008f},white);a=b;
     }
   }
   // Thumb: out of the palm's thumb side, closing across the fingers.
-  const V thumbKnuckle{0.026f,forward*0.034f,-0.030f};
-  tube(v,{0.010f,forward*0.012f,-0.034f},thumbKnuckle,0.010f,white);
-  tube(v,thumbKnuckle,{0.030f+0.014f*curl,forward*(0.052f-0.016f*curl),-0.020f},0.009f,white);
+  const V thumbKnuckle{palm*0.026f,-0.034f,-0.030f};
+  tube(v,{palm*0.010f,-0.012f,-0.034f},thumbKnuckle,0.010f,white);
+  tube(v,thumbKnuckle,{palm*(0.030f+0.014f*curl),-(0.052f-0.016f*curl),-0.020f},0.009f,white);
   for(size_t i=start;i<v.size();++i) v[i].position=point(hand.seatFromGrip,v[i].position);
 }
 inline void runtime_hand(std::vector<Vertex>& out, const AuroraCockpitHand& hand, const HandMesh& mesh) {
