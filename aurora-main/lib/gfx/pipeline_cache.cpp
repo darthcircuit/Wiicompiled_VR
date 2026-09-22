@@ -23,6 +23,11 @@
 #include <fmt/format.h>
 #include <tracy/Tracy.hpp>
 
+#if defined(__ANDROID__)
+#include <pthread.h>
+#include <sys/resource.h>
+#endif
+
 namespace aurora::gfx {
 static Module Log("aurora::gfx::pipeline_cache");
 
@@ -65,9 +70,26 @@ constexpr size_t MaxQueuedPipelineBuilds = 256;
 // First-use compilation works best as a short parallel burst. Leave two logical processors for the
 // render and game threads, and cap large hosts to limit driver submissions and memory use.
 constexpr size_t ReservedLogicalProcessors = 2;
+#if defined(__ANDROID__)
+// Quest reports all eight Kryo cores, but the Adreno Vulkan driver serializes
+// much of vkCreateGraphicsPipelines. Six equal-priority compiler threads crowd
+// out the translated game and XR submission threads without materially
+// shortening first-use compilation. Two background-priority workers keep
+// pipeline discovery asynchronous while preserving frame cadence.
+constexpr size_t MaxPipelineWorkers = 2;
+#else
 constexpr size_t MaxPipelineWorkers = 22;
-// Cached clear and GX pipelines are prewarmed using the full worker pool.
+#endif
+// Cached clear and GX pipelines are normally prewarmed using the full worker
+// pool. Mobile Adreno drivers serialize much of pipeline creation internally;
+// prewarming hundreds of recipes there starves first-use pipelines for over a
+// minute. Keep cached recipes dormant on Android. A recipe is promoted to the
+// priority queue as soon as the game actually requests it.
+#if defined(__ANDROID__)
+constexpr size_t MaxBackgroundPipelineWorkers = 0;
+#else
 constexpr size_t MaxBackgroundPipelineWorkers = MaxPipelineWorkers;
+#endif
 // For synchronous pipeline fallback (OpenGL)
 #ifdef NDEBUG
 constexpr size_t BuildPipelinesPerFrame = 5;
@@ -462,6 +484,12 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
       }
     } else if (g_pendingPipelines.contains(hash)) {
       auto* pending = touch_pending_pipeline(hash, g_pipelineFrameActive);
+      // A cached Android recipe can sit dormant because background prewarm is
+      // disabled. Promoting it to first-use priority must wake a worker before
+      // bind_pipeline waits for completion, or both threads sleep forever.
+      if (g_pipelineFrameActive && deferGxPipeline) {
+        notifyWorker = true;
+      }
       if (pending != nullptr && firstFrameUsed < pending->firstFrameUsed) {
         pending->firstFrameUsed = firstFrameUsed;
         if (persist) {
@@ -1032,6 +1060,12 @@ static void compile_pending_pipeline(PendingPipeline pending) {
 static void pipeline_worker() {
 #ifdef TRACY_ENABLE
   tracy::SetThreadName("Pipeline compilation thread");
+#endif
+#if defined(__ANDROID__)
+  pthread_setname_np(pthread_self(), "GXPipeline");
+  // setpriority(PRIO_PROCESS, 0, ...) targets the calling Linux thread.
+  // Pipeline creation may finish later, but must not preempt gameplay or XR.
+  setpriority(PRIO_PROCESS, 0, 5);
 #endif
 
   while (true) {

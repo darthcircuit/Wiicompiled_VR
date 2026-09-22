@@ -97,6 +97,29 @@ hit on Vulkan when a game's device was destroyed under the compositor.
 (there is no BGRA `AHardwareBuffer` format) and requests the two Dawn features
 the bridge needs.
 
+### Quest 1 renderer compatibility
+
+Quest 1 identifies itself as Android device `monterey` and uses an Adreno 540
+driver that misrenders Aurora's general filtered EFB-copy shader. On that
+device, `GXCopyDisp` keeps the destination equal to the resolved EFB region so
+WebGPU can use `CopyTextureToTexture`; the later presentation pass still scales
+the result. Live RGB5A3 menu copies use a minimal RGBA passthrough shader for
+the same reason. Other Android devices retain the normal filtered and
+format-converting paths.
+
+The workaround was isolated on a physical Quest 1: it changed the boot/menu
+output from flickering black or white frames to a complete menu with character
+and vehicle previews. It does intentionally skip Wii-era RGB5A3 quantization on
+that device.
+
+Pipeline compilation is also scheduled differently on Android. Adreno
+serializes much of `vkCreateGraphicsPipelines`, so a large equal-priority worker
+pool starved the translated game and OpenXR pacing threads without shortening
+the compile materially. Android uses two nice-level 5 workers and does not
+prewarm cached recipes in the background; a cached recipe is promoted and its
+workers are awakened when the game first requests it. Desktop keeps the full
+worker pool and prewarm behavior.
+
 ### Controllers
 
 Quest Touch controllers are not HID gamepads, so `openxr_input.cpp` syncs an
