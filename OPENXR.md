@@ -766,11 +766,11 @@ ends, including mid-frame flushes, so live setting changes cannot invalidate pen
   Lifecycle events and performance (about 43 game FPS) are still open. Apple visionOS packaging
   is not implemented.
 - Scene-specific comfort options, culling fixes and replay/spectator classification are future work.
-- The cockpit has only been seen in one kart race on a Quest 3 (2026-09-22): the race camera's view
-  matched the scene's exactly and the kart's own wheel animated (228 draws a frame), but the driver's
-  eye was never calibrated, and the fallback placed the wheel centre about 13 cm above eye level.
-  Bikes and Quacker, the PC, and hand steering itself are unvalidated. Hand steering needs analog
-  grips (Touch); the simple controller profile cannot grab.
+- Hand steering works on a Quest 3 (2026-09-22): the kart's own wheel animated (228 draws a frame,
+  the race camera's view matching the scene's exactly) and the wheel can be grabbed and turned. In
+  that race the driver's eye was never calibrated, so the fallback placed the wheel centre about
+  13 cm above eye level. Bikes and Quacker, and the PC, are still unvalidated. Hand steering needs
+  analog grips (Touch); the simple controller profile cannot grab.
 - The headset settings panel has no laser beam, only the cursor on the panel itself, and text fields
   cannot be typed into without a keyboard.
 - The desktop window remains available as a mirror/fallback.
