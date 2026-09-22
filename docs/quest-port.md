@@ -159,6 +159,22 @@ suggested for `oculus/touch_controller` and `khr/simple_controller`.
   finding, from device crashes.
 - Time conversion for frame interpolation uses `XR_KHR_convert_timespec_time`
   (CLOCK_MONOTONIC, the clock behind `steady_clock` on Bionic).
+- **Passthrough around the menus** (`[vr] passthrough`, default on, live):
+  `runtime/src/vr/openxr_passthrough.cpp` owns one `XR_FB_passthrough`
+  reconstruction layer, the PPSSPP VR design. The Vulkan backend starts it
+  (created on first use) or pauses it as each presentation arrives, and submits
+  it first, under the virtual screen's quad, or alone while there is no image
+  yet (startup, a recenter). An immersive race never submits it and pauses the
+  cameras. The quad is cropped to the snapshot Aurora letterboxes into the
+  nearly square eye image (`OpenXRVirtualScreenContentRect`), or its black
+  bands would frame the picture against the room. The manifest's `com.oculus.feature.PASSTHROUGH` is what lets Horizon
+  OS composite it; DolphinXR found that without it every call succeeds and the
+  layer stays empty. The log says `OpenXR passthrough started`, `paused` and
+  `resumed`; when it runs, logcat also shows `Starting camera streams for
+  purpose: passthrough` and `is_displaying_passthrough_content` going to true.
+  ClientMgrFocus logs `[App Enabled for PT: 0]` at every launch, flag or not
+  (it is about the launch transition), so it proves nothing. Checked on a
+  Quest 3 on 2026-09-22: the room shows around the title screen.
 
 ### Launcher and game process
 

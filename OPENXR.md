@@ -139,6 +139,15 @@ and 0.8 on the Quest, whose mobile GPU needs the headroom.
 launch and govern both the menu screen and the in-race 2D screen, so 2D content keeps its place
 across the transition. `hud_virtual_screen` decides whether the race's 2D layer uses that screen;
 it is live and can be flipped from the F10 settings bar.
+`passthrough` (Quest only, default on) shows the room through the headset's cameras around the
+menu screen and every other virtual screen, instead of black: an `XR_FB_passthrough`
+reconstruction layer submitted under the screen's quad, as PPSSPP VR does, with the blend mode
+left `OPAQUE`. An immersive race never shows it, and the cameras are paused for the race. It is
+live, from the headset panel's VR tab or the launcher's Settings page. The app declares
+`com.oculus.feature.PASSTHROUGH`, without which Horizon OS composites nothing for that layer.
+So that the room frames the picture rather than black bands, the Quest's menu quad shows only the
+part of its eye-sized image Aurora draws into (the desktop snapshot, and the in-eye settings
+panel's rectangle), at the same size per pixel, so nothing moves.
 `stop_at_display_copy` ends eye replay at the final `GXCopyDisp`, matching the frame shown on the
 desktop. `skip_copy_clears` independently suppresses the EFB reset performed after a copy. Both
 default on and can be changed live from the F10 settings bar for diagnostics.
@@ -197,7 +206,7 @@ with the screen the renderer is showing, and the point it meets is where the cur
 is nothing to recenter. On the menu screen that is the quad layer, `hud_width_meters` across with
 the eye texture's aspect, and the pointer spans the game picture inside it (Aurora letterboxes the
 desktop image into the quad and the picture into the desktop image, so a 4:3 picture keeps its
-pillarboxes). During a race it is the 2D layer's screen, `hud_distance_meters` ahead of the latched
+pillarboxes; the Quest crops the quad to the desktop image without changing where it is). During a race it is the 2D layer's screen, `hud_distance_meters` ahead of the latched
 race origin and turned by the lean-back angle, with the picture's aspect. With
 `hud_virtual_screen = false` the race's 2D layer has no fixed place and the pointer is off. The
 game's own pointer switch (`KPADEnableDpd` / `KPADDisableDpd`) is honoured as well.
@@ -512,7 +521,8 @@ the pacing thread continues submitting the last completed layer. A stall alone n
 desktop fallback after 250 ms.
 
 Before the first valid image, when OpenXR requests no rendering, or after a session/reference-space
-change invalidates the retained content, frames can still have no layers. Actual runtime or GPU
+change invalidates the retained content, frames can still have no layers (on the Quest outside a
+race, only the passthrough layer while `passthrough` is on, so a recenter does not flash black). Actual runtime or GPU
 submission failures retain the safe teardown path. This does not detect black images rendered by
 the game itself, and cannot keep submitting if the entire process or XR runtime is suspended.
 All OpenXR session and swapchain calls remain on their owning thread.

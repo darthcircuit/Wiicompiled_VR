@@ -141,6 +141,9 @@ bool g_vrEnabled = RuntimeConfigFile::VrEnabled(true);
 bool g_vrStopAtDisplayCopy = RuntimeConfigFile::VrStopAtDisplayCopy(true);
 bool g_vrSkipCopyClears = RuntimeConfigFile::VrSkipCopyClears(true);
 bool g_vrHudVirtualScreen = RuntimeConfigFile::VrHudVirtualScreen(true);
+#if defined(__ANDROID__)
+bool g_vrPassthrough = RuntimeConfigFile::VrPassthrough();
+#endif
 bool g_vrFirstPerson = RuntimeConfigFile::VrFirstPerson(false);
 bool g_vrFirstPersonToggleClick = RuntimeConfigFile::VrFirstPersonToggleClick();
 // Set from any thread by the right-thumbstick click, applied on the game thread.
@@ -1478,6 +1481,18 @@ void DrawVrSettings() {
             "does pitch the view, and looking sideways while it is set will roll the "
             "horizon the way a real recline would.");
     }
+#if defined(__ANDROID__)
+    if (ImGui::Checkbox("Passthrough around the menu screen", &g_vrPassthrough)) {
+        mkw::vr::OpenXRSetPassthrough(g_vrPassthrough);
+        RuntimeConfigFile::SetVrPassthrough(g_vrPassthrough);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Shows your room through the headset's cameras around the menu screen and every "
+            "other screen outside a race, instead of black. Races stay fully virtual. "
+            "Applies immediately.");
+    }
+#endif
     ImGui::Separator();
     ImGui::Text("VR camera");
     if (ImGui::Checkbox("First-person camera", &g_vrFirstPerson)) {

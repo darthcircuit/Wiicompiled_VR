@@ -30,6 +30,9 @@
 #include "vr/openxr_d3d12.h"
 #endif
 
+#include "vr/openxr_wii_remote.h"
+
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -581,9 +584,33 @@ void TestPanelLayer() {
     display_time = 0;
 }
 
+bool SameRect(const XrRect2Di& rect, int32_t x, int32_t y, int32_t width, int32_t height) {
+    return rect.offset.x == x && rect.offset.y == y && rect.extent.width == width && rect.extent.height == height;
+}
+
+// The menu quad shows only the part of its eye-sized image that Aurora draws into.
+void TestVirtualScreenContentRect() {
+    // A Quest 3 eye at render_scale 0.8 holding the 1280x720 snapshot: the bands above and below
+    // go, and the in-eye settings panel (3/4 of the width, 4:3) is exactly as tall as what is left.
+    const XrRect2Di quest = OpenXRVirtualScreenContentRect(1344, 1408, 16.0f / 9.0f);
+    Require(SameRect(quest, 0, 326, 1344, 756));
+    // At the whole image's size per pixel, the cropped quad is as tall as the snapshot the pointer
+    // maps onto (MenuPictureHalfExtents, 2.4 m across).
+    const float quad_height = 2.4f * static_cast<float>(quest.extent.height) / 1344.0f;
+    const auto picture = wii_remote::MenuPictureHalfExtents(2.4f, 1344.0f / 1408.0f, 16.0f / 9.0f, 16.0f / 9.0f);
+    Require(std::fabs(quad_height - 2.0f * picture[1]) < 1e-4f);
+    // A snapshot narrower than the image is pillarboxed; the panel still has to fit.
+    Require(SameRect(OpenXRVirtualScreenContentRect(1000, 1000, 0.5f), 125, 0, 750, 1000));
+    // A wide snapshot leaves the panel taller than the picture: keep the panel whole.
+    Require(SameRect(OpenXRVirtualScreenContentRect(1344, 1408, 2.4f), 0, 326, 1344, 756));
+    // Before Aurora has published an aspect, the whole image.
+    Require(SameRect(OpenXRVirtualScreenContentRect(1344, 1408, 0.0f), 0, 0, 1344, 1408));
+}
+
 int main() {
     TestRenderFirst();
     TestPanelLayer();
+    TestVirtualScreenContentRect();
     OpenXRRuntime runtime;
     OpenXRD3D12Backend backend;
     Require(backend.QueryGraphicsRequirements(runtime) && backend.BindAurora(runtime));

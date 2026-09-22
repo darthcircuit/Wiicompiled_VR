@@ -57,6 +57,7 @@ struct RuntimeUserConfig {
     std::optional<float> vrHudDistanceMeters;
     std::optional<float> vrHudWidthMeters;
     std::optional<bool> vrHudVirtualScreen;
+    std::optional<bool> vrPassthrough;
     std::optional<bool> vrStopAtDisplayCopy;
     std::optional<bool> vrSkipCopyClears;
     std::optional<std::string> vrMirrorView;
@@ -743,6 +744,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
         config.vrHudWidthMeters = *value;
     }
     config.vrHudVirtualScreen = FindConfigValue<bool>(document, "vr", "hud_virtual_screen");
+    config.vrPassthrough = FindConfigValue<bool>(document, "vr", "passthrough");
     config.vrStopAtDisplayCopy = FindConfigValue<bool>(document, "vr", "stop_at_display_copy");
     config.vrSkipCopyClears = FindConfigValue<bool>(document, "vr", "skip_copy_clears");
     config.vrFirstPerson = FindConfigValue<bool>(document, "vr", "first_person");
@@ -1054,6 +1056,11 @@ inline bool SetVrEnabled(bool value) {
 inline bool SetVrHudVirtualScreen(bool value) {
     Mutable().vrHudVirtualScreen = value;
     return WriteSetting("vr", "hud_virtual_screen", value ? "true" : "false");
+}
+
+inline bool SetVrPassthrough(bool value) {
+    Mutable().vrPassthrough = value;
+    return WriteSetting("vr", "passthrough", value ? "true" : "false");
 }
 
 inline bool SetVrStopAtDisplayCopy(bool value) {
@@ -1506,6 +1513,13 @@ inline float VrHudWidthMeters(float fallback = 2.4f) {
 
 inline bool VrHudVirtualScreen(bool fallback = true) {
     return Get().vrHudVirtualScreen.value_or(fallback);
+}
+
+// The room, through the headset's cameras, around the menu screen and every
+// other virtual screen (never in a race). Only the Quest offers it; the
+// launcher's Settings page shows the same default.
+inline bool VrPassthrough(bool fallback = true) {
+    return Get().vrPassthrough.value_or(fallback);
 }
 
 inline bool VrStopAtDisplayCopy(bool fallback = true) {

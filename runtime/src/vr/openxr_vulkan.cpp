@@ -9,6 +9,7 @@
 
 #include "vr/openxr_vulkan.h"
 #include "vr/openxr_diagnostics.h"
+#include "vr/openxr_passthrough.h"
 
 #include <aurora/vulkan_interop.h>
 
@@ -356,6 +357,7 @@ public:
                 break;
             }
         }
+        passthrough_.SetRunning(*runtime_, presentation.passthrough);
         if (!runtime_->BeginFrame(frame.xr_frame)) {
             Fail("xrBeginFrame failed");
             return OpenXRBeginStatus::Error;
@@ -532,6 +534,8 @@ public:
         if (!runtime_->IsSessionRunning()) {
             return OpenXRBeginStatus::SessionNotRunning;
         }
+        // Before any frame ends on this presentation, the priming cycle below included.
+        passthrough_.SetRunning(*runtime_, presentation.passthrough);
         if (last_display_period_ <= 0) {
             // No display timing yet: one compositor cycle learns it.
             const OpenXRBeginStatus primed = KeepAliveCycle();
@@ -887,6 +891,11 @@ public:
         if (!have_retained_frame_ || !active_frame_.should_render) {
             diagnostics::OnEmptyFrame(!active_frame_.should_render ? diagnostics::EmptyFrameReason::ShouldRenderOff
                                                                     : diagnostics::EmptyFrameReason::NoRetainedLayer);
+            // Outside a race the room stays in view until there is an image to show (at start
+            // and after a recenter), rather than flashing black.
+            if (const XrCompositionLayerBaseHeader* passthrough = passthrough_.Layer()) {
+                return runtime_->EndFrame(active_frame_, &passthrough, 1);
+            }
             return runtime_->EndFrameWithoutLayers(active_frame_);
         }
         diagnostics::OnLayer(fresh);
@@ -896,9 +905,11 @@ public:
             quad.layerFlags = 0;
             quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
             quad.subImage.swapchain = retained_swapchains_[0].handle;
-            quad.subImage.imageRect = {{0, 0},
-                                       {static_cast<int32_t>(retained_swapchains_[0].width),
-                                        static_cast<int32_t>(retained_swapchains_[0].height)}};
+            // Only the picture, not the black bands letterboxing it into the eye-sized image: they
+            // would frame it against the passthrough view.
+            const uint32_t image_width = retained_swapchains_[0].width;
+            quad.subImage.imageRect = OpenXRVirtualScreenContentRect(
+                image_width, retained_swapchains_[0].height, frame.presentation.quad_content_aspect);
             quad.subImage.imageArrayIndex = 0;
             if (frame.presentation.quad_anchored) {
                 quad.space = runtime_->AppSpace();
@@ -909,9 +920,12 @@ public:
                 quad.pose.position = {
                     0.0f, 0.0f, -std::max(0.25f, frame.presentation.quad_distance_meters)};
             }
-            quad.size.width = std::max(0.25f, frame.presentation.quad_width_meters);
-            quad.size.height = quad.size.width * static_cast<float>(retained_swapchains_[0].height) /
-                               static_cast<float>(retained_swapchains_[0].width);
+            // The whole image would be quad_width_meters across: the crop keeps that size per pixel,
+            // so the picture stays exactly where the pointer and the settings panel expect it.
+            const float meters_per_pixel =
+                std::max(0.25f, frame.presentation.quad_width_meters) / static_cast<float>(image_width);
+            quad.size.width = meters_per_pixel * static_cast<float>(quad.subImage.imageRect.extent.width);
+            quad.size.height = meters_per_pixel * static_cast<float>(quad.subImage.imageRect.extent.height);
             return EndFrameWithPanel(frame, reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad));
         }
         std::array<XrCompositionLayerProjectionView, kOpenXREyeCount> views{};
@@ -935,13 +949,20 @@ public:
         return EndFrameWithPanel(frame, reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection));
     }
 
-    // Ends the compositor frame with the scene's layer and, while the retained
-    // frame rendered it, the settings panel's layer over it.
+    // Ends the compositor frame with the scene's layer: over the room's camera
+    // view while that runs and the scene is the virtual screen (never under the
+    // race's projection, which covers the whole view), and, while the retained
+    // frame rendered it, under the settings panel's layer.
     bool EndFrameWithPanel(const OpenXRBackendFrame& frame, const XrCompositionLayerBaseHeader* scene) {
         const auto& panel = frame.presentation.panel;
         XrCompositionLayerQuad panel_quad{};
-        const XrCompositionLayerBaseHeader* layers[2] = {scene, nullptr};
-        uint32_t count = 1;
+        const XrCompositionLayerBaseHeader* layers[3] = {};
+        uint32_t count = 0;
+        if (const XrCompositionLayerBaseHeader* passthrough = passthrough_.Layer();
+            passthrough != nullptr && frame.presentation.mode == OpenXRFrameMode::VirtualScreen) {
+            layers[count++] = passthrough;
+        }
+        layers[count++] = scene;
         if (retained_panel_valid_ && panel.requested && panel.placed) {
             panel_quad = OpenXRPanelQuadLayer(panel, runtime_->AppSpace(), retained_panel_swapchain_.handle);
             layers[count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&panel_quad);
@@ -988,6 +1009,8 @@ public:
         }
         DestroySwapchains();
         DestroySlots();
+        // Its handles belong to the session.
+        passthrough_.Destroy();
         if (owns_session_ && runtime_ != nullptr) {
             runtime_->DestroySession();
             owns_session_ = false;
@@ -1995,6 +2018,8 @@ private:
 
     OpenXRRuntime* runtime_ = nullptr;
     OpenXRLogCallback logger_;
+    // The room around the virtual screen, started and paused as each presentation arrives.
+    OpenXRPassthrough passthrough_{logger_};
     OpenXRVulkanGraphicsRequirements requirements_{};
     std::array<EyeSwapchain, kOpenXREyeCount> eye_swapchains_{};
     std::array<EyeSwapchain, kOpenXREyeCount> retained_swapchains_{};

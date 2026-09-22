@@ -209,6 +209,8 @@
     <string name="vr_hud_distance_helper">How far the menu screen and race HUD sit in front of you.</string>
     <string name="vr_hud_width">Screen width</string>
     <string name="vr_hud_width_helper">How wide the menu screen and race HUD are.</string>
+    <string name="vr_passthrough">Passthrough around the menu screen</string>
+    <string name="vr_passthrough_helper">Shows your room through the headset\'s cameras around the menus instead of black. Races stay fully virtual.</string>
 
     <!-- Graphics tab -->
     <string name="section_graphics">Rendering</string>

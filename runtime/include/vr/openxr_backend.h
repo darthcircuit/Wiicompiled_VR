@@ -7,7 +7,9 @@
 #include "vr/openxr_runtime.h"
 #include "vr/openxr_settings_panel.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 
 namespace mkw::vr {
@@ -81,12 +83,46 @@ inline XrCompositionLayerQuad OpenXRPanelQuadLayer(const OpenXRPanelLayer& panel
     return quad;
 }
 
+// The part of the virtual screen's image that holds anything. Aurora
+// letterboxes the desktop snapshot into that eye-sized image exactly like this
+// (webgpu::calculate_present_viewport_for_aspect) and, when the settings panel
+// is drawn into the eyes, centres it at kSettingsPanelWidthFraction of the
+// width; the rest is black. An unknown content_aspect (0) keeps the whole image.
+inline XrRect2Di OpenXRVirtualScreenContentRect(uint32_t width, uint32_t height, float content_aspect) noexcept {
+    XrRect2Di rect{{0, 0}, {static_cast<int32_t>(width), static_cast<int32_t>(height)}};
+    if (width == 0 || height == 0 || !(content_aspect > 0.0f)) {
+        return rect;
+    }
+    uint32_t content_width = width;
+    uint32_t content_height = std::min<uint32_t>(
+        height, std::max<uint32_t>(1u, static_cast<uint32_t>(std::lround(
+                                           static_cast<double>(width) * static_cast<double>(1.0f / content_aspect)))));
+    if (content_height == height) {
+        content_width = std::min<uint32_t>(
+            width, std::max<uint32_t>(1u, static_cast<uint32_t>(std::lround(static_cast<double>(height) *
+                                                                            static_cast<double>(content_aspect)))));
+    }
+    const uint32_t panel_width = std::min<uint32_t>(
+        width, static_cast<uint32_t>(std::ceil(static_cast<double>(width) * kSettingsPanelWidthFraction)));
+    const uint32_t panel_height = std::min<uint32_t>(
+        height, static_cast<uint32_t>(std::ceil(static_cast<double>(panel_width) * kSettingsPanelHeightPixels /
+                                                kSettingsPanelWidthPixels)));
+    const uint32_t shown_width = std::max(content_width, panel_width);
+    const uint32_t shown_height = std::max(content_height, panel_height);
+    rect.offset = {static_cast<int32_t>((width - shown_width) / 2), static_cast<int32_t>((height - shown_height) / 2)};
+    rect.extent = {static_cast<int32_t>(shown_width), static_cast<int32_t>(shown_height)};
+    return rect;
+}
+
 struct OpenXRPresentation {
     OpenXRFrameMode mode = OpenXRFrameMode::ImmersiveProjection;
 
     // Used only by VirtualScreen.
     float quad_distance_meters = 2.0f;
     float quad_width_meters = 2.4f;
+    // The desktop snapshot's width over height, which Aurora letterboxes into
+    // the screen's image (see OpenXRVirtualScreenContentRect); 0 while unknown.
+    float quad_content_aspect = 0.0f;
 
     // When quad_anchored is set, the quad is placed at quad_pose in the
     // application reference space and stays put as the player looks around.
@@ -95,6 +131,11 @@ struct OpenXRPresentation {
     // head pose good enough to anchor against.
     bool quad_anchored = false;
     XrPosef quad_pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+
+    // Show the room through the headset's cameras around the virtual screen
+    // (OpenXRPassthrough). Taken when the presentation is handed to the backend,
+    // which starts or pauses the view then; a backend without one ignores it.
+    bool passthrough = false;
 
     OpenXRPanelLayer panel;
 };

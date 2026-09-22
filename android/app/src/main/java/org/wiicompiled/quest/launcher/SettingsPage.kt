@@ -200,6 +200,11 @@ class SettingsPage(
                 format = { "%.1f m".format(it) },
                 write = { c, value -> c.setFloat("vr", "hud_width_meters", value) },
             )
+            toggle(
+                R.string.vr_passthrough, R.string.vr_passthrough_helper,
+                read = { it.bool("vr", "passthrough") ?: true },
+                write = { c, value -> c.setBool("vr", "passthrough", value) },
+            )
         }
     }
 

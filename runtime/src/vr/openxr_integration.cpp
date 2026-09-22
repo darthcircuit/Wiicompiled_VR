@@ -392,10 +392,13 @@ public:
         // Either Vulkan binding extension is acceptable; the backend picks
         // whichever the runtime enabled, preferring enable2.
         config.required_extensions = {"XR_KHR_android_create_instance"};
+        // XR_FB_passthrough: the room around the virtual screen (OpenXRPassthrough), asked for
+        // whatever [vr] passthrough says, since the setting is live.
         config.optional_extensions = {"XR_KHR_vulkan_enable2", "XR_KHR_vulkan_enable",
                                       "XR_KHR_convert_timespec_time",
                                       "XR_KHR_android_thread_settings",
-                                      "XR_FB_display_refresh_rate", "XR_EXT_performance_settings"};
+                                      "XR_FB_display_refresh_rate", "XR_EXT_performance_settings",
+                                      "XR_FB_passthrough"};
         AddHandMeshExtensions(config);
         config.instance_create_next = OpenXRAndroidInstanceCreateNext();
 #endif
@@ -559,6 +562,10 @@ public:
 
     bool FrameInterpolationAvailable() const noexcept {
         return interpolation_available_.load(std::memory_order_acquire);
+    }
+
+    void SetPassthrough(bool enabled) noexcept {
+        passthrough_.store(enabled, std::memory_order_relaxed);
     }
 
     void SetLeanBackDegrees(float degrees) noexcept {
@@ -829,6 +836,13 @@ private:
                                            : OpenXRFrameMode::VirtualScreen;
             presentation.quad_distance_meters = policy.config.hud_distance_meters;
             presentation.quad_width_meters = policy.config.hud_width_meters;
+            if (float picture_aspect = 0.0f, snapshot_aspect = 0.0f;
+                aurora_get_stereo_screen_aspects(&picture_aspect, &snapshot_aspect)) {
+                presentation.quad_content_aspect = snapshot_aspect;
+            }
+            // The room around the menu screen and every other virtual screen; a race is
+            // fully virtual, and the cameras are paused for it.
+            presentation.passthrough = !immersive && passthrough_.load(std::memory_order_relaxed);
             // The settings panel gets a compositor layer of its own while it is
             // open, and Aurora leaves it out of the eyes. A backend that could
             // not make that layer has the panel drawn into the eyes instead.
@@ -1660,6 +1674,7 @@ private:
     std::atomic_bool teardown_requested_{false};
     std::atomic_bool recenter_requested_{false};
     std::atomic<float> lean_back_degrees_{RuntimeConfigFile::VrLeanBackDegrees()};
+    std::atomic_bool passthrough_{RuntimeConfigFile::VrPassthrough()};
     std::atomic_uint32_t frame_interpolation_fps_{RuntimeConfigFile::VrFrameInterpolationFps()};
     std::atomic_bool interpolation_available_{false};
     std::mutex interpolation_mutex_;
@@ -1764,6 +1779,14 @@ void OpenXRSetLeanBackDegrees(float degrees) noexcept {
     OpenXRIntegration::Get().SetLeanBackDegrees(degrees);
 #else
     (void)degrees;
+#endif
+}
+
+void OpenXRSetPassthrough(bool enabled) noexcept {
+#if MKW_OPENXR_GRAPHICS_BACKEND
+    OpenXRIntegration::Get().SetPassthrough(enabled);
+#else
+    (void)enabled;
 #endif
 }
 

@@ -53,6 +53,12 @@ void OpenXRRequestRecenter() noexcept;
 // once per published frame.
 void OpenXRSetLeanBackDegrees(float degrees) noexcept;
 
+// Shows the room through the headset's cameras around the menu screen and every
+// other virtual screen, never during an immersive race. Only the standalone
+// (Quest) backend offers it; elsewhere this changes nothing. Callable from any
+// thread; applied on the XR pacing thread's next frame.
+void OpenXRSetPassthrough(bool enabled) noexcept;
+
 // Live scene interpolation at the headset's own display deadlines.
 // 0 = Off, 1 = Auto, otherwise 72/90/120 as a rendering-rate ceiling.
 void OpenXRSetFrameInterpolationFps(uint32_t target) noexcept;
