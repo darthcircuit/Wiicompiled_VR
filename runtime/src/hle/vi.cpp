@@ -537,6 +537,8 @@ void PaceToRetraceBoundary(Clock::time_point deadline) {
 struct SceneAnchorPublication {
     std::array<float, 12> anchor{};
     bool valid = false;
+    // The cockpit seat's exact world scale for this frame, or zero.
+    float unitsPerMeter = 0.0f;
 };
 
 SceneAnchorPublication PublishVrSceneAnchor() {
@@ -552,8 +554,25 @@ SceneAnchorPublication PublishVrSceneAnchor() {
         std::copy(anchor.anchor_from_scene.begin(), anchor.anchor_from_scene.end(), publication.anchor.begin());
     }
 
+    // The cockpit's scale follows the character's height and the player's
+    // size (lightning, mega mushroom). The eye transforms, the HUD screen and
+    // the XR packet all read it from the policy, so keep it current there;
+    // Aurora gets the exact value with the anchor.
+    bool scaleChanged = false;
+    if (anchor.valid && anchor.cockpit && anchor.units_per_meter > 0.0f) {
+        publication.unitsPerMeter = anchor.units_per_meter;
+        const float current = mkw::vr::MkwVRPolicyGetSnapshot().config.first_person_units_per_meter;
+        if (std::abs(anchor.units_per_meter - current) > 0.01f * anchor.units_per_meter) {
+            mkw::vr::MkwVRPolicySetFirstPersonUnitsPerMeter(anchor.units_per_meter);
+            scaleChanged = true;
+        }
+    }
+
     const bool engaged = anchor.valid;
     if (engaged == s_engaged) {
+        if (scaleChanged && engaged) {
+            settings_overlay::RefreshVrHudVirtualScreen();
+        }
         return publication;
     }
     s_engaged = engaged;
@@ -572,6 +591,7 @@ struct GxPresentRecord {
     uint64_t scheduleIntervalNanos = 0;
     std::array<float, 12> anchor{};
     bool anchorValid = false;
+    float anchorUnitsPerMeter = 0.0f;
     bool reportPaced = false;
     bool paced = false;
     uint32_t localPlayerCount = 1;
@@ -584,7 +604,11 @@ void GxPresent_gx(GxPresentRecord record) {
         aurora_report_producer_paced(record.paced);
     }
     aurora_set_present_schedule(record.scheduleBaseNanos, record.scheduleIntervalNanos);
-    aurora_set_stereo_scene_anchor(record.anchorValid ? record.anchor.data() : nullptr);
+    if (record.anchorValid && record.anchorUnitsPerMeter > 0.0f) {
+        aurora_set_stereo_scene_anchor_scaled(record.anchor.data(), record.anchorUnitsPerMeter);
+    } else {
+        aurora_set_stereo_scene_anchor(record.anchorValid ? record.anchor.data() : nullptr);
+    }
     aurora_set_stereo_local_player_count(record.localPlayerCount);
     aurora_end_frame_ex(record.contentTag, record.imguiFrame);
     g_auroraFrameActive.store(false, std::memory_order_release);
@@ -668,6 +692,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     const SceneAnchorPublication anchor = PublishVrSceneAnchor();
     record.anchor = anchor.anchor;
     record.anchorValid = anchor.valid;
+    record.anchorUnitsPerMeter = anchor.unitsPerMeter;
     // Latch the current policy safety state into this exact Aurora job. The
     // asynchronous worker may ask for an XR packet after the guest has already
     // begun the next frame, so immersive replay is accepted only when both

@@ -15,7 +15,10 @@
 // GX-thread entry points for the VR native steering wheel (native_wheel.hpp).
 // The runtime posts these in order with the frame's draws.
 extern "C" void aurora_clear_native_wheel_vertices() {
-  if (!aurora::gx::nativeWheelArrays.empty()) aurora::gx::fifo::drain();
+  // Clearing an empty set reports nothing, so a host that clears both before and after a frame's draws keeps
+  // that frame's count.
+  if (aurora::gx::nativeWheelArrays.empty()) return;
+  aurora::gx::fifo::drain();
   aurora::gx::nativeWheelLastMatches.store(aurora::gx::nativeWheelMatches);
   aurora::gx::nativeWheelMatches = 0;
   aurora::gx::nativeWheelArrays.clear();

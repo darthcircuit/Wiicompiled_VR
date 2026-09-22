@@ -2,14 +2,21 @@
 
 #include "vr/mkw_vr_first_person.h"
 
+#include "gx_native_wheel.h"
 #include "memory.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
+#include "vr/cockpit_stabilizer.h"
 #include "vr/mkw_vr_policy.h"
 #include "vr/mkw_vr_player.h"
+#include "vr/native_wheel_mesh.h"
+#include "vr/openxr_driving.h"
 
+#include <cmath>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <vector>
 
 extern "C" void func_805A6C58(CpuContext* context);
 extern "C" void func_8056A470(CpuContext* context);
@@ -87,6 +94,82 @@ constexpr uint32_t kModelHolderArrayOffset = 0xD8u;
 constexpr uint32_t kModelHolderCountOffset = 0xF0u;
 constexpr uint32_t kMaxPlayerModels = 32;
 
+// ---------------------------------------------------------------------------
+// Cockpit seat and steering wheel, ported from heurazy's mario-kart-wii-VR-port
+// (GPL-3.0-or-later). Every offset below is PAL RMCP01 and was re-checked
+// against the generated translation (leaf getters) and the mkw decompilation.
+// ---------------------------------------------------------------------------
+
+// Kart::Link::GetDriverController (0x80590A40) returns accessor+0x14.
+constexpr uint32_t kKartAccessorDriverOffset = 0x14u;
+// Kart::Link::GetMovement (0x8059077C) returns accessor+0x28. Movement's
+// driving direction at +0x5C excludes damage spin, trick rotation and visual
+// pitch/roll; Kart::Movement::SetScale (0x80581720) stores the player's scale
+// (lightning, mega mushroom) at +0x164.
+constexpr uint32_t kKartAccessorMovementOffset = 0x28u;
+constexpr uint32_t kMovementDirOffset = 0x5Cu;
+constexpr uint32_t kMovementScaleOffset = 0x164u;
+// Kart::Link::GetDamage (0x80590D20) returns accessor+0x2C; the active damage
+// type at +0x1C reads all ones while undamaged.
+constexpr uint32_t kKartAccessorDamageOffset = 0x2Cu;
+constexpr uint32_t kDamageTypeOffset = 0x1Cu;
+// Kart::Link::GetKartPosition (0x8059020C): physics+0x4 -> dynamics, whose
+// position is at +0x68.
+constexpr uint32_t kKartPhysicsDynamicsOffset = 0x4u;
+constexpr uint32_t kDynamicsPositionOffset = 0x68u;
+// Kart::Link::IsBike (0x80590A6C) reads accessor+0 -> KartSettings -> +0
+// (KartSettings::isBike). KartSettings (0x3C bytes in the decompilation) holds
+// KartDriverDispParams* at +0x1C, whose first two floats are the driver's seat
+// height and depth on this vehicle.
+constexpr uint32_t kKartSettingsIsBikeOffset = 0x0u;
+constexpr uint32_t kKartSettingsDriverDispParamsOffset = 0x1Cu;
+// Kart::Link::GetKartBodyMtx (0x80590278) returns body+0x1C, the animated body.
+constexpr uint32_t kKartBodyMtxOffset = 0x1Cu;
+// Body::vf_0x58 (0x8056C500) builds the neutral hand grip frames at +0xA8 and
+// +0xD8 from KartDriverDispParams+8 (through 0x80592BF8).
+constexpr uint32_t kKartBodyLeftGripOffset = 0xA8u;
+constexpr uint32_t kKartBodyRightGripOffset = 0xD8u;
+// Kart::BodyBike::__ct (0x8056D858) constructs the BikeHandle at body+0x238 and
+// writes its vtable 0x808B5314 at +0xC (Quacker inherits the same handle).
+// BodyBike::vf_0x60 (0x8056DA0C) transforms the grip frames by the handle's
+// matrix at +0x1C, not by the body's.
+constexpr uint32_t kBodyBikeHandleOffset = 0x238u;
+constexpr uint32_t kBikeHandleVtableOffset = 0xCu;
+constexpr uint32_t kBikeHandleVtable = 0x808B5314u;
+constexpr uint32_t kBikeHandleMtxOffset = 0x1Cu;
+// A vehicle part's ModelDirector is at +0x7C and a driver's at
+// DriverController+0x6C (DriverController::LoadModels 0x807C7828 reads it and
+// hands over the placement matrix at +0x78); ModelDirector+0xC is the MDL0.
+constexpr uint32_t kPartModelOffset = 0x7Cu;
+constexpr uint32_t kDriverModelOffset = 0x6Cu;
+constexpr uint32_t kDriverPlacementOffset = 0x78u;
+constexpr uint32_t kModelDirectorResMdlOffset = 0xCu;
+// DriverController::__ct (0x807C7364) stores the bone table at +0x104, which
+// DriverController::GetBoneMatId (0x807D976C) walks: 0x60-byte records, the
+// bone's name at +0x14 and its nw4r ResNodeData at +0x18. ResNodeData holds
+// mtxId at +0x10 and the bind-pose modelMtx at +0x70.
+constexpr uint32_t kDriverBonesOffset = 0x104u;
+constexpr uint32_t kDriverBoneRecordBytes = 0x60u;
+constexpr uint32_t kDriverBoneCount = 36u;
+constexpr uint32_t kDriverBoneNameOffset = 0x14u;
+constexpr uint32_t kDriverBoneNodeOffset = 0x18u;
+constexpr uint32_t kResNodeMtxIdOffset = 0x10u;
+constexpr uint32_t kResNodeModelMtxOffset = 0x70u;
+// ModelCalcCallback::GetBoneWorldMtx (0x8055FA90): ModelDirector+0x10 ->
+// ScnMdlEx, whose first word is the ScnMdl; ScnMdlSimple::GetScnMtxPos
+// (0x80071DC0) returns the world matrix array at +0xEC plus mtxId * 48.
+constexpr uint32_t kModelDirectorScnMdlExOffset = 0x10u;
+constexpr uint32_t kScnMdlWorldMtxArrayOffset = 0xECu;
+// nw4r MDL0 ("MDL0", versions 8-11): the vertex position dictionary's offset
+// is at +0x18. ResDic: entry count at +4, 16-byte entries from +8 (entry 0 is
+// the root) with name and data offsets at +8/+0xC, relative to the dictionary.
+// ResVtxPosData: data offset +8, component count +0x14 (1 = XYZ), type +0x18,
+// fraction bits +0x1C, stride +0x1D, count +0x1E, bounds min +0x20, max +0x2C.
+constexpr uint32_t kMdl0Magic = 0x4D444C30u;
+// Frames of published wheel copies that no draw took before falling back to
+// the separate VR wheel for this vehicle.
+constexpr uint32_t kNativeWheelUnmatchedFrames = 30;
+
 // Frames the last good anchor survives a failed read before the camera returns
 // to the game's own. Rides out a transient null during a respawn or transition
 // without letting a genuinely broken anchor persist.
@@ -144,8 +227,10 @@ bool ReadSceneViewMatrix(Mtx34& out) noexcept {
     }
 }
 
-bool ReadRaceCameraViewMatrix(const CpuContext* context, uint32_t camera_address,
-                              Mtx34& out) noexcept {
+// `dolly` is GetViewMtx's f1: the game's own call site passes the blend value
+// (ReadRaceCameraBlend); zero asks for the camera without that offset.
+bool ReadRaceCameraViewMatrix(const CpuContext* context, uint32_t camera_address, Mtx34& out,
+                              float dolly) noexcept {
     if (context == nullptr || camera_address == 0 ||
         context->gpr[1] < kRaceCameraScratchBytes) {
         return false;
@@ -158,7 +243,7 @@ bool ReadRaceCameraViewMatrix(const CpuContext* context, uint32_t camera_address
     call_context.gpr[5] = scratch + 48u;
     // Every argument register has to be set deliberately: the rest of this
     // context belongs to the observed function, not to the one being called.
-    call_context.fpr[1].d = static_cast<double>(ReadRaceCameraBlend());
+    call_context.fpr[1].d = static_cast<double>(dolly);
     try {
         CpuContextScope scope(&call_context);
         func_805A6C58(&call_context);
@@ -231,6 +316,43 @@ struct FirstPersonState {
     bool ever_valid_this_race = false;
     bool failure_logged = false;
     uint64_t logged_frame = 0;
+
+    // Cockpit seat.
+    FirstPersonSeat seat = FirstPersonSeat::Cockpit;
+    float cockpit_units_per_meter = RuntimeConfigFile::kVrCockpitUnitsPerMeterDefault;
+    bool steering_wheel = RuntimeConfigFile::kVrSteeringWheelDefault;
+    bool native_steering_wheel = RuntimeConfigFile::kVrNativeSteeringWheelDefault;
+    // Read at the race draw boundary, consumed at the seal.
+    struct CockpitLatch {
+        bool valid = false;
+        uint32_t body = 0;
+        // The level seat frame: simulation position and driving direction.
+        Mtx34 stable_body = kIdentityMtx34;
+        std::array<float, 3> player_scale{1.0f, 1.0f, 1.0f};
+        Mtx34 body_pose = kIdentityMtx34;
+        bool grips_valid = false;
+        Mtx34 left_grip = kIdentityMtx34;
+        Mtx34 right_grip = kIdentityMtx34;
+        bool bike = false;
+        bool handle_valid = false;
+        Mtx34 handle_pose = kIdentityMtx34;
+        bool predicted_view_valid = false;
+        Mtx34 predicted_view = kIdentityMtx34;
+        bool mesh_published = false;
+        // The vehicle's own wheel would have been animated but the XR side has
+        // not published its first driving snapshot yet: it shows unturned.
+        bool waiting_for_driving = false;
+    } cockpit;
+    CockpitStabilizer stabilizer{};
+    uint64_t stabilized_frame = 0;
+    SeatedEyeReference seated_eye{};
+    uint32_t seated_driver = 0;
+    std::optional<float> cockpit_forward;
+    // Native wheel copies handed to the GX side and not yet dropped.
+    bool wheel_arrays_posted = false;
+    uint32_t native_wheel_body = 0;
+    uint32_t native_wheel_unmatched = 0;
+    bool native_wheel_disabled = false;
 };
 
 std::mutex g_mutex;
@@ -399,6 +521,583 @@ void ApplyModelVisibilityLocked() noexcept {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cockpit seat and native steering wheel (guest thread, under g_mutex).
+// ---------------------------------------------------------------------------
+
+std::array<float, 3> ReadPlayerScale(uint32_t accessor) noexcept {
+    std::array<float, 3> scale{1.0f, 1.0f, 1.0f};
+    uint32_t movement = 0;
+    try {
+        if (ReadGuestPointer(accessor + kKartAccessorMovementOffset, movement) &&
+            Memory::Contains(movement + kMovementScaleOffset, 12)) {
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                scale[axis] = ValidPlayerScale(Memory::ReadFloat32(movement + kMovementScaleOffset + axis * 4u));
+            }
+        }
+    } catch (const Memory::AccessViolation&) {
+        return {1.0f, 1.0f, 1.0f};
+    }
+    return scale;
+}
+
+uint32_t LocalDriver(uint32_t accessor) noexcept {
+    uint32_t driver = 0;
+    if (!ReadGuestPointer(accessor + kKartAccessorDriverOffset, driver) ||
+        !Memory::Contains(driver, kDriverBonesOffset + 4u)) {
+        return 0;
+    }
+    return driver;
+}
+
+bool IsLocalBike(uint32_t accessor) noexcept {
+    uint32_t settings = 0, is_bike = 0;
+    return ReadGuestPointer(accessor, settings) && Memory::TryRead32(settings + kKartSettingsIsBikeOffset, is_bike) &&
+           is_bike != 0;
+}
+
+std::string ReadGuestName(uint32_t address, uint32_t limit) {
+    std::string text;
+    for (uint32_t n = 0; n < limit && Memory::Contains(address + n, 1); ++n) {
+        const char c = static_cast<char>(Memory::Read8(address + n));
+        if (c == '\0') {
+            break;
+        }
+        text += c;
+    }
+    return text;
+}
+
+// The driver model's "_eye" position array bounds, in the face bone's space.
+bool ReadEyeBounds(uint32_t driver, detail::Vec3& minimum, detail::Vec3& maximum) {
+    uint32_t model = 0, mdl = 0;
+    if (!ReadGuestPointer(driver + kDriverModelOffset, model) ||
+        !ReadGuestPointer(model + kModelDirectorResMdlOffset, mdl) || !Memory::Contains(mdl, 0x40) ||
+        Memory::Read32(mdl) != kMdl0Magic) {
+        return false;
+    }
+    const uint32_t version = Memory::Read32(mdl + 8), offset = Memory::Read32(mdl + 0x18);
+    if (version < 8 || version > 11 || offset == 0 || offset > 0x100000) {
+        return false;
+    }
+    const uint32_t dic = mdl + offset;
+    if (!Memory::Contains(dic, 8)) {
+        return false;
+    }
+    const uint32_t count = Memory::Read32(dic + 4);
+    if (count > 64 || !Memory::Contains(dic, 8 + (count + 1) * 16)) {
+        return false;
+    }
+    for (uint32_t i = 1; i <= count; ++i) {
+        const uint32_t entry = dic + 8 + i * 16;
+        const uint32_t name_offset = Memory::Read32(entry + 8), data_offset = Memory::Read32(entry + 12);
+        if (name_offset > 0x100000 || data_offset > 0x100000) {
+            continue;
+        }
+        if (ReadGuestName(dic + name_offset, 96).find("_eye") == std::string::npos) {
+            continue;
+        }
+        const uint32_t positions = dic + data_offset;
+        if (!Memory::Contains(positions, 0x38) || Memory::Read32(positions + 0x14) != 1) {
+            continue;
+        }
+        minimum = {Memory::ReadFloat32(positions + 0x20), Memory::ReadFloat32(positions + 0x24),
+                   Memory::ReadFloat32(positions + 0x28)};
+        maximum = {Memory::ReadFloat32(positions + 0x2C), Memory::ReadFloat32(positions + 0x30),
+                   Memory::ReadFloat32(positions + 0x34)};
+        return true;
+    }
+    return false;
+}
+
+// The seated eye in the vehicle's own frame, in its units. Measured once from
+// the driver's head bone while the kart drives straight and undamaged, then
+// frozen until the driver or the race changes; the bind pose serves until then.
+bool ReadDriverEye(const KartPoseRead& kart, std::array<float, 3>& eye) noexcept {
+    const uint32_t driver = LocalDriver(kart.accessor);
+    if (g_state.seated_driver != driver) {
+        g_state.seated_driver = driver;
+        g_state.seated_eye = {};
+        g_state.cockpit_forward.reset();
+    }
+    if (driver != 0 && g_state.seated_eye.valid) {
+        eye = g_state.seated_eye.value;
+        return true;
+    }
+    uint32_t bones = 0;
+    Mtx34 placement{};
+    if (driver == 0 || !ReadGuestPointer(driver + kDriverBonesOffset, bones) ||
+        !Memory::Contains(bones, kDriverBoneCount * kDriverBoneRecordBytes) ||
+        !ReadGuestMtx34(driver + kDriverPlacementOffset, placement)) {
+        return false;
+    }
+    try {
+        for (uint32_t i = 0; i < kDriverBoneCount; ++i) {
+            uint32_t name = 0, node = 0;
+            const uint32_t record = bones + i * kDriverBoneRecordBytes;
+            if (!ReadGuestPointer(record + kDriverBoneNameOffset, name) ||
+                !ReadGuestPointer(record + kDriverBoneNodeOffset, node)) {
+                continue;
+            }
+            // PAL DriverMgr's name table (0x808A7288) calls the head bone face_1.
+            const std::string text = ReadGuestName(name, 32);
+            if (text != "face_1" && text != "head" && text != "head1" && text != "face") {
+                continue;
+            }
+            Mtx34 bind{};
+            if (!ReadGuestMtx34(node + kResNodeModelMtxOffset, bind)) {
+                continue;
+            }
+            detail::Vec3 minimum{}, maximum{};
+            const bool bounds_found = ReadEyeBounds(driver, minimum, maximum);
+            uint32_t model = 0, ex = 0, scn = 0, palette = 0, mtx_id = 0;
+            Mtx34 face_world{}, body_world{};
+            if (bounds_found && ReadGuestPointer(driver + kDriverModelOffset, model) &&
+                ReadGuestPointer(model + kModelDirectorScnMdlExOffset, ex) && ReadGuestPointer(ex, scn) &&
+                ReadGuestPointer(scn + kScnMdlWorldMtxArrayOffset, palette) &&
+                Memory::TryRead32(node + kResNodeMtxIdOffset, mtx_id) && mtx_id < 128 &&
+                ReadGuestMtx34(palette + mtx_id * 48u, face_world) &&
+                ReadGuestMtx34(kart.body + kKartBodyMtxOffset, body_world)) {
+                const detail::Vec3 local_eye{(minimum.x + maximum.x) * 0.5f, (minimum.y + maximum.y) * 0.5f,
+                                             (minimum.z + maximum.z) * 0.5f};
+                uint32_t damage = 0, damage_type = 0;
+                const DrivingSnapshot driving = OpenXRReadDriving();
+                // Only a neutral pose may define the seat: straight ahead, at
+                // normal size and not being knocked about.
+                const bool safe = NeutralPlayerScale(ReadPlayerScale(kart.accessor)) &&
+                                  ReadGuestPointer(kart.accessor + kKartAccessorDamageOffset, damage) &&
+                                  Memory::TryRead32(damage + kDamageTypeOffset, damage_type) &&
+                                  damage_type == UINT32_MAX && std::abs(driving.steering_input) < 0.15f;
+                std::array<float, 3> measured{};
+                if (ComputeSeatedEye(face_world, body_world, local_eye, measured)) {
+                    const bool had_reference = g_state.seated_eye.valid;
+                    g_state.seated_eye.Observe(measured, safe, true);
+                    if (!had_reference && g_state.seated_eye.valid) {
+                        g_state.cockpit_forward.reset();
+                        RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] cockpit: seated eye calibrated at (" << measured[0]
+                                               << ", " << measured[1] << ", " << measured[2] << ") units"
+                                               << std::endl;
+                    }
+                }
+            }
+            if (g_state.seated_eye.valid) {
+                eye = g_state.seated_eye.value;
+                return true;
+            }
+            if (bounds_found && ComputeDriverEyeFromBounds(bind, placement, minimum, maximum, eye)) {
+                return true;
+            }
+            // No eye geometry: a point just above and ahead of the head bone.
+            const std::array<float, 3> point{bind[3], bind[7] + 8.0f, bind[11] + 8.0f};
+            for (int row = 0; row < 3; ++row) {
+                eye[row] = placement[row * 4 + 3] + placement[row * 4] * point[0] +
+                           placement[row * 4 + 1] * point[1] + placement[row * 4 + 2] * point[2];
+            }
+            if (std::abs(eye[0]) < 300.0f && eye[1] > 10.0f && eye[1] < 500.0f && std::abs(eye[2]) < 400.0f) {
+                return true;
+            }
+        }
+    } catch (const Memory::AccessViolation&) {
+    }
+    return false;
+}
+
+void DropNativeWheelLocked() noexcept {
+    if (g_state.wheel_arrays_posted) {
+        GxNativeWheel::PostClear();
+        g_state.wheel_arrays_posted = false;
+    }
+}
+
+// Decodes a vehicle part's MDL0 position arrays, turns the steering wheel disc
+// (or, with `whole_part`, re-seats the whole part) on a copy, and hands each
+// changed array to Aurora for the draws carrying `model_view`. The guest's own
+// vertices are never written.
+bool PublishNativeWheelMesh(uint32_t part, const Mtx34& model_view, const Mtx34& left, const Mtx34& right,
+                            float angle, bool whole_part, const Mtx34& correction) noexcept {
+    uint32_t model = 0, mdl = 0;
+    if (!ReadGuestPointer(part + kPartModelOffset, model) ||
+        !ReadGuestPointer(model + kModelDirectorResMdlOffset, mdl) || !Memory::Contains(mdl, 0x40)) {
+        return false;
+    }
+    const detail::Vec3 center{(left[3] + right[3]) * 0.5f, (left[7] + right[7]) * 0.5f,
+                              (left[11] + right[11]) * 0.5f};
+    const float radius = std::abs(left[3] - right[3]) * 0.5f;
+    bool published = false;
+    try {
+        if (Memory::Read32(mdl) != kMdl0Magic) {
+            return false;
+        }
+        const uint32_t version = Memory::Read32(mdl + 8);
+        if (version < 8 || version > 11) {
+            return false;
+        }
+        const uint32_t dic_offset = Memory::Read32(mdl + 0x18);
+        if (dic_offset == 0 || dic_offset > 0x100000) {
+            return false;
+        }
+        const uint32_t dic = mdl + dic_offset;
+        if (!Memory::Contains(dic, 8)) {
+            return false;
+        }
+        const uint32_t count = Memory::Read32(dic + 4);
+        if (count > 16 || !Memory::Contains(dic, 8 + (count + 1) * 16)) {
+            return false;
+        }
+        for (uint32_t entry = 1; entry <= count; ++entry) {
+            const uint32_t offset = Memory::Read32(dic + 8 + entry * 16 + 12);
+            if (offset > 0x100000) {
+                continue;
+            }
+            const uint32_t header = dic + offset;
+            if (!Memory::Contains(header, 0x40) || Memory::Read32(header + 0x14) != 1) {
+                continue;
+            }
+            const uint32_t data_offset = Memory::Read32(header + 8), type = Memory::Read32(header + 0x18);
+            const uint32_t stride = Memory::Read8(header + 0x1D), num = Memory::Read16(header + 0x1E);
+            const uint32_t component_size = type == 4 ? 4 : (type == 2 || type == 3 ? 2 : 1);
+            if (type > 4 || stride < 3 * component_size || num > 4096 || data_offset > 0x100000) {
+                continue;
+            }
+            const uint32_t data = header + data_offset, size = num * stride;
+            if (size == 0 || size > 65536 || !Memory::Contains(data, size)) {
+                continue;
+            }
+            const float scale = std::ldexp(1.0f, -int(Memory::Read8(header + 0x1C)));
+            std::vector<detail::Vec3> points(num);
+            bool valid = true;
+            for (uint32_t i = 0; i < num; ++i) {
+                for (uint32_t axis = 0; axis < 3; ++axis) {
+                    const uint32_t at = data + i * stride + axis * component_size;
+                    float value = type == 4   ? Memory::ReadFloat32(at)
+                                  : type == 3 ? float(int16_t(Memory::Read16(at))) * scale
+                                  : type == 2 ? float(Memory::Read16(at)) * scale
+                                  : type == 1 ? float(int8_t(Memory::Read8(at))) * scale
+                                              : float(Memory::Read8(at)) * scale;
+                    if (!detail::IsFiniteFloat(&value)) {
+                        valid = false;
+                    }
+                    (axis == 0 ? points[i].x : axis == 1 ? points[i].y : points[i].z) = value;
+                }
+            }
+            if (!valid) {
+                continue;
+            }
+            if (whole_part) {
+                for (auto& point : points) {
+                    point = detail::TransformPoint(correction, point.x, point.y, point.z);
+                }
+            } else if (RotateNativeWheelVertices(points, center, radius, angle, &correction) < 8) {
+                continue;
+            }
+            const uint8_t* source = Memory::GetPointer(data, size);
+            if (source == nullptr) {
+                continue;
+            }
+            std::vector<uint8_t> bytes(source, source + size);
+            for (uint32_t i = 0; i < num && valid; ++i) {
+                for (uint32_t axis = 0; axis < 3; ++axis) {
+                    const float value = axis == 0 ? points[i].x : axis == 1 ? points[i].y : points[i].z;
+                    uint32_t encoded = 0;
+                    if (type == 4) {
+                        std::memcpy(&encoded, &value, 4);
+                    } else {
+                        const float quantized = std::round(value / scale);
+                        const float low = type == 3 ? -32768.0f : type == 1 ? -128.0f : 0.0f;
+                        const float high = type == 3 ? 32767.0f : type == 2 ? 65535.0f : type == 1 ? 127.0f : 255.0f;
+                        if (!(quantized >= low && quantized <= high)) {
+                            valid = false;
+                            break;
+                        }
+                        encoded = uint32_t(int32_t(quantized));
+                    }
+                    for (uint32_t b = 0; b < component_size; ++b) {
+                        bytes[i * stride + axis * component_size + b] =
+                            uint8_t(encoded >> ((component_size - b - 1) * 8));
+                    }
+                }
+            }
+            if (valid && GxNativeWheel::PostVertices(data, bytes.data(), size, model_view.data())) {
+                published = true;
+                g_state.wheel_arrays_posted = true;
+            }
+        }
+    } catch (const Memory::AccessViolation&) {
+    }
+    return published;
+}
+
+// At the race draw boundary, before any of the frame's draws: the kart state
+// the cockpit seat needs, and the animated copy of the vehicle's own wheel.
+void LatchCockpitLocked(uint64_t guest_frame_index) noexcept {
+    auto& latch = g_state.cockpit;
+    latch = {};
+    DropNativeWheelLocked();
+    Mtx34 pose{};
+    const KartPoseRead kart = ReadPlayerKartPose(g_state.player_kart, pose);
+    if (kart.failed_step != nullptr) {
+        return;
+    }
+    Mtx34 simulation = pose;
+    uint32_t damage_type = UINT32_MAX;
+    try {
+        // The simulation's position and driving direction, never the animated
+        // vehicle matrix: damage and tricks spin the chassis, not the seat.
+        uint32_t dynamics = 0, movement = 0, damage = 0;
+        if (ReadGuestPointer(kart.physics + kKartPhysicsDynamicsOffset, dynamics) &&
+            Memory::Contains(dynamics + kDynamicsPositionOffset, 12)) {
+            for (uint32_t row = 0; row < 3; ++row) {
+                simulation[row * 4 + 3] = Memory::ReadFloat32(dynamics + kDynamicsPositionOffset + row * 4u);
+            }
+        }
+        if (ReadGuestPointer(kart.accessor + kKartAccessorMovementOffset, movement) &&
+            Memory::Contains(movement + kMovementDirOffset, 12)) {
+            const float x = Memory::ReadFloat32(movement + kMovementDirOffset);
+            const float z = Memory::ReadFloat32(movement + kMovementDirOffset + 8u);
+            if (detail::IsFiniteFloat(&x) && detail::IsFiniteFloat(&z) && x * x + z * z > 0.01f) {
+                const float inverse = 1.0f / std::sqrt(x * x + z * z);
+                simulation[2] = x * inverse;
+                simulation[10] = z * inverse;
+            }
+        }
+        if (ReadGuestPointer(kart.accessor + kKartAccessorDamageOffset, damage)) {
+            Memory::TryRead32(damage + kDamageTypeOffset, damage_type);
+        }
+    } catch (const Memory::AccessViolation&) {
+        return;
+    }
+    if (!detail::IsFiniteMtx34(simulation) || !ReadGuestMtx34(kart.body + kKartBodyMtxOffset, latch.body_pose)) {
+        return;
+    }
+    const float dt = g_state.stabilized_frame != 0 && guest_frame_index > g_state.stabilized_frame
+                         ? float(guest_frame_index - g_state.stabilized_frame) / 60.0f
+                         : 1.0f / 60.0f;
+    g_state.stabilized_frame = guest_frame_index;
+    latch.stable_body = g_state.stabilizer.Update(simulation, damage_type != UINT32_MAX, dt);
+    latch.player_scale = ReadPlayerScale(kart.accessor);
+    latch.body = kart.body;
+    latch.grips_valid = ReadGuestMtx34(kart.body + kKartBodyLeftGripOffset, latch.left_grip) &&
+                        ReadGuestMtx34(kart.body + kKartBodyRightGripOffset, latch.right_grip);
+    latch.bike = IsLocalBike(kart.accessor);
+    if (latch.bike) {
+        uint32_t vtable = 0;
+        latch.handle_valid =
+            Memory::TryRead32(kart.body + kBodyBikeHandleOffset + kBikeHandleVtableOffset, vtable) &&
+            vtable == kBikeHandleVtable &&
+            ReadGuestMtx34(kart.body + kBodyBikeHandleOffset + kBikeHandleMtxOffset, latch.handle_pose);
+    }
+    // The G3D scene camera is only set once this frame's draws run, so the
+    // wheel copy is matched against the race camera's own view, asked for with
+    // no dolly offset; LogCockpitLocked reports how far that is from the
+    // scene's at the seal.
+    latch.predicted_view_valid =
+        g_state.camera_address != 0 &&
+        ReadRaceCameraViewMatrix(TryGetCpuContext(), g_state.camera_address, latch.predicted_view, 0.0f);
+    latch.valid = true;
+
+    if (g_state.native_wheel_body != kart.body) {
+        g_state.native_wheel_body = kart.body;
+        g_state.native_wheel_unmatched = 0;
+        g_state.native_wheel_disabled = false;
+    }
+    if (!latch.grips_valid || !latch.predicted_view_valid || !g_state.steering_wheel ||
+        !g_state.native_steering_wheel || g_state.native_wheel_disabled) {
+        return;
+    }
+    const DrivingSnapshot driving = OpenXRReadDriving();
+    if (!driving.cockpit_active) {
+        latch.waiting_for_driving = true;
+        return;
+    }
+    if (latch.bike) {
+        // BodyBike::vf_0x60 poses the grips by the handle. The whole handle
+        // part is re-seated on the level cockpit frame so the bars stay with the
+        // player's hands while the bike banks; the game already turns them.
+        Mtx34 inverse_body{}, inverse_handle{};
+        if (!latch.handle_valid || !InvertMtx(latch.body_pose, inverse_body)) {
+            return;
+        }
+        const auto stable_handle = ScaleModelBasis(
+            ComposeMtx(ComposeMtx(latch.stable_body, inverse_body), latch.handle_pose), latch.player_scale);
+        const auto rendered_handle = ScaleModelBasis(latch.handle_pose, latch.player_scale);
+        if (!InvertMtx(rendered_handle, inverse_handle)) {
+            return;
+        }
+        latch.mesh_published =
+            PublishNativeWheelMesh(kart.body + kBodyBikeHandleOffset, ComposeMtx(latch.predicted_view, rendered_handle),
+                                   latch.left_grip, latch.right_grip, driving.visual_angle, true,
+                                   ComposeMtx(inverse_handle, stable_handle));
+    } else {
+        // Karts bake the wheel into the body: turn just its disc, on the level
+        // cockpit frame so a spinning chassis does not carry it away.
+        const auto rendered_body = ScaleModelBasis(latch.body_pose, latch.player_scale);
+        Mtx34 inverse_rendered{};
+        if (!InvertMtx(rendered_body, inverse_rendered)) {
+            return;
+        }
+        latch.mesh_published = PublishNativeWheelMesh(
+            kart.body, ComposeMtx(latch.predicted_view, rendered_body), latch.left_grip, latch.right_grip,
+            driving.visual_angle, false,
+            ComposeMtx(inverse_rendered, ScaleModelBasis(latch.stable_body, latch.player_scale)));
+    }
+}
+
+// At the seal, from the scene camera the frame was drawn with.
+bool ComputeCockpitAnchorLocked(const Mtx34& view_from_world, const KartPoseRead& kart, const Mtx34& pose,
+                                FirstPersonAnchor& out, const char*& failed_step) noexcept {
+    const auto& latch = g_state.cockpit;
+    if (!latch.valid || latch.body != kart.body) {
+        failed_step = "cockpit seat (the vehicle was not read at the race draw boundary)";
+        return false;
+    }
+    const float base_units = g_state.cockpit_units_per_meter;
+    std::array<float, 3> eye{0.0f, 1.1f * base_units, 0.0f};
+    if (!ReadDriverEye(kart, eye)) {
+        // KartDriverDispParams: the character's seat height and depth here.
+        uint32_t settings = 0, seat = 0;
+        try {
+            if (ReadGuestPointer(kart.accessor, settings) &&
+                ReadGuestPointer(settings + kKartSettingsDriverDispParamsOffset, seat) && Memory::Contains(seat, 8)) {
+                const float y = Memory::ReadFloat32(seat), z = Memory::ReadFloat32(seat + 4);
+                if (detail::IsFiniteFloat(&y) && detail::IsFiniteFloat(&z) && std::abs(y) < 400.0f &&
+                    std::abs(z) < 400.0f) {
+                    eye[1] += y;
+                    eye[2] = z;
+                }
+            }
+        } catch (const Memory::AccessViolation&) {
+        }
+    }
+    float render_units = base_units * CharacterCockpitScale(eye[1]);
+    const auto& scale = latch.player_scale;
+    // Keep the controls ahead of the seated player even when a long face or a
+    // leaned-forward riding animation puts its eye point over them.
+    if (latch.grips_valid && !g_state.cockpit_forward) {
+        const auto& left = latch.left_grip;
+        const auto& right = latch.right_grip;
+        detail::Vec3 center{(left[3] + right[3]) * 0.5f, (left[7] + right[7]) * 0.5f, (left[11] + right[11]) * 0.5f};
+        bool valid = true;
+        if (latch.bike) {
+            Mtx34 inverse_body{};
+            valid = latch.handle_valid && InvertMtx(latch.body_pose, inverse_body);
+            if (valid) {
+                auto local_handle = ComposeMtx(inverse_body, latch.handle_pose);
+                for (int row = 0; row < 3; ++row) {
+                    local_handle[row * 4 + 3] /= scale[row];
+                }
+                center = detail::TransformPoint(local_handle, center.x, center.y, center.z);
+            }
+        }
+        if (valid && detail::IsFiniteFloat(&center.z)) {
+            g_state.cockpit_forward =
+                EyeBehindControls(eye[2], center.z, render_units, std::abs(left[3] - right[3]) * 0.5f);
+        }
+    }
+    if (g_state.cockpit_forward) {
+        eye[2] = *g_state.cockpit_forward;
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+        eye[axis] *= scale[axis];
+    }
+    render_units *= scale[1];
+
+    // "yaw" takes the kart's own driving direction, level, rather than the
+    // chase camera's lagging heading; the other modes keep the kart's
+    // orientation around the same seat.
+    Mtx34 kart_frame = latch.stable_body;
+    FirstPersonRotation rotation = FirstPersonRotation::YawPitch;
+    if (g_state.rotation != FirstPersonRotation::YawOnly) {
+        kart_frame = pose;
+        kart_frame[3] = latch.stable_body[3];
+        kart_frame[7] = latch.stable_body[7];
+        kart_frame[11] = latch.stable_body[11];
+        rotation = g_state.rotation;
+    }
+    Mtx34 anchor{};
+    if (!ComputeFirstPersonAnchor(view_from_world, kart_frame, eye[0], eye[1], eye[2], rotation, anchor)) {
+        failed_step = "cockpit anchor math (degenerate camera or kart frame)";
+        return false;
+    }
+    out = {};
+    out.anchor_from_scene = anchor;
+    out.valid = true;
+    out.cockpit = true;
+    out.units_per_meter = render_units;
+    out.vehicle_identity = kart.body;
+    out.bike = latch.bike;
+    if (latch.grips_valid) {
+        const detail::Vec3 left{latch.left_grip[3], latch.left_grip[7], latch.left_grip[11]};
+        const detail::Vec3 right{latch.right_grip[3], latch.right_grip[7], latch.right_grip[11]};
+        const auto seat_from_world = ComposeMtx(anchor, view_from_world);
+        const auto seat_from_body = ComposeMtx(seat_from_world, ScaleModelBasis(latch.stable_body, scale));
+        if (!latch.bike) {
+            out.native_wheel = ComputeNativeWheelGeometry(seat_from_body, left, right, render_units);
+        } else if (latch.handle_valid) {
+            Mtx34 inverse_body{};
+            if (InvertMtx(latch.body_pose, inverse_body)) {
+                const auto stable_handle = ScaleModelBasis(
+                    ComposeMtx(ComposeMtx(latch.stable_body, inverse_body), latch.handle_pose), scale);
+                out.native_wheel = ComputeNativeHandlebarGeometry(ComposeMtx(seat_from_world, stable_handle),
+                                                                  seat_from_body, left, right, render_units);
+            }
+        }
+    }
+    // Waiting counts as prepared, so the separate VR wheel does not flash up for
+    // the frame or two the XR side takes to engage.
+    out.native_mesh_prepared =
+        (latch.mesh_published || latch.waiting_for_driving) && !g_state.native_wheel_disabled;
+    return true;
+}
+
+// After the frame's draws: drop the wheel copies, and give up on the vehicle's
+// own wheel if no draw has been taking them.
+void FinishNativeWheelFrameLocked() noexcept {
+    if (!g_state.wheel_arrays_posted) {
+        return;
+    }
+    DropNativeWheelLocked();
+    if (!g_state.cockpit.mesh_published || g_state.native_wheel_disabled) {
+        return;
+    }
+    // Lags a frame or two with the GX thread on; the threshold allows for it.
+    if (GxNativeWheel::LastDrawCount() > 0) {
+        g_state.native_wheel_unmatched = 0;
+        return;
+    }
+    if (++g_state.native_wheel_unmatched >= kNativeWheelUnmatchedFrames) {
+        g_state.native_wheel_disabled = true;
+        RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] native steering wheel: no draw took the animated copy of vehicle 0x"
+                               << std::hex << g_state.cockpit.body << std::dec << " in "
+                               << kNativeWheelUnmatchedFrames
+                               << " frames; drawing the VR steering wheel instead" << std::endl;
+    }
+}
+
+void LogCockpitLocked(uint64_t frame, const Mtx34& view_from_world) noexcept {
+    if (g_state.logged_frame != 0 && frame - g_state.logged_frame < 60) {
+        return;
+    }
+    const auto& anchor = g_state.anchor;
+    const auto& wheel = anchor.native_wheel;
+    RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] cockpit: units/m=" << anchor.units_per_meter << ", bike=" << anchor.bike
+                           << ", wheel valid=" << wheel.valid << " centre m=(" << wheel.center[0] << ", "
+                           << wheel.center[1] << ", " << wheel.center[2] << ") radius=" << wheel.radius
+                           << ", native mesh=" << anchor.native_mesh_prepared
+                           << ", draws animated=" << GxNativeWheel::LastDrawCount() << std::endl;
+    const auto& latch = g_state.cockpit;
+    if (latch.predicted_view_valid) {
+        float rotation = 0.0f, translation = 0.0f;
+        for (int i = 0; i < 12; ++i) {
+            const float delta = std::abs(latch.predicted_view[i] - view_from_world[i]);
+            (i % 4 == 3 ? translation : rotation) = std::max(i % 4 == 3 ? translation : rotation, delta);
+        }
+        // The wheel copy only matches draws within 0.002 (rotation) and 0.1
+        // (translation) of the predicted view.
+        RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] cockpit: race camera view vs scene view: rotation "
+                               << rotation << ", translation " << translation << std::endl;
+    }
+}
+
 void LogAnchorLocked(uint64_t frame, const Mtx34& anchor, const Mtx34& view_from_world,
                      const KartPoseRead& kart, const Mtx34& kart_from_local) noexcept {
     // One line per second at 60 Hz: enough to confirm the offsets on-device
@@ -496,11 +1195,30 @@ void MkwVRFirstPersonApplyConfiguredSettings() noexcept {
     MkwVRFirstPersonConfigure(RuntimeConfigFile::VrFirstPerson(false), offsets, units_per_meter,
                               rotation);
     MkwVRPolicySetFirstPersonUnitsPerMeter(units_per_meter);
+    const bool cockpit = RuntimeConfigFile::VrFirstPersonSeat() != "custom";
+    const float cockpit_units = RuntimeConfigFile::VrCockpitUnitsPerMeter();
     {
         // Same lock the guest thread applies these under.
         std::lock_guard lock(g_mutex);
         g_visibility.hide_driver = RuntimeConfigFile::VrFirstPersonHideDriver();
         g_visibility.hidden_model = RuntimeConfigFile::VrFirstPersonHiddenModel();
+        const FirstPersonSeat seat = cockpit ? FirstPersonSeat::Cockpit : FirstPersonSeat::Custom;
+        if (seat != g_state.seat) {
+            // A seat change moves the head: do not hold the other seat's anchor.
+            g_state.anchor = {};
+            g_state.hold_frames = 0;
+        }
+        g_state.seat = seat;
+        g_state.cockpit_units_per_meter = cockpit_units;
+        g_state.steering_wheel = RuntimeConfigFile::VrSteeringWheel();
+        g_state.native_steering_wheel = RuntimeConfigFile::VrNativeSteeringWheel();
+        g_state.native_wheel_disabled = false;
+        g_state.native_wheel_unmatched = 0;
+    }
+    // The cockpit publishes its exact per-frame scale with each anchor; this
+    // is the starting point until the first one.
+    if (cockpit) {
+        MkwVRPolicySetFirstPersonUnitsPerMeter(cockpit_units);
     }
 }
 
@@ -519,6 +1237,16 @@ void MkwVRFirstPersonReset() noexcept {
     g_state.ever_valid_this_race = false;
     g_state.failure_logged = false;
     g_state.logged_frame = 0;
+    DropNativeWheelLocked();
+    g_state.cockpit = {};
+    g_state.stabilizer = {};
+    g_state.stabilized_frame = 0;
+    g_state.seated_eye = {};
+    g_state.seated_driver = 0;
+    g_state.cockpit_forward.reset();
+    g_state.native_wheel_body = 0;
+    g_state.native_wheel_unmatched = 0;
+    g_state.native_wheel_disabled = false;
 }
 
 void MkwVRFirstPersonUpdate(uint64_t guest_frame_index, uint32_t race_camera_address) noexcept {
@@ -528,6 +1256,8 @@ void MkwVRFirstPersonUpdate(uint64_t guest_frame_index, uint32_t race_camera_add
         g_state.anchor = {};
         g_state.hold_frames = 0;
         g_state.armed = false;
+        g_state.cockpit = {};
+        DropNativeWheelLocked();
         RestoreModelVisibilityLocked();
         return;
     }
@@ -543,6 +1273,12 @@ void MkwVRFirstPersonUpdate(uint64_t guest_frame_index, uint32_t race_camera_add
     g_state.armed = true;
     g_state.armed_frame = guest_frame_index;
     g_state.armed_view_valid = ReadSceneViewMatrix(g_state.armed_view);
+    if (g_state.seat == FirstPersonSeat::Cockpit) {
+        LatchCockpitLocked(guest_frame_index);
+    } else {
+        g_state.cockpit = {};
+        DropNativeWheelLocked();
+    }
     // Uses last frame's verdict, since this frame's anchor is not computed
     // until the seal. One frame of lag on hiding a model is not visible, and
     // it keeps the player's kart drawn whenever the anchor is not engaged.
@@ -555,6 +1291,10 @@ void MkwVRFirstPersonUpdate(uint64_t guest_frame_index, uint32_t race_camera_add
 
 void MkwVRFirstPersonCommit() noexcept {
     std::lock_guard lock(g_mutex);
+    // After this frame's draws, whatever the anchor makes of it.
+    struct FinishWheel {
+        ~FinishWheel() { FinishNativeWheelFrameLocked(); }
+    } finish_wheel;
     if (!g_state.armed) {
         return;
     }
@@ -564,6 +1304,7 @@ void MkwVRFirstPersonCommit() noexcept {
     Mtx34 view_from_world{};
     Mtx34 kart_from_local{};
     Mtx34 anchor{};
+    FirstPersonAnchor cockpit_anchor{};
     KartPoseRead kart{};
     const char* failed_step = nullptr;
     // The scene's own matrix first: it is what the recorded draws carry. The
@@ -571,11 +1312,14 @@ void MkwVRFirstPersonCommit() noexcept {
     // camera, so an anchor built from it cannot reach the chase view.
     if (!ReadSceneViewMatrix(view_from_world) &&
         !(g_state.camera_address != 0 &&
-          ReadRaceCameraViewMatrix(TryGetCpuContext(), g_state.camera_address, view_from_world))) {
+          ReadRaceCameraViewMatrix(TryGetCpuContext(), g_state.camera_address, view_from_world,
+                                   ReadRaceCameraBlend()))) {
         failed_step = "scene view matrix";
     } else if (kart = ReadPlayerKartPose(g_state.player_kart, kart_from_local);
                kart.failed_step != nullptr) {
         failed_step = kart.failed_step;
+    } else if (g_state.seat == FirstPersonSeat::Cockpit) {
+        ComputeCockpitAnchorLocked(view_from_world, kart, kart_from_local, cockpit_anchor, failed_step);
     } else if (!ComputeFirstPersonAnchor(view_from_world, kart_from_local,
                                          g_state.offsets.right * g_state.units_per_meter,
                                          g_state.offsets.up * g_state.units_per_meter,
@@ -585,7 +1329,14 @@ void MkwVRFirstPersonCommit() noexcept {
     }
 
     if (failed_step == nullptr) {
-        g_state.anchor = {anchor, true, guest_frame_index};
+        if (g_state.seat == FirstPersonSeat::Cockpit) {
+            g_state.anchor = cockpit_anchor;
+            g_state.anchor.guest_frame_index = guest_frame_index;
+            anchor = cockpit_anchor.anchor_from_scene;
+            LogCockpitLocked(guest_frame_index, view_from_world);
+        } else {
+            g_state.anchor = {anchor, true, guest_frame_index};
+        }
         g_state.hold_frames = kHoldFrames;
         g_state.ever_valid_this_race = true;
         LogAnchorLocked(guest_frame_index, anchor, view_from_world, kart, kart_from_local);
