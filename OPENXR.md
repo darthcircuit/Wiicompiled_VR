@@ -442,8 +442,11 @@ aside while it drives.
 
 **Hands and the separate wheel.** Hands are drawn while hand steering is on: the runtime's own hand
 mesh where it offers one (`XR_EXT_hand_tracking` and `XR_FB_hand_tracking_mesh`, requested only when
-hand steering is on at launch), otherwise procedural gloves that curl with the squeeze. The Quest
-build declares no hand-tracking permission, so it always draws the gloves. They and the
+hand steering is on at launch), otherwise procedural gloves that curl with the squeeze. A Quest 3
+offers that mesh without the app declaring hand tracking, and the log says which is drawn
+(`[mkw-vr] cockpit hands:`). Both close their fingers towards the palm: the mesh's joints point
+-Z towards the fingertip and +Y out of the back of the hand, so flexion is negative about the
+joint's own X, on both hands. They and the
 separate VR wheel or handlebar travel with the stereo packet in metres in the seated frame, and each
 eye draws them inside the scene's pass just before the first 2D-layer draw, depth-tested with the
 world's own depth mapping, so the kart and the track hide them and the HUD cannot

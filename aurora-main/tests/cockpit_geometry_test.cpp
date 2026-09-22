@@ -153,6 +153,73 @@ TEST_F(CockpitGeometry, GloveFingersRunAlongTheHandAndCloseIntoThePalm) {
   }
 }
 
+TEST_F(CockpitGeometry, RuntimeFingersCurlTowardPalmForSqueezeAndWheelGrab) {
+  using namespace aurora::gfx::cockpit;
+  // OpenXR joint space: -Z runs toward the fingertip, +Y out of the back
+  // of the hand, for BOTH hands. Mirror positions, not the curl direction.
+  for (int side = 0; side < 2; ++side) {
+    SCOPED_TRACE(side);
+    HandMesh mesh;
+    mesh.parents.fill(1);
+    mesh.parents[1] = -1;
+    const float rootPose[7]{0, 0, 0.70710678f, 0.70710678f, 0.12f, -0.08f, 0.03f};
+    const M root = from_pose(rootPose);
+    mesh.bind.fill(root);
+    const int bases[]{2, 6, 11, 16, 21};
+    for (int finger = 0; finger < 5; ++finger) {
+      const int base = bases[finger];
+      const int count = finger == 0 ? 4 : 5;
+      for (int bone = 0; bone < count; ++bone) {
+        M bind = identity();
+        bind[3] = (side == 0 ? -1.0f : 1.0f) * (finger - 2) * 0.018f;
+        bind[11] = -0.025f * (bone + 1);
+        mesh.bind[base + bone] = compose(root, bind);
+        mesh.parents[base + bone] = bone == 0 ? 1 : base + bone - 1;
+      }
+    }
+    for (int j = 0; j < 26; ++j) mesh.inverseBind[j] = inverse(mesh.bind[j]);
+    // A tiny triangle rigidly weighted to each joint, including each fingertip.
+    for (int j = 0; j < 26; ++j) {
+      for (V offset : {V{0, 0, 0}, V{0.001f, 0, 0}, V{0, 0, 0.001f}}) {
+        AuroraVRHandVertex vertex{};
+        const V p = point(mesh.bind[j].data(), offset);
+        std::memcpy(vertex.position, p.data(), sizeof(vertex.position));
+        vertex.joints[0] = j;
+        vertex.weights[0] = 1;
+        mesh.indices.push_back(static_cast<uint16_t>(mesh.vertices.size()));
+        mesh.vertices.push_back(vertex);
+      }
+    }
+    AuroraCockpitHand hand{};
+    set_identity(hand.seatFromGrip, {0, 0, 0});
+    const auto build = [&](float squeeze, bool held) {
+      hand.squeeze = squeeze;
+      hand.held = held;
+      std::vector<Vertex> vertices;
+      runtime_hand(vertices, hand, mesh);
+      return vertices;
+    };
+    const auto open = build(0, false);
+    for (int j = 0; j < 26; ++j) {
+      const V bind = point(mesh.inverseBind[1].data(), point(mesh.bind[j].data(), {0, 0, 0}));
+      for (int axis = 0; axis < 3; ++axis)
+        EXPECT_NEAR(open[j * 3].position[axis], bind[axis] + (axis == 2 ? 0.04f : 0), 1e-6f);
+    }
+    for (const auto& closed : {build(0.5f, false), build(1, false), build(0, true)}) {
+      ASSERT_TRUE(all_finite(closed));
+      for (int tip : {5, 10, 15, 20, 25}) {
+        EXPECT_LT(closed[tip * 3].position[1], open[tip * 3].position[1] - 0.005f)
+            << "fingertip must move toward palm (-Y), joint " << tip;
+        EXPECT_GT(closed[tip * 3].position[2], open[tip * 3].position[2])
+            << "curl must shorten finger reach, joint " << tip;
+      }
+      for (int rigid : {0, 1, 6, 11, 16, 21})
+        for (int axis = 0; axis < 3; ++axis)
+          EXPECT_NEAR(closed[rigid * 3].position[axis], open[rigid * 3].position[axis], 1e-6f);
+    }
+  }
+}
+
 TEST_F(CockpitGeometry, RuntimeHandMeshIsSkinnedWithoutNans) {
   using namespace aurora::gfx::cockpit;
   auto mesh = std::make_shared<HandMesh>();

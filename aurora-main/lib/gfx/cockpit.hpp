@@ -137,7 +137,10 @@ inline void runtime_hand(std::vector<Vertex>& out, const AuroraCockpitHand& hand
     M local=parent>=0&&parent<26?compose(mesh.inverseBind[parent],mesh.bind[j]):mesh.bind[j];
     const bool fingerJoint=j>=2 && j!=6 && j!=11 && j!=16 && j!=21;
     if(fingerJoint) {
-      const float a=curl*(j<6?0.3f:0.75f),c=std::cos(a),s=std::sin(a);
+      // OpenXR joints point -Z toward the fingertip and +Y out of the back
+      // of the hand. Flexion is therefore negative about local X, for both
+      // hands; positive angles bend the fingers backward on runtime meshes.
+      const float a=-curl*(j<6?0.3f:0.75f),c=std::cos(a),s=std::sin(a);
       local=compose(local,M{1,0,0,0,0,c,-s,0,0,s,c,0});
     }
     posed[j]=parent>=0&&parent<26?compose(posed[parent],local):local;
