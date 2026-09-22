@@ -386,6 +386,11 @@ holding grip no longer reaches the game (it would press C on the Nunchuk or a sh
 gamepad); the triggers, A and the right stick are unchanged. Releasing both grips gives steering back
 to the stick. The settings panel withholds the wheel like any other input.
 
+**A USB wheel.** With a USB wheel and pedals set up (see the README), the wheel drives the race as
+player 1's GameCube controller. The cockpit's wheel follows its calibrated steering, at the same
+full-lock angle as the stick (`wheel_kart_degrees`, `wheel_bike_degrees`), and hand steering steps
+aside while it drives.
+
 **Hands and the separate wheel.** Hands are drawn while hand steering is on: the runtime's own hand
 mesh where it offers one (`XR_EXT_hand_tracking` and `XR_FB_hand_tracking_mesh`, requested only when
 hand steering is on at launch), otherwise procedural gloves that curl with the squeeze. They and the

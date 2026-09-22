@@ -84,7 +84,9 @@ the runtime hand-mesh loader (`runtime/include/vr/openxr_hand_mesh.h`), the per-
 (`aurora-main/include/aurora/native_wheel_match.hpp`, `aurora-main/lib/gx/native_wheel.hpp`), the
 cockpit overlay renderer (`aurora-main/lib/gfx/cockpit.hpp`), their tests, and the seat, eye and
 wheel geometry and guest reads in `runtime/src/vr/mkw_vr_first_person.cpp` and
-`runtime/include/vr/mkw_vr_first_person.h`. The files carry that attribution in their headers.
+`runtime/include/vr/mkw_vr_first_person.h`. The USB wheel and pedal support is ported from it too
+(`runtime/include/physical_wheel.h`, `runtime/src/physical_wheel.cpp` and their test). The files
+carry that attribution in their headers.
 
 ### pugixml - MIT
 

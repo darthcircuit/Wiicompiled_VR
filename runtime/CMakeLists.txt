@@ -418,6 +418,15 @@ foreach(test_name mkw_steering_wheel_tests mkw_vr_cockpit_tests mkw_vr_hand_stee
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
 
+# The USB wheel's calibration and GameCube pad mapping (physical_wheel.h),
+# ported from heurazy's mario-kart-wii-VR-port. Header-only; needs dolphin/pad.h.
+add_executable(mkw_physical_wheel_tests "${CMAKE_CURRENT_LIST_DIR}/tests/physical_wheel_tests.cpp")
+target_include_directories(mkw_physical_wheel_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include"
+                                                           "${CMAKE_CURRENT_LIST_DIR}/../aurora-main/include")
+target_compile_definitions(mkw_physical_wheel_tests PRIVATE TARGET_PC)
+target_compile_features(mkw_physical_wheel_tests PRIVATE cxx_std_17)
+add_test(NAME mkw_physical_wheel_tests COMMAND mkw_physical_wheel_tests)
+
 # The VR controllers' Wii Remote presentation (accelerometer frame, pointer
 # raycast, debounce, button profile) is header-only for the same reason.
 add_executable(mkw_vr_wii_remote_tests "${CMAKE_CURRENT_LIST_DIR}/tests/vr_wii_remote_tests.cpp")

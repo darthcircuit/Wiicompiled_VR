@@ -7,6 +7,7 @@
 #include "input_bindings.h"
 #include "game_graphics_options.h"
 #include "log_export.h"
+#include "physical_wheel.h"
 #include "music_attenuation.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
@@ -843,6 +844,10 @@ void DrawRumbleSettings() {
 }
 
 void DrawControllerSettings() {
+    if (ImGui::CollapsingHeader("USB wheel and pedals (player 1)")) {
+        physical_wheel::DrawSettings();
+        ImGui::Separator();
+    }
     for (int port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
         const std::string label = "Port " + std::to_string(port + 1);
         ImGui::RadioButton(label.c_str(), &g_controllerPort, port);

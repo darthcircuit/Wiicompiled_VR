@@ -62,6 +62,7 @@
 #include "aurora_events.h"
 #include "wii_remote_input.h"
 #include "discord_presence.h"
+#include "physical_wheel.h"
 #include "fiber_manager.h"
 #include "hle_stubs.h"
 #include "runtime_config.h"
@@ -1574,6 +1575,7 @@ int RuntimeMain(int argc, char** argv) {
         WindowPlacementPersistence::Flush(true);
         GxThread::Stop();
         mkw::vr::OpenXRShutdownBeforeAurora();
+        physical_wheel::Shutdown();
         aurora_shutdown();
         DiscordPresence::Shutdown();
         SetRuntimeExitCodeImpl(0);
@@ -1594,6 +1596,7 @@ int RuntimeMain(int argc, char** argv) {
         WindowPlacementPersistence::Flush(true);
         GxThread::Stop();
         mkw::vr::OpenXRShutdownBeforeAurora();
+        physical_wheel::Shutdown();
         aurora_shutdown();
         DiscordPresence::Shutdown();
         ShutdownProcessTranscript();
@@ -1608,6 +1611,7 @@ int RuntimeMain(int argc, char** argv) {
         WindowPlacementPersistence::Flush(true);
         GxThread::Stop();
         mkw::vr::OpenXRShutdownBeforeAurora();
+        physical_wheel::Shutdown();
         aurora_shutdown();
         DiscordPresence::Shutdown();
         ShutdownProcessTranscript();

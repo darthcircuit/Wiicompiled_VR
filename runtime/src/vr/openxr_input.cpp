@@ -10,6 +10,7 @@
 #endif
 
 #include "vr/openxr_input.h"
+#include "physical_wheel.h"
 #include "runtime_config.h"
 #include "vr/mkw_vr_first_person.h"
 #include "vr/openxr_diagnostics.h"
@@ -864,7 +865,11 @@ void OpenXRInput::UpdateDriving(XrTime display_time, const driving::SeatFrame& s
             wheel_hands[hand] = geometry.ToWheel(wheel_hands[hand]);
         }
     }
-    const bool active = hand_steering && !withheld;
+    // A USB wheel drives the race through the GameCube pad: it steers, the
+    // cockpit's wheel shows its angle, and the hands cannot take hold.
+    float hardware_steering = 0.0f;
+    const bool hardware_wheel = physical_wheel::SteeringSnapshot(hardware_steering);
+    const bool active = hand_steering && !withheld && !hardware_wheel;
     const WheelState wheel = m_wheel.Update(wheel_hands, active, dt,
                                             uses_geometry ? geometry.radius : SteeringWheel::Radius,
                                             anchor.bike, tuning);
@@ -879,10 +884,16 @@ void OpenXRInput::UpdateDriving(XrTime display_time, const driving::SeatFrame& s
     m_wheel_held = wheel.held;
     snapshot.held = wheel.held;
     driving::ApplyHandSteering(hands, wheel);
-    snapshot.steering_input = withheld ? 0.0f : hands[0].stick_x;
-    snapshot.visual_angle =
-        m_wheel_visual.Update(wheel.held[0] || wheel.held[1], wheel.visualAngle, snapshot.steering_input,
-                              driving::MaxWheelAngle(anchor.bike, tuning), dt);
+    const float max_angle = driving::MaxWheelAngle(anchor.bike, tuning);
+    if (hardware_wheel) {
+        snapshot.steering_input = std::clamp(hardware_steering, -1.0f, 1.0f);
+        // The hardware wheel is already smooth; follow it directly.
+        snapshot.visual_angle = m_wheel_visual.Update(true, snapshot.steering_input * max_angle, 0.0f, max_angle, dt);
+    } else {
+        snapshot.steering_input = withheld ? 0.0f : hands[0].stick_x;
+        snapshot.visual_angle = m_wheel_visual.Update(wheel.held[0] || wheel.held[1], wheel.visualAngle,
+                                                      snapshot.steering_input, max_angle, dt);
+    }
     m_driving = snapshot;
     OpenXRPublishDriving(snapshot);
 }
