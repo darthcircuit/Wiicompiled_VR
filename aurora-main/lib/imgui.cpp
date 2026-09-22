@@ -13,6 +13,7 @@
 
 #include "fs_helper.hpp"
 #include "internal.hpp"
+#include "stereo_overlay.hpp"
 #include "webgpu/gpu.hpp"
 #include "window.hpp"
 
@@ -347,6 +348,8 @@ extern "C" {
 ImTextureID aurora_imgui_add_texture(uint32_t width, uint32_t height, const void* rgba8) {
   return aurora::imgui::add_texture(width, height, static_cast<const uint8_t*>(rgba8));
 }
+
+void aurora_set_stereo_panel_layer(bool enabled) { aurora::stereo_overlay::set_layer_mode(enabled); }
 
 void aurora_imgui_set_stereo_overlay(ImDrawData* drawData, float widthFraction) {
   std::lock_guard lock(aurora::imgui::g_stereoOverlayMutex);

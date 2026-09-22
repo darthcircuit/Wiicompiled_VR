@@ -15,6 +15,7 @@
 #define OpenXRD3D12FrameMode OpenXRWindowsVulkanFrameMode
 #define aurora_d3d12_enable_stereo_bridge aurora_vulkan_win32_enable
 #define aurora_d3d12_set_stereo_targets aurora_vulkan_win32_set_targets
+#define aurora_d3d12_set_stereo_targets_with_panel aurora_vulkan_win32_set_targets_with_panel
 #define aurora_d3d12_cancel_stereo_targets aurora_vulkan_win32_cancel
 #define aurora_d3d12_disable_stereo_bridge aurora_vulkan_win32_disable
 #else
@@ -52,6 +53,8 @@ struct Swapchain {
     bool released = false;
 };
 std::vector<AuroraD3D12StereoTarget> targets;
+AuroraD3D12StereoTarget panel_target{};
+bool has_panel_target = false;
 AuroraD3D12StereoSubmittedCallback callback = nullptr;
 void* callback_data = nullptr;
 uint64_t pending_token = 0;
@@ -71,6 +74,9 @@ uint32_t live_swapchains = 0;
 XrTime display_time = 0;
 XrStructureType layer_type = XR_TYPE_UNKNOWN;
 XrPosef quad_pose{};
+uint64_t panel_content = 0; // what the settings panel's layer showed, 0 without one
+XrPosef panel_pose{};
+XrExtent2Df panel_size{};
 
 void Complete(bool success = true) {
     Require(pending_token != 0);
@@ -78,6 +84,8 @@ void Complete(bool success = true) {
     if (success) {
         for (const auto& target : targets)
             reinterpret_cast<Image*>(target.resource)->content = pending_token;
+        if (has_panel_target)
+            reinterpret_cast<Image*>(panel_target.resource)->content = pending_token;
     }
     callback(pending_token, success, callback_data);
     pending_token = 0;
@@ -151,12 +159,18 @@ bool aurora_d3d12_enable_stereo_bridge(AuroraD3D12StereoSubmittedCallback cb, vo
     callback_data = data;
     return true;
 }
-bool aurora_d3d12_set_stereo_targets(uint64_t token, const AuroraD3D12StereoTarget* data,
-                                   uint32_t count) {
+bool aurora_d3d12_set_stereo_targets_with_panel(uint64_t token, const AuroraD3D12StereoTarget* data,
+                                                uint32_t count, const AuroraD3D12StereoTarget* panel) {
     Require(pending_token == 0);
     pending_token = token;
     targets.assign(data, data + count);
+    has_panel_target = panel != nullptr;
+    panel_target = panel ? *panel : AuroraD3D12StereoTarget{};
     return true;
+}
+bool aurora_d3d12_set_stereo_targets(uint64_t token, const AuroraD3D12StereoTarget* data,
+                                   uint32_t count) {
+    return aurora_d3d12_set_stereo_targets_with_panel(token, data, count, nullptr);
 }
 bool aurora_d3d12_cancel_stereo_targets(uint64_t token) {
     if (encoded || token != pending_token) return false;
@@ -301,8 +315,9 @@ bool OpenXRRuntime::EndFrame(const OpenXRFrame& frame,
     Require(frame.predicted_display_time > display_time);
     display_time = frame.predicted_display_time;
     layer_count = count;
+    panel_content = 0;
     if (count) {
-        Require(frame.should_render && count == 1);
+        Require(frame.should_render && count <= 2);
         layer_type = layers[0]->type;
         const auto check_image = [](const XrSwapchainSubImage& subimage) {
             const auto& chain = *reinterpret_cast<Swapchain*>(subimage.swapchain);
@@ -324,6 +339,17 @@ bool OpenXRRuntime::EndFrame(const OpenXRFrame& frame,
             const auto& quad = *reinterpret_cast<const XrCompositionLayerQuad*>(layers[0]);
             displayed_content = check_image(quad.subImage);
             quad_pose = quad.pose;
+        }
+        if (count == 2) {
+            // The settings panel, over the scene.
+            Require(layers[1]->type == XR_TYPE_COMPOSITION_LAYER_QUAD);
+            const auto& panel = *reinterpret_cast<const XrCompositionLayerQuad*>(layers[1]);
+            Require(panel.layerFlags == XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT);
+            Require(panel.subImage.imageRect.extent.width == static_cast<int32_t>(kOpenXRPanelLayerWidth));
+            Require(panel.subImage.imageRect.extent.height == static_cast<int32_t>(kOpenXRPanelLayerHeight));
+            panel_content = check_image(panel.subImage);
+            panel_pose = panel.pose;
+            panel_size = panel.size;
         }
     }
     m_frame_phase = FramePhase::Idle;
@@ -473,8 +499,91 @@ void TestRenderFirst() {
     display_time = 0;
 }
 
+// The settings panel's quad layer: made when it first opens, rendered with the
+// eyes, and shown from the image the last submitted frame wrote, never from one
+// a cancelled frame released unwritten.
+void TestPanelLayer() {
+    display_time = 0;
+    OpenXRRuntime runtime;
+    OpenXRD3D12Backend backend;
+    Require(backend.QueryGraphicsRequirements(runtime) && backend.BindAurora(runtime));
+    Require(live_swapchains == 4 && backend.PanelLayerAvailable()); // Nothing is made while it is closed.
+    OpenXRPresentation presentation;
+    OpenXRBackendFrame frame;
+    const auto begin = [&] {
+        Require(backend.BeginFrame(presentation, frame) == OpenXRBeginStatus::Ready);
+    };
+    const auto finish = [&] {
+        Complete();
+        Require(backend.WaitForSubmission(frame, 0) == OpenXRSubmissionStatus::Success);
+        Require(backend.FinishFrame(frame, true));
+    };
+    begin();
+    Require(!has_panel_target);
+    finish();
+    Require(layer_count == 1);
+
+    presentation.panel.requested = true;
+    presentation.panel.placed = true;
+    presentation.panel.pose.position.z = -2;
+    presentation.panel.width_meters = 1.0f;
+    presentation.panel.height_meters = 0.75f;
+    begin();
+    Require(has_panel_target && live_swapchains == 6);
+    Require(panel_target.width == kOpenXRPanelLayerWidth && panel_target.height == kOpenXRPanelLayerHeight);
+    finish();
+    const auto shown = frame.xr_frame.serial;
+    Require(layer_count == 2 && displayed_content == shown && panel_content == shown);
+    Require(panel_pose.position.z == -2 && panel_size.width == 1.0f && panel_size.height == 0.75f);
+
+    begin(); // Canceled: its panel image is released unwritten.
+    Require(has_panel_target);
+    Require(backend.RepeatFrame(frame) && layer_count == 2 && panel_content == shown);
+    Require(backend.TryCancelPendingFrame(frame) && backend.FinishFrame(frame, false));
+    Require(layer_count == 2 && panel_content == shown);
+
+    presentation.panel.placed = false; // No head pose to hang it from: rendered, not shown.
+    begin();
+    finish();
+    Require(layer_count == 1 && displayed_content == frame.xr_frame.serial);
+    presentation.panel.placed = true;
+    begin();
+    finish();
+    Require(layer_count == 2 && panel_content == frame.xr_frame.serial);
+
+    presentation.panel.requested = false; // Closed: neither rendered nor shown, even when repeated.
+    begin();
+    Require(!has_panel_target);
+    finish();
+    Require(layer_count == 1);
+    begin();
+    Require(backend.RepeatFrame(frame) && layer_count == 1);
+    Require(backend.TryCancelPendingFrame(frame) && backend.FinishFrame(frame, false));
+    Require(layer_count == 1);
+
+    presentation.panel.requested = true; // Reopened on the same swapchains.
+    begin();
+    finish();
+    Require(layer_count == 2 && live_swapchains == 6 && panel_content == frame.xr_frame.serial);
+
+    expect_render_first = true;
+    OpenXRBackendFrame packet;
+    Require(backend.PreparePacket(presentation, packet) == OpenXRBeginStatus::Ready);
+    Require(has_panel_target && packet.presentation.panel.requested);
+    Complete();
+    Require(backend.WaitForSubmission(packet, 0) == OpenXRSubmissionStatus::Success);
+    Require(backend.BeginFrameForPacket(packet, frame) == OpenXRBeginStatus::Ready);
+    Require(backend.CopyRenderedEyes(frame) == OpenXRSubmissionStatus::Success);
+    Require(backend.FinishFrame(frame, true));
+    Require(layer_count == 2 && panel_content == packet.xr_frame.serial);
+    expect_render_first = false;
+    Require(backend.Shutdown() && live_swapchains == 0);
+    display_time = 0;
+}
+
 int main() {
     TestRenderFirst();
+    TestPanelLayer();
     OpenXRRuntime runtime;
     OpenXRD3D12Backend backend;
     Require(backend.QueryGraphicsRequirements(runtime) && backend.BindAurora(runtime));

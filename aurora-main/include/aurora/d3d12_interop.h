@@ -65,6 +65,17 @@ bool aurora_d3d12_set_stereo_targets(uint64_t frameToken,
                                      uint32_t targetCount);
 
 /**
+ * The same, plus the headset settings panel's quad-layer image when `panel` is
+ * not null (aurora_set_stereo_panel_layer): Aurora copies the panel into it, or
+ * a transparent image while the panel is not showing, with the eyes and under
+ * the same completion callback.
+ */
+bool aurora_d3d12_set_stereo_targets_with_panel(uint64_t frameToken,
+                                                const AuroraD3D12StereoTarget* targets,
+                                                uint32_t targetCount,
+                                                const AuroraD3D12StereoTarget* panel);
+
+/**
  * Withdraws frameToken only while its target has not been encoded. This is
  * safe to race with Aurora's frame worker: false means the worker already owns
  * encoded work (or the token is no longer pending), so the submitted callback

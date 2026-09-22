@@ -258,16 +258,42 @@ of you.
 How it is drawn: `settings_overlay.cpp` builds the panel with a second Dear ImGui context of its own,
 a 1440 × 1080 canvas at twice the desktop menu's scale with its own font atlas, fed by the pointer
 that `openxr_input.cpp` publishes through `vr/openxr_settings_panel.h`. Aurora renders that draw data
-into a panel texture once per sealed frame and lays it over each eye after the eye is finished
-(`aurora-main/lib/stereo_overlay.cpp`): through the eye's frustum and `viewFromCenter` onto the
-screen rectangle for an immersive eye (including headset-rate interpolated eyes, which reuse the
-texture), and as a centred rectangle on a virtual-screen eye image. The eye images the OpenXR
-backends already submit carry it, so no extra swapchain or composition layer is involved. The
-ImGui backend keeps a single projection uniform, so the panel's pass is submitted on its own command
-buffer before the desktop's ImGui pass of the same frame is recorded.
+into a panel texture once per sealed frame (`aurora-main/lib/stereo_overlay.cpp`). The ImGui backend
+keeps a single projection uniform, so the panel's pass is submitted on its own command buffer before
+the desktop's ImGui pass of the same frame is recorded.
+
+The panel is shown as a compositor quad layer of its own, submitted over the scene's projection or
+menu quad layer. The compositor samples the 1440 × 1080 canvas directly, so its text stays sharp
+whatever `render_scale` gives the eyes. Every backend (D3D12, Windows Vulkan, Quest) makes the
+panel's swapchain pair the first time the panel opens (two 1440 × 1080 swapchains, plus two shared
+buffers on the Quest) and keeps it for the session. Until then nothing is allocated, and while the
+panel is closed nothing is copied or submitted. While it is open, each frame hands Aurora one more
+target after the eyes: the stereo bridge copies the panel texture into it with the eyes (or a
+transparent image on a frame where the panel is not drawn). The layer follows the eyes' swapchain
+pairing: the image a frame wrote is shown only once that frame is submitted, so a cancelled frame
+never shows an unwritten panel. The quad hangs exactly where the pointer's hits are tested
+(`SettingsPanelScreen` in `openxr_integration.cpp`). ImGui's premultiplied output is blended with
+`XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT`, and Aurora leaves the panel out of the eyes
+(`aurora_set_stereo_panel_layer`).
+
+If a backend cannot make the panel's swapchains, it logs that once and the panel is drawn into the
+eye images instead: through the eye's frustum and `viewFromCenter` onto the screen rectangle for an
+immersive eye (including headset-rate interpolated eyes, which reuse the texture), and as a centred
+rectangle on a virtual-screen eye image. On the Quest, `adb shell setprop
+debug.wiicompiled.panel_layer 0` switches to that path at run time, to compare the two.
+
+Measured on a Quest 3 (base game, a Grand Prix start with the player idle, `render_scale = 0.8`,
+60 FPS, eight interleaved rounds per state), the layer costs nothing while the panel is closed. While
+it is open, the app's GPU time is 10.5 ms per frame with the layer, against 9.7 ms drawn into the eyes
+(9.4 ms closed). GPU load is 74% against 67%, and the compositor's time 1.05 ms against 0.75 ms. Game
+and headset frame rates did not change. The compositor redraws the layer at display rate, so the
+panel stays steady even when the game drops frames.
 
 `mkw_vr_settings_panel_tests` covers the panel button in both controller modes, the release latch,
-selection, scrolling and the canvas mapping; `gx_fifo_tests` covers where the panel lands in each eye.
+selection, scrolling and the canvas mapping; `gx_fifo_tests` covers where the panel lands in each eye
+on the fallback path. `mkw_openxr_replay_tests` and `mkw_openxr_vulkan_replay_tests` cover the layer:
+nothing made before the panel opens, the panel image of a cancelled frame never shown, no layer while
+the panel is closed or has no place yet, and render-first pacing.
 
 ## The first-person camera
 
@@ -731,9 +757,8 @@ ends, including mid-frame flushes, so live setting changes cannot invalidate pen
 - The cockpit seat, the turning wheel and hand steering have not yet been validated in a headset on
   this build: the native wheel's match against the race camera's view, bikes and Quacker, and the
   Quest. Hand steering needs analog grips (Touch); the simple controller profile cannot grab.
-- The headset settings panel is drawn into the eye images rather than submitted as its own quad
-  layer, so its text is resampled once more than a compositor layer's would be. It has no laser
-  beam, only the cursor on the panel itself, and text fields cannot be typed into without a keyboard.
+- The headset settings panel has no laser beam, only the cursor on the panel itself, and text fields
+  cannot be typed into without a keyboard.
 - The desktop window remains available as a mirror/fallback.
 
 OpenXR diagnostics are written to the normal run log under

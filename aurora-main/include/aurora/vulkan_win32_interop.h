@@ -11,6 +11,10 @@ bool aurora_vulkan_win32_configure(const AuroraDawnVulkanHooks* hooks);
 bool aurora_vulkan_win32_get_handles(AuroraDawnVulkanHandles* handles, int64_t* colorFormat);
 bool aurora_vulkan_win32_enable(AuroraD3D12StereoSubmittedCallback submitted, void* userdata);
 bool aurora_vulkan_win32_set_targets(uint64_t token, const AuroraD3D12StereoTarget* targets, uint32_t count);
+// Plus the headset settings panel's quad-layer image when panel is not null, as
+// aurora_d3d12_set_stereo_targets_with_panel.
+bool aurora_vulkan_win32_set_targets_with_panel(uint64_t token, const AuroraD3D12StereoTarget* targets, uint32_t count,
+                                                const AuroraD3D12StereoTarget* panel);
 bool aurora_vulkan_win32_cancel(uint64_t token);
 bool aurora_vulkan_win32_disable();
 void* aurora_vulkan_win32_lock_queue();

@@ -27,6 +27,8 @@ extern "C" {
  */
 
 enum { AURORA_VULKAN_STEREO_MAX_TARGETS = 2 };
+// The eyes, then the settings panel's quad-layer image when one was given.
+enum { AURORA_VULKAN_STEREO_MAX_RELEASES = AURORA_VULKAN_STEREO_MAX_TARGETS + 1 };
 
 /**
  * Borrowed facts about Aurora's Dawn Vulkan device. colorVkFormat is the
@@ -108,6 +110,18 @@ bool aurora_vulkan_enable_stereo_bridge(AuroraVulkanStereoSubmittedCallback subm
 bool aurora_vulkan_set_stereo_targets(uint64_t frameToken,
                                       const AuroraVulkanStereoTarget* targets,
                                       uint32_t targetCount);
+
+/**
+ * The same, plus the headset settings panel's quad-layer buffer when `panel` is
+ * not null (aurora_set_stereo_panel_layer): Aurora copies the panel into it, or
+ * a transparent image while the panel is not showing, with the eyes. Its
+ * release entry follows the eyes' in the submitted callback, whose
+ * releaseCount then counts it too.
+ */
+bool aurora_vulkan_set_stereo_targets_with_panel(uint64_t frameToken,
+                                                 const AuroraVulkanStereoTarget* targets,
+                                                 uint32_t targetCount,
+                                                 const AuroraVulkanStereoTarget* panel);
 
 /**
  * Withdraws frameToken only while its targets have not been encoded. Semantics

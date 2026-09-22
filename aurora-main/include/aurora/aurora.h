@@ -150,6 +150,14 @@ typedef struct {
   float weights[4];
 } AuroraVRHandVertex;
 
+/**
+ * Shows the headset settings panel (aurora_imgui_set_stereo_overlay) as the
+ * OpenXR backend's own compositor quad layer instead of drawing it into the
+ * eyes, so the eye resolution no longer limits its text. The backend then asks
+ * for the panel image as an extra stereo target. Any thread.
+ */
+void aurora_set_stereo_panel_layer(bool enabled);
+
 // Copies optional runtime-provided hand meshes (XR_FB_hand_tracking_mesh, 26
 // joints). Null clears to the procedural glove. Bind poses: x,y,z,w,px,py,pz.
 void aurora_set_vr_hand_mesh(uint32_t hand, const AuroraVRHandVertex* vertices, uint32_t vertexCount,

@@ -334,6 +334,23 @@ public:
                 static_cast<int64_t>(swapchain_format_),
             };
         }
+        // The settings panel's layer image, rendered with the eyes while it is open.
+        AuroraD3D12StereoTarget panel_target{};
+        const bool panel = frame.presentation.panel.requested && EnsurePanelSwapchains();
+        frame.presentation.panel.requested = panel;
+        if (panel) {
+            if (!AcquireSwapchain(panel_swapchain_)) {
+                ReleaseAcquiredSwapchains();
+                EndActiveFrameWithoutLayers(frame.xr_frame);
+                return OpenXRWindowsVulkanBeginStatus::Error;
+            }
+            panel_target = {
+                reinterpret_cast<void*>(panel_swapchain_.images[panel_swapchain_.acquired_index].image),
+                panel_swapchain_.width,
+                panel_swapchain_.height,
+                static_cast<int64_t>(swapchain_format_),
+            };
+        }
         diagnostics::OnSwapchainAcquire(acquire_timer);
 
         {
@@ -345,7 +362,8 @@ public:
             submission_unsafe_ = false;
         }
         if (!diagnostics::Measure(diagnostics::Stage::SetTargets, [&] {
-            return aurora_vulkan_win32_set_targets(frame.xr_frame.serial, targets.data(), target_count);
+            return aurora_vulkan_win32_set_targets_with_panel(frame.xr_frame.serial, targets.data(), target_count,
+                                                              panel ? &panel_target : nullptr);
         })) {
             {
                 std::lock_guard lock(submission_mutex_);
@@ -586,6 +604,10 @@ public:
             // swapchain, not an explicit image index. Keep the displayed pair
             // separate from the pair Aurora can write or cancel next.
             std::swap(eye_swapchains_, retained_swapchains_);
+            if (frame.presentation.panel.requested) {
+                std::swap(panel_swapchain_, retained_panel_swapchain_);
+            }
+            retained_panel_valid_ = frame.presentation.panel.requested;
             retained_frame_ = frame;
             retained_session_serial_ = render_session_serial_;
             retained_space_serial_ = render_space_serial_;
@@ -685,9 +707,7 @@ public:
             quad.size.width = std::max(0.25f, frame.presentation.quad_width_meters);
             quad.size.height = quad.size.width * static_cast<float>(retained_swapchains_[0].height) /
                                static_cast<float>(retained_swapchains_[0].width);
-            const XrCompositionLayerBaseHeader* layers[] = {
-                reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
-            return runtime_->EndFrame(active_frame_, layers, 1);
+            return EndFrameWithPanel(frame, reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad));
         } else {
             std::array<XrCompositionLayerProjectionView, kOpenXREyeCount> views{};
             for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
@@ -707,10 +727,22 @@ public:
             projection.space = runtime_->AppSpace();
             projection.viewCount = kOpenXREyeCount;
             projection.views = views.data();
-            const XrCompositionLayerBaseHeader* layers[] = {
-                reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
-            return runtime_->EndFrame(active_frame_, layers, 1);
+            return EndFrameWithPanel(frame, reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection));
         }
+    }
+
+    // Ends the compositor frame with the scene's layer and, while the retained
+    // frame rendered it, the settings panel's layer over it.
+    bool EndFrameWithPanel(const OpenXRBackendFrame& frame, const XrCompositionLayerBaseHeader* scene) {
+        const auto& panel = frame.presentation.panel;
+        XrCompositionLayerQuad panel_quad{};
+        const XrCompositionLayerBaseHeader* layers[2] = {scene, nullptr};
+        uint32_t count = 1;
+        if (retained_panel_valid_ && panel.requested && panel.placed) {
+            panel_quad = OpenXRPanelQuadLayer(panel, runtime_->AppSpace(), retained_panel_swapchain_.handle);
+            layers[count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&panel_quad);
+        }
+        return runtime_->EndFrame(active_frame_, layers, count);
     }
 
     bool Shutdown() {
@@ -769,6 +801,7 @@ public:
     }
 
     bool IsBound() const { return bound_; }
+    bool PanelLayerAvailable() const { return !panel_layer_failed_; }
     const OpenXRWindowsVulkanGraphicsRequirements& GraphicsRequirements() const { return requirements_; }
     int64_t SwapchainFormat() const { return static_cast<int64_t>(swapchain_format_); }
     const std::string& LastError() const { return last_error_; }
@@ -809,49 +842,56 @@ private:
     bool CreateSwapchainPair(std::array<EyeSwapchain, kOpenXREyeCount>& pair) {
         for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
             const auto& view = runtime_->ViewConfiguration()[eye];
-            auto& swapchain = pair[eye];
-            swapchain.width = view.render_width;
-            swapchain.height = view.render_height;
+            if (!CreateSwapchain(pair[eye], view.render_width, view.render_height,
+                                 eye == 0 ? "left eye" : "right eye")) {
+                return false;
+            }
+        }
+        return true;
+    }
 
-            XrSwapchainCreateInfo create{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-            create.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
-                                XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-            if (IsWindowsVkSrgbFormat(swapchain_format_)) {
-                // Permit a UNORM view for raw copies into the sRGB XR image.
-                create.usageFlags |= XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
-            }
-            create.format = static_cast<int64_t>(swapchain_format_);
-            create.sampleCount = 1;
-            create.width = swapchain.width;
-            create.height = swapchain.height;
-            create.faceCount = 1;
-            create.arraySize = 1;
-            create.mipCount = 1;
-            XrResult result = xrCreateSwapchain(runtime_->Session(), &create, &swapchain.handle);
-            ObserveResult(result);
-            if (XR_FAILED(result)) {
-                std::ostringstream message;
-                message << "xrCreateSwapchain failed for Vulkan eye " << eye << " (" << result << ')';
-                return Fail(message.str());
-            }
+    bool CreateSwapchain(EyeSwapchain& swapchain, uint32_t width, uint32_t height, const char* what) {
+        swapchain.width = width;
+        swapchain.height = height;
 
-            uint32_t count = 0;
-            result = xrEnumerateSwapchainImages(swapchain.handle, 0, &count, nullptr);
-            ObserveResult(result);
-            if (XR_FAILED(result) || count == 0) {
-                return Fail("OpenXR returned no Vulkan swapchain images");
-            }
-            swapchain.images.resize(count);
-            for (auto& image : swapchain.images) {
-                image = {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR};
-            }
-            result = xrEnumerateSwapchainImages(
-                swapchain.handle, count, &count,
-                reinterpret_cast<XrSwapchainImageBaseHeader*>(swapchain.images.data()));
-            ObserveResult(result);
-            if (XR_FAILED(result)) {
-                return Fail("xrEnumerateSwapchainImages failed for a Vulkan eye swapchain");
-            }
+        XrSwapchainCreateInfo create{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+        create.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+                            XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        if (IsWindowsVkSrgbFormat(swapchain_format_)) {
+            // Permit a UNORM view for raw copies into the sRGB XR image.
+            create.usageFlags |= XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
+        }
+        create.format = static_cast<int64_t>(swapchain_format_);
+        create.sampleCount = 1;
+        create.width = swapchain.width;
+        create.height = swapchain.height;
+        create.faceCount = 1;
+        create.arraySize = 1;
+        create.mipCount = 1;
+        XrResult result = xrCreateSwapchain(runtime_->Session(), &create, &swapchain.handle);
+        ObserveResult(result);
+        if (XR_FAILED(result)) {
+            std::ostringstream message;
+            message << "xrCreateSwapchain failed for the Vulkan " << what << " swapchain (" << result << ')';
+            return Fail(message.str());
+        }
+
+        uint32_t count = 0;
+        result = xrEnumerateSwapchainImages(swapchain.handle, 0, &count, nullptr);
+        ObserveResult(result);
+        if (XR_FAILED(result) || count == 0) {
+            return Fail("OpenXR returned no Vulkan swapchain images");
+        }
+        swapchain.images.resize(count);
+        for (auto& image : swapchain.images) {
+            image = {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR};
+        }
+        result = xrEnumerateSwapchainImages(
+            swapchain.handle, count, &count,
+            reinterpret_cast<XrSwapchainImageBaseHeader*>(swapchain.images.data()));
+        ObserveResult(result);
+        if (XR_FAILED(result)) {
+            return Fail("xrEnumerateSwapchainImages failed for a Vulkan eye swapchain");
         }
         return true;
     }
@@ -893,58 +933,93 @@ private:
         const auto queue_guard = runtime_ ? runtime_->LockGraphicsQueue() : OpenXRRuntime::GraphicsQueueGuard{nullptr, nullptr};
         bool success = true;
         for (auto& swapchain : eye_swapchains_) {
-            if (!swapchain.acquired || swapchain.handle == XR_NULL_HANDLE) {
-                continue;
-            }
-            if (!swapchain.waited) {
-                // OpenXR only permits release after a successful wait. Keep the
-                // image acquired and let session teardown destroy the child.
-                success = false;
-                Log(OpenXRLogLevel::Warning,
-                    "cannot release an OpenXR Vulkan image whose wait did not complete");
-                continue;
-            }
-            if (swapchain.release_forbidden) {
-                // Aurora reported a failed submission after it may already
-                // have queued native Vulkan work. Without a trustworthy fence,
-                // xrReleaseSwapchainImage could race that work. Leave the image
-                // acquired and let xrDestroySession reclaim the child instead.
-                success = false;
-                Log(OpenXRLogLevel::Warning,
-                    "deferring an OpenXR Vulkan image after an unsafe GPU submission");
-                continue;
-            }
-            XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-            const XrResult result = xrReleaseSwapchainImage(swapchain.handle, &release);
-            ObserveResult(result);
-            if (XR_FAILED(result)) {
-                success = false;
-                Fail("xrReleaseSwapchainImage failed for a Vulkan eye swapchain");
-                continue;
-            }
-            swapchain.acquired = false;
-            swapchain.waited = false;
+            success = ReleaseSwapchain(swapchain) && success;
         }
-        return success;
+        return ReleaseSwapchain(panel_swapchain_) && success;
+    }
+
+    bool ReleaseSwapchain(EyeSwapchain& swapchain) {
+        if (!swapchain.acquired || swapchain.handle == XR_NULL_HANDLE) {
+            return true;
+        }
+        if (!swapchain.waited) {
+            // OpenXR only permits release after a successful wait. Keep the
+            // image acquired and let session teardown destroy the child.
+            Log(OpenXRLogLevel::Warning, "cannot release an OpenXR Vulkan image whose wait did not complete");
+            return false;
+        }
+        if (swapchain.release_forbidden) {
+            // Aurora reported a failed submission after it may already have
+            // queued GPU work. Without a trustworthy fence the release could race
+            // that work, so leave the image acquired for xrDestroySession.
+            Log(OpenXRLogLevel::Warning, "deferring an OpenXR Vulkan image after an unsafe GPU submission");
+            return false;
+        }
+        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        const XrResult result = xrReleaseSwapchainImage(swapchain.handle, &release);
+        ObserveResult(result);
+        if (XR_FAILED(result)) {
+            return Fail("xrReleaseSwapchainImage failed for an Vulkan swapchain");
+        }
+        swapchain.acquired = false;
+        swapchain.waited = false;
+        return true;
     }
 
     void AbandonAcquiredSwapchains() noexcept {
-        for (auto& swapchain : eye_swapchains_) {
-            if (swapchain.acquired) {
-                swapchain.release_forbidden = true;
+        for (auto* swapchain : {&eye_swapchains_[0], &eye_swapchains_[1], &panel_swapchain_}) {
+            if (swapchain->acquired) {
+                swapchain->release_forbidden = true;
             }
         }
     }
 
     void AllowAcquiredSwapchainsAfterGpuDrain() noexcept {
-        for (auto& swapchain : eye_swapchains_) {
-            if (swapchain.acquired) {
-                swapchain.release_forbidden = false;
+        for (auto* swapchain : {&eye_swapchains_[0], &eye_swapchains_[1], &panel_swapchain_}) {
+            if (swapchain->acquired) {
+                swapchain->release_forbidden = false;
             }
         }
     }
 
+    // The settings panel's swapchain pair, made the first time the panel opens.
+    // A failure is logged once and the panel is drawn into the eyes again.
+    bool EnsurePanelSwapchains() {
+        if (panel_swapchains_ready_) {
+            return true;
+        }
+        if (panel_layer_failed_) {
+            return false;
+        }
+        if (CreateSwapchain(panel_swapchain_, kOpenXRPanelLayerWidth, kOpenXRPanelLayerHeight, "settings panel") &&
+            CreateSwapchain(retained_panel_swapchain_, kOpenXRPanelLayerWidth, kOpenXRPanelLayerHeight,
+                            "settings panel")) {
+            panel_swapchains_ready_ = true;
+            Log(OpenXRLogLevel::Info, "OpenXR settings panel layer ready");
+            return true;
+        }
+        DestroyPanelSwapchains();
+        panel_layer_failed_ = true;
+        Log(OpenXRLogLevel::Warning, "the settings panel could not get its own OpenXR layer; drawing it into the eyes");
+        return false;
+    }
+
+    void DestroyPanelSwapchains() {
+        for (auto* swapchain : {&panel_swapchain_, &retained_panel_swapchain_}) {
+            if (swapchain->handle != XR_NULL_HANDLE && !swapchain->acquired) {
+                xrDestroySwapchain(swapchain->handle);
+            } else if (swapchain->acquired) {
+                Log(OpenXRLogLevel::Warning,
+                    "Vulkan panel swapchain still owns an acquired image; deferring its destruction to xrDestroySession");
+            }
+            *swapchain = {};
+        }
+        panel_swapchains_ready_ = false;
+        retained_panel_valid_ = false;
+    }
+
     void DestroySwapchains() {
+        DestroyPanelSwapchains();
         DestroySwapchainPair(eye_swapchains_);
         DestroySwapchainPair(retained_swapchains_);
         have_retained_frame_ = false;
@@ -1027,6 +1102,14 @@ private:
     OpenXRWindowsVulkanGraphicsRequirements requirements_{};
     std::array<EyeSwapchain, kOpenXREyeCount> eye_swapchains_{};
     std::array<EyeSwapchain, kOpenXREyeCount> retained_swapchains_{};
+    // The settings panel's layer: written like the eyes into panel_swapchain_,
+    // shown from retained_panel_swapchain_ (see FinishFrame).
+    EyeSwapchain panel_swapchain_{};
+    EyeSwapchain retained_panel_swapchain_{};
+    bool panel_swapchains_ready_ = false;
+    bool panel_layer_failed_ = false;
+    // The retained frame rendered the panel's image into retained_panel_swapchain_.
+    bool retained_panel_valid_ = false;
     OpenXRWindowsVulkanFrame retained_frame_{};
     uint64_t retained_session_serial_ = 0;
     uint64_t retained_space_serial_ = 0;
@@ -1114,6 +1197,8 @@ OpenXRBeginStatus OpenXRWindowsVulkanBackend::KeepAliveCycle() { return m_impl->
 bool OpenXRWindowsVulkanBackend::Shutdown() { return m_impl->Shutdown(); }
 
 bool OpenXRWindowsVulkanBackend::IsBound() const { return m_impl->IsBound(); }
+
+bool OpenXRWindowsVulkanBackend::PanelLayerAvailable() const { return m_impl->PanelLayerAvailable(); }
 
 const OpenXRWindowsVulkanGraphicsRequirements& OpenXRWindowsVulkanBackend::GraphicsRequirements() const {
     return m_impl->GraphicsRequirements();

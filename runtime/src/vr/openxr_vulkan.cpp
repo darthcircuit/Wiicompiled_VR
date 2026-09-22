@@ -37,6 +37,10 @@ namespace {
 // other into the compositor image. The sync-fd handshake orders the two
 // devices on each buffer, so a deeper ring only adds latency.
 constexpr uint32_t kSlotCount = 2;
+// Images one frame copies into the compositor: the eyes, then the settings
+// panel's layer image, in the order of Aurora's release entries.
+constexpr uint32_t kMaxCopies = AURORA_VULKAN_STEREO_MAX_RELEASES;
+static_assert(kMaxCopies == kOpenXREyeCount + 1);
 // Copy command buffers in flight before the oldest fence is waited on.
 constexpr uint32_t kSubmissionRingSize = 3;
 constexpr uint64_t kFenceTimeoutNanos = 2'000'000'000ull;
@@ -154,10 +158,10 @@ public:
     struct Submission {
         VkFence fence = VK_NULL_HANDLE;
         VkCommandBuffer command_buffer = VK_NULL_HANDLE;
-        // Dawn's release fences are imported here, one semaphore per eye. They belong to the
+        // Dawn's release fences are imported here, one semaphore per image. They belong to the
         // submission rather than the slot: importing into a semaphore whose previous wait is
         // still pending is invalid, and only the submission's fence proves that wait completed.
-        std::array<VkSemaphore, kOpenXREyeCount> wait_semaphores{};
+        std::array<VkSemaphore, kMaxCopies> wait_semaphores{};
         bool busy = false;
     };
 
@@ -173,7 +177,11 @@ public:
         uint64_t token = 0;
         uint32_t slot = 0;
         uint32_t target_count = 0;
-        std::array<VkImage, kOpenXREyeCount> swapchain_images{};
+        // The settings panel's layer image follows the eyes.
+        bool panel = false;
+        std::array<VkImage, kMaxCopies> swapchain_images{};
+
+        uint32_t Count() const noexcept { return target_count + (panel ? 1u : 0u); }
     };
 
     bool QueryGraphicsRequirements(OpenXRRuntime& runtime) {
@@ -383,6 +391,9 @@ public:
             frame.render_height[1] = frame.render_height[0];
         }
 
+        // The settings panel's layer image, rendered with the eyes while it is open.
+        const bool panel = frame.presentation.panel.requested && EnsurePanelResources();
+        frame.presentation.panel.requested = panel;
         const diagnostics::Stopwatch acquire_timer;
         for (uint32_t eye = 0; eye < target_count; ++eye) {
             if (!AcquireSwapchain(eye_swapchains_[eye])) {
@@ -391,27 +402,32 @@ public:
                 return OpenXRBeginStatus::Error;
             }
         }
+        if (panel && !AcquireSwapchain(panel_swapchain_)) {
+            ReleaseAcquiredSwapchains();
+            EndActiveFrameWithoutLayers(frame.xr_frame);
+            return OpenXRBeginStatus::Error;
+        }
         diagnostics::OnSwapchainAcquire(acquire_timer);
 
         std::array<AuroraVulkanStereoTarget, kOpenXREyeCount> targets{};
+        AuroraVulkanStereoTarget panel_target{};
         const uint32_t slot = next_slot_;
         {
             std::lock_guard lock(vk_mutex_);
             for (uint32_t eye = 0; eye < target_count; ++eye) {
-                EyeSlot& eye_slot = slots_[eye][slot];
-                targets[eye] = {
-                    eye_slot.buffer,
-                    eye_slot.width,
-                    eye_slot.height,
-                    static_cast<int64_t>(aurora_format_),
-                    DupFd(eye_slot.pending_acquire_fd),
-                    static_cast<int32_t>(eye_slot.layout),
-                };
+                targets[eye] = SlotTargetLocked(slots_[eye][slot]);
             }
-            pending_copy_ = {frame.xr_frame.serial, slot, target_count, {}};
+            if (panel) {
+                panel_target = SlotTargetLocked(panel_slots_[slot]);
+            }
+            pending_copy_ = {frame.xr_frame.serial, slot, target_count, panel, {}};
             for (uint32_t eye = 0; eye < target_count; ++eye) {
                 pending_copy_.swapchain_images[eye] =
                     eye_swapchains_[eye].images[eye_swapchains_[eye].acquired_index].image;
+            }
+            if (panel) {
+                pending_copy_.swapchain_images[target_count] =
+                    panel_swapchain_.images[panel_swapchain_.acquired_index].image;
             }
         }
         {
@@ -422,10 +438,14 @@ public:
             submission_success_ = false;
             submission_unsafe_ = false;
         }
-        if (!aurora_vulkan_set_stereo_targets(frame.xr_frame.serial, targets.data(), target_count)) {
+        if (!aurora_vulkan_set_stereo_targets_with_panel(frame.xr_frame.serial, targets.data(), target_count,
+                                                         panel ? &panel_target : nullptr)) {
             // The duplicates were not taken; the slots keep their own descriptors.
             for (uint32_t eye = 0; eye < target_count; ++eye) {
                 CloseFd(targets[eye].acquireFenceFd);
+            }
+            if (panel) {
+                CloseFd(panel_target.acquireFenceFd);
             }
             {
                 std::lock_guard lock(submission_mutex_);
@@ -546,24 +566,23 @@ public:
             packet.render_width[1] = packet.render_width[0];
             packet.render_height[1] = packet.render_height[0];
         }
+        // The settings panel's layer image, rendered with the eyes while it is open.
+        const bool panel = packet.presentation.panel.requested && EnsurePanelResources();
+        packet.presentation.panel.requested = panel;
         std::array<AuroraVulkanStereoTarget, kOpenXREyeCount> targets{};
+        AuroraVulkanStereoTarget panel_target{};
         const uint32_t slot = next_slot_;
         {
             std::lock_guard lock(vk_mutex_);
             DiscardPendingReleasesLocked();
             for (uint32_t eye = 0; eye < target_count; ++eye) {
-                EyeSlot& eye_slot = slots_[eye][slot];
-                targets[eye] = {
-                    eye_slot.buffer,
-                    eye_slot.width,
-                    eye_slot.height,
-                    static_cast<int64_t>(aurora_format_),
-                    DupFd(eye_slot.pending_acquire_fd),
-                    static_cast<int32_t>(eye_slot.layout),
-                };
+                targets[eye] = SlotTargetLocked(slots_[eye][slot]);
+            }
+            if (panel) {
+                panel_target = SlotTargetLocked(panel_slots_[slot]);
             }
             // The compositor images are acquired by BeginFrameForPacket, once the eyes exist.
-            pending_copy_ = {packet.xr_frame.serial, slot, target_count, {}};
+            pending_copy_ = {packet.xr_frame.serial, slot, target_count, panel, {}};
             deferred_copy_ = true;
         }
         {
@@ -574,9 +593,13 @@ public:
             submission_success_ = false;
             submission_unsafe_ = false;
         }
-        if (!aurora_vulkan_set_stereo_targets(packet.xr_frame.serial, targets.data(), target_count)) {
+        if (!aurora_vulkan_set_stereo_targets_with_panel(packet.xr_frame.serial, targets.data(), target_count,
+                                                         panel ? &panel_target : nullptr)) {
             for (uint32_t eye = 0; eye < target_count; ++eye) {
                 CloseFd(targets[eye].acquireFenceFd);
+            }
+            if (panel) {
+                CloseFd(panel_target.acquireFenceFd);
             }
             {
                 std::lock_guard lock(submission_mutex_);
@@ -653,6 +676,10 @@ public:
             // swapchain, so keep the displayed pair separate from the pair
             // Aurora may write next.
             std::swap(eye_swapchains_, retained_swapchains_);
+            if (frame.presentation.panel.requested) {
+                std::swap(panel_swapchain_, retained_panel_swapchain_);
+            }
+            retained_panel_valid_ = frame.presentation.panel.requested;
             retained_frame_ = frame;
             retained_session_serial_ = render_session_serial_;
             retained_space_serial_ = render_space_serial_;
@@ -726,6 +753,7 @@ public:
 
         const uint32_t target_count =
             presentation_target_count(frame.presentation);
+        const bool panel = frame.presentation.panel.requested;
         const diagnostics::Stopwatch acquire_timer;
         for (uint32_t eye = 0; eye < target_count; ++eye) {
             if (!AcquireSwapchain(eye_swapchains_[eye])) {
@@ -734,12 +762,21 @@ public:
                 return OpenXRBeginStatus::Error;
             }
         }
+        if (panel && !AcquireSwapchain(panel_swapchain_)) {
+            ReleaseAcquiredSwapchains();
+            EndActiveFrameWithoutLayers(frame.xr_frame);
+            return OpenXRBeginStatus::Error;
+        }
         diagnostics::OnSwapchainAcquire(acquire_timer);
         {
             std::lock_guard lock(vk_mutex_);
             for (uint32_t eye = 0; eye < target_count; ++eye) {
                 pending_copy_.swapchain_images[eye] =
                     eye_swapchains_[eye].images[eye_swapchains_[eye].acquired_index].image;
+            }
+            if (panel) {
+                pending_copy_.swapchain_images[target_count] =
+                    panel_swapchain_.images[panel_swapchain_.acquired_index].image;
             }
         }
         return OpenXRBeginStatus::Ready;
@@ -875,9 +912,7 @@ public:
             quad.size.width = std::max(0.25f, frame.presentation.quad_width_meters);
             quad.size.height = quad.size.width * static_cast<float>(retained_swapchains_[0].height) /
                                static_cast<float>(retained_swapchains_[0].width);
-            const XrCompositionLayerBaseHeader* layers[] = {
-                reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
-            return runtime_->EndFrame(active_frame_, layers, 1);
+            return EndFrameWithPanel(frame, reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad));
         }
         std::array<XrCompositionLayerProjectionView, kOpenXREyeCount> views{};
         for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
@@ -897,9 +932,21 @@ public:
         projection.space = runtime_->AppSpace();
         projection.viewCount = kOpenXREyeCount;
         projection.views = views.data();
-        const XrCompositionLayerBaseHeader* layers[] = {
-            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection)};
-        return runtime_->EndFrame(active_frame_, layers, 1);
+        return EndFrameWithPanel(frame, reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection));
+    }
+
+    // Ends the compositor frame with the scene's layer and, while the retained
+    // frame rendered it, the settings panel's layer over it.
+    bool EndFrameWithPanel(const OpenXRBackendFrame& frame, const XrCompositionLayerBaseHeader* scene) {
+        const auto& panel = frame.presentation.panel;
+        XrCompositionLayerQuad panel_quad{};
+        const XrCompositionLayerBaseHeader* layers[2] = {scene, nullptr};
+        uint32_t count = 1;
+        if (retained_panel_valid_ && panel.requested && panel.placed) {
+            panel_quad = OpenXRPanelQuadLayer(panel, runtime_->AppSpace(), retained_panel_swapchain_.handle);
+            layers[count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&panel_quad);
+        }
+        return runtime_->EndFrame(active_frame_, layers, count);
     }
 
     bool Shutdown() {
@@ -953,6 +1000,7 @@ public:
     }
 
     bool IsBound() const { return bound_; }
+    bool PanelLayerAvailable() const { return !panel_layer_failed_; }
     const OpenXRVulkanGraphicsRequirements& GraphicsRequirements() const { return requirements_; }
     int64_t SwapchainFormat() const { return static_cast<int64_t>(swapchain_format_); }
     const std::string& LastError() const { return last_error_; }
@@ -1208,7 +1256,7 @@ private:
             VkSemaphoreCreateInfo semaphore_info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
             for (VkSemaphore& semaphore : submission.wait_semaphores) {
                 if (vkCreateSemaphore(vk_device_, &semaphore_info, nullptr, &semaphore) != VK_SUCCESS) {
-                    return Fail("vkCreateSemaphore failed for an eye copy wait semaphore");
+                    return Fail("vkCreateSemaphore failed for a copy wait semaphore");
                 }
             }
         }
@@ -1260,6 +1308,44 @@ private:
                 }
             }
         }
+        return true;
+    }
+
+    // Aurora's view of a shared buffer: it waits on the slot's last copy-out.
+    AuroraVulkanStereoTarget SlotTargetLocked(const EyeSlot& slot) const noexcept {
+        return {
+            slot.buffer,
+            slot.width,
+            slot.height,
+            static_cast<int64_t>(aurora_format_),
+            DupFd(slot.pending_acquire_fd),
+            static_cast<int32_t>(slot.layout),
+        };
+    }
+
+    // The settings panel's swapchain pair and shared buffers, made the first
+    // time it opens and kept for the session.
+    bool EnsurePanelResources() {
+        if (!EnsurePanelSwapchains()) {
+            return false;
+        }
+        std::lock_guard lock(vk_mutex_);
+        if (panel_slots_ready_) {
+            return true;
+        }
+        for (EyeSlot& slot : panel_slots_) {
+            if (!AllocateSlot(slot, kOpenXRPanelLayerWidth, kOpenXRPanelLayerHeight)) {
+                for (EyeSlot& allocated : panel_slots_) {
+                    DestroySlotLocked(allocated);
+                }
+                DestroyPanelSwapchains();
+                panel_layer_failed_ = true;
+                Log(OpenXRLogLevel::Warning,
+                    "the settings panel's shared buffers could not be allocated; drawing it into the eyes");
+                return false;
+            }
+        }
+        panel_slots_ready_ = true;
         return true;
     }
 
@@ -1358,24 +1444,32 @@ private:
         }
         for (auto& eye : slots_) {
             for (EyeSlot& slot : eye) {
-                CloseFd(slot.pending_acquire_fd);
-                if (vk_device_ != VK_NULL_HANDLE) {
-                    if (slot.signal_semaphore != VK_NULL_HANDLE) {
-                        vkDestroySemaphore(vk_device_, slot.signal_semaphore, nullptr);
-                    }
-                    if (slot.image != VK_NULL_HANDLE) {
-                        vkDestroyImage(vk_device_, slot.image, nullptr);
-                    }
-                    if (slot.memory != VK_NULL_HANDLE) {
-                        vkFreeMemory(vk_device_, slot.memory, nullptr);
-                    }
-                }
-                if (slot.buffer != nullptr) {
-                    AHardwareBuffer_release(slot.buffer);
-                }
-                slot = {};
+                DestroySlotLocked(slot);
             }
         }
+        for (EyeSlot& slot : panel_slots_) {
+            DestroySlotLocked(slot);
+        }
+        panel_slots_ready_ = false;
+    }
+
+    void DestroySlotLocked(EyeSlot& slot) noexcept {
+        CloseFd(slot.pending_acquire_fd);
+        if (vk_device_ != VK_NULL_HANDLE) {
+            if (slot.signal_semaphore != VK_NULL_HANDLE) {
+                vkDestroySemaphore(vk_device_, slot.signal_semaphore, nullptr);
+            }
+            if (slot.image != VK_NULL_HANDLE) {
+                vkDestroyImage(vk_device_, slot.image, nullptr);
+            }
+            if (slot.memory != VK_NULL_HANDLE) {
+                vkFreeMemory(vk_device_, slot.memory, nullptr);
+            }
+        }
+        if (slot.buffer != nullptr) {
+            AHardwareBuffer_release(slot.buffer);
+        }
+        slot = {};
     }
 
     // ---- The copy into the compositor image -----------------------------------
@@ -1384,7 +1478,7 @@ private:
                                   const AuroraVulkanStereoRelease* releases, uint32_t release_count,
                                   void* userdata) {
         auto* self = static_cast<Impl*>(userdata);
-        std::array<AuroraVulkanStereoRelease, kOpenXREyeCount> owned{};
+        std::array<AuroraVulkanStereoRelease, kMaxCopies> owned{};
         for (auto& release : owned) {
             release = {-1, VK_IMAGE_LAYOUT_UNDEFINED};
         }
@@ -1406,7 +1500,7 @@ private:
                 std::lock_guard submission_lock(self->submission_mutex_);
                 expected = token == self->awaiting_token_ && token == self->pending_copy_.token;
             }
-            if (expected && success && release_count >= self->pending_copy_.target_count) {
+            if (expected && success && release_count >= self->pending_copy_.Count()) {
                 if (self->deferred_copy_) {
                     // No compositor frame is open yet: keep Dawn's release fences for
                     // CopyRenderedEyes, which records the copy once the frame is begun.
@@ -1444,7 +1538,12 @@ private:
         self->submission_cv_.notify_all();
     }
 
-    CopyOutcome RecordAndSubmitCopyLocked(std::array<AuroraVulkanStereoRelease, kOpenXREyeCount>& releases) {
+    // The slot image `n` of a copy reads: an eye's, or after the eyes the panel's.
+    EyeSlot& CopySlotLocked(const PendingCopy& copy, uint32_t n) noexcept {
+        return n < copy.target_count ? slots_[n][copy.slot] : panel_slots_[copy.slot];
+    }
+
+    CopyOutcome RecordAndSubmitCopyLocked(std::array<AuroraVulkanStereoRelease, kMaxCopies>& releases) {
         const auto close_releases = [&releases] {
             for (auto& release : releases) {
                 CloseFd(release.releaseFenceFd);
@@ -1467,19 +1566,19 @@ private:
             return CopyOutcome::Skipped;
         }
 
-        std::array<VkSemaphore, kOpenXREyeCount> waits{};
-        std::array<VkPipelineStageFlags, kOpenXREyeCount> wait_stages{};
-        std::array<VkSemaphore, kOpenXREyeCount> signals{};
+        std::array<VkSemaphore, kMaxCopies> waits{};
+        std::array<VkPipelineStageFlags, kMaxCopies> wait_stages{};
+        std::array<VkSemaphore, kMaxCopies> signals{};
         uint32_t wait_count = 0;
         uint32_t signal_count = 0;
         constexpr VkImageSubresourceRange kColorRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 
-        for (uint32_t eye = 0; eye < copy.target_count; ++eye) {
-            EyeSlot& slot = slots_[eye][copy.slot];
-            AuroraVulkanStereoRelease& release = releases[eye];
+        for (uint32_t n = 0; n < copy.Count(); ++n) {
+            EyeSlot& slot = CopySlotLocked(copy, n);
+            AuroraVulkanStereoRelease& release = releases[n];
 
             if (release.releaseFenceFd >= 0) {
-                const VkSemaphore wait_semaphore = submission->wait_semaphores[eye];
+                const VkSemaphore wait_semaphore = submission->wait_semaphores[n];
                 VkImportSemaphoreFdInfoKHR import{VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR};
                 import.semaphore = wait_semaphore;
                 import.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT;
@@ -1529,7 +1628,7 @@ private:
             to_destination.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             to_destination.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             to_destination.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            to_destination.image = copy.swapchain_images[eye];
+            to_destination.image = copy.swapchain_images[n];
             to_destination.subresourceRange = kColorRange;
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
                                  nullptr, 0, nullptr, 1, &acquire);
@@ -1542,7 +1641,7 @@ private:
             region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             region.extent = {slot.width, slot.height, 1};
-            vkCmdCopyImage(cmd, slot.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, copy.swapchain_images[eye],
+            vkCmdCopyImage(cmd, slot.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, copy.swapchain_images[n],
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
             // Back to the layout the compositor expects, and hand the shared
@@ -1600,8 +1699,8 @@ private:
         // Exporting a sync fd from a binary semaphore resets it, so the same
         // semaphore serves the next copy. Dawn waits on this before it writes
         // the buffer again.
-        for (uint32_t eye = 0; eye < copy.target_count; ++eye) {
-            EyeSlot& slot = slots_[eye][copy.slot];
+        for (uint32_t n = 0; n < copy.Count(); ++n) {
+            EyeSlot& slot = CopySlotLocked(copy, n);
             VkSemaphoreGetFdInfoKHR get_fd{VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR};
             get_fd.semaphore = slot.signal_semaphore;
             get_fd.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
@@ -1676,44 +1775,51 @@ private:
     bool CreateSwapchainPair(std::array<EyeSwapchain, kOpenXREyeCount>& pair) {
         for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
             const auto& view = runtime_->ViewConfiguration()[eye];
-            auto& swapchain = pair[eye];
-            swapchain.width = view.render_width;
-            swapchain.height = view.render_height;
+            if (!CreateSwapchain(pair[eye], view.render_width, view.render_height,
+                                 eye == 0 ? "left eye" : "right eye")) {
+                return false;
+            }
+        }
+        return true;
+    }
 
-            XrSwapchainCreateInfo create{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-            create.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-            create.format = static_cast<int64_t>(swapchain_format_);
-            create.sampleCount = 1;
-            create.width = swapchain.width;
-            create.height = swapchain.height;
-            create.faceCount = 1;
-            create.arraySize = 1;
-            create.mipCount = 1;
-            XrResult result = xrCreateSwapchain(runtime_->Session(), &create, &swapchain.handle);
-            ObserveResult(result);
-            if (XR_FAILED(result)) {
-                std::ostringstream message;
-                message << "xrCreateSwapchain failed for Vulkan eye " << eye << " (" << result << ')';
-                return Fail(message.str());
-            }
+    bool CreateSwapchain(EyeSwapchain& swapchain, uint32_t width, uint32_t height, const char* what) {
+        swapchain.width = width;
+        swapchain.height = height;
 
-            uint32_t count = 0;
-            result = xrEnumerateSwapchainImages(swapchain.handle, 0, &count, nullptr);
-            ObserveResult(result);
-            if (XR_FAILED(result) || count == 0) {
-                return Fail("OpenXR returned no Vulkan swapchain images");
-            }
-            swapchain.images.resize(count);
-            for (auto& image : swapchain.images) {
-                image = {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR};
-            }
-            result = xrEnumerateSwapchainImages(
-                swapchain.handle, count, &count,
-                reinterpret_cast<XrSwapchainImageBaseHeader*>(swapchain.images.data()));
-            ObserveResult(result);
-            if (XR_FAILED(result)) {
-                return Fail("xrEnumerateSwapchainImages failed for a Vulkan eye swapchain");
-            }
+        XrSwapchainCreateInfo create{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+        create.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        create.format = static_cast<int64_t>(swapchain_format_);
+        create.sampleCount = 1;
+        create.width = swapchain.width;
+        create.height = swapchain.height;
+        create.faceCount = 1;
+        create.arraySize = 1;
+        create.mipCount = 1;
+        XrResult result = xrCreateSwapchain(runtime_->Session(), &create, &swapchain.handle);
+        ObserveResult(result);
+        if (XR_FAILED(result)) {
+            std::ostringstream message;
+            message << "xrCreateSwapchain failed for the Vulkan " << what << " swapchain (" << result << ')';
+            return Fail(message.str());
+        }
+
+        uint32_t count = 0;
+        result = xrEnumerateSwapchainImages(swapchain.handle, 0, &count, nullptr);
+        ObserveResult(result);
+        if (XR_FAILED(result) || count == 0) {
+            return Fail("OpenXR returned no Vulkan swapchain images");
+        }
+        swapchain.images.resize(count);
+        for (auto& image : swapchain.images) {
+            image = {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR};
+        }
+        result = xrEnumerateSwapchainImages(
+            swapchain.handle, count, &count,
+            reinterpret_cast<XrSwapchainImageBaseHeader*>(swapchain.images.data()));
+        ObserveResult(result);
+        if (XR_FAILED(result)) {
+            return Fail("xrEnumerateSwapchainImages failed for a Vulkan eye swapchain");
         }
         return true;
     }
@@ -1748,50 +1854,93 @@ private:
     bool ReleaseAcquiredSwapchains() {
         bool success = true;
         for (auto& swapchain : eye_swapchains_) {
-            if (!swapchain.acquired || swapchain.handle == XR_NULL_HANDLE) {
-                continue;
-            }
-            if (!swapchain.waited) {
-                success = false;
-                Log(OpenXRLogLevel::Warning, "cannot release an OpenXR Vulkan image whose wait did not complete");
-                continue;
-            }
-            if (swapchain.release_forbidden) {
-                success = false;
-                Log(OpenXRLogLevel::Warning, "deferring an OpenXR Vulkan image after an unsafe GPU submission");
-                continue;
-            }
-            XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-            const XrResult result = xrReleaseSwapchainImage(swapchain.handle, &release);
-            ObserveResult(result);
-            if (XR_FAILED(result)) {
-                success = false;
-                Fail("xrReleaseSwapchainImage failed for a Vulkan eye swapchain");
-                continue;
-            }
-            swapchain.acquired = false;
-            swapchain.waited = false;
+            success = ReleaseSwapchain(swapchain) && success;
         }
-        return success;
+        return ReleaseSwapchain(panel_swapchain_) && success;
+    }
+
+    bool ReleaseSwapchain(EyeSwapchain& swapchain) {
+        if (!swapchain.acquired || swapchain.handle == XR_NULL_HANDLE) {
+            return true;
+        }
+        if (!swapchain.waited) {
+            // OpenXR only permits release after a successful wait. Keep the
+            // image acquired and let session teardown destroy the child.
+            Log(OpenXRLogLevel::Warning, "cannot release an OpenXR Vulkan image whose wait did not complete");
+            return false;
+        }
+        if (swapchain.release_forbidden) {
+            // Aurora reported a failed submission after it may already have
+            // queued GPU work. Without a trustworthy fence the release could race
+            // that work, so leave the image acquired for xrDestroySession.
+            Log(OpenXRLogLevel::Warning, "deferring an OpenXR Vulkan image after an unsafe GPU submission");
+            return false;
+        }
+        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        const XrResult result = xrReleaseSwapchainImage(swapchain.handle, &release);
+        ObserveResult(result);
+        if (XR_FAILED(result)) {
+            return Fail("xrReleaseSwapchainImage failed for an Vulkan swapchain");
+        }
+        swapchain.acquired = false;
+        swapchain.waited = false;
+        return true;
     }
 
     void AbandonAcquiredSwapchains() noexcept {
-        for (auto& swapchain : eye_swapchains_) {
-            if (swapchain.acquired) {
-                swapchain.release_forbidden = true;
+        for (auto* swapchain : {&eye_swapchains_[0], &eye_swapchains_[1], &panel_swapchain_}) {
+            if (swapchain->acquired) {
+                swapchain->release_forbidden = true;
             }
         }
     }
 
     void AllowAcquiredSwapchainsAfterGpuDrain() noexcept {
-        for (auto& swapchain : eye_swapchains_) {
-            if (swapchain.acquired) {
-                swapchain.release_forbidden = false;
+        for (auto* swapchain : {&eye_swapchains_[0], &eye_swapchains_[1], &panel_swapchain_}) {
+            if (swapchain->acquired) {
+                swapchain->release_forbidden = false;
             }
         }
     }
 
+    // The settings panel's swapchain pair, made the first time the panel opens.
+    // A failure is logged once and the panel is drawn into the eyes again.
+    bool EnsurePanelSwapchains() {
+        if (panel_swapchains_ready_) {
+            return true;
+        }
+        if (panel_layer_failed_) {
+            return false;
+        }
+        if (CreateSwapchain(panel_swapchain_, kOpenXRPanelLayerWidth, kOpenXRPanelLayerHeight, "settings panel") &&
+            CreateSwapchain(retained_panel_swapchain_, kOpenXRPanelLayerWidth, kOpenXRPanelLayerHeight,
+                            "settings panel")) {
+            panel_swapchains_ready_ = true;
+            Log(OpenXRLogLevel::Info, "OpenXR settings panel layer ready");
+            return true;
+        }
+        DestroyPanelSwapchains();
+        panel_layer_failed_ = true;
+        Log(OpenXRLogLevel::Warning, "the settings panel could not get its own OpenXR layer; drawing it into the eyes");
+        return false;
+    }
+
+    void DestroyPanelSwapchains() {
+        for (auto* swapchain : {&panel_swapchain_, &retained_panel_swapchain_}) {
+            if (swapchain->handle != XR_NULL_HANDLE && !swapchain->acquired) {
+                xrDestroySwapchain(swapchain->handle);
+            } else if (swapchain->acquired) {
+                Log(OpenXRLogLevel::Warning,
+                    "Vulkan panel swapchain still owns an acquired image; deferring its destruction to xrDestroySession");
+            }
+            *swapchain = {};
+        }
+        panel_swapchains_ready_ = false;
+        retained_panel_valid_ = false;
+    }
+
     void DestroySwapchains() {
+        DestroyPanelSwapchains();
         DestroySwapchainPair(eye_swapchains_);
         DestroySwapchainPair(retained_swapchains_);
         have_retained_frame_ = false;
@@ -1849,6 +1998,14 @@ private:
     OpenXRVulkanGraphicsRequirements requirements_{};
     std::array<EyeSwapchain, kOpenXREyeCount> eye_swapchains_{};
     std::array<EyeSwapchain, kOpenXREyeCount> retained_swapchains_{};
+    // The settings panel's layer: written like the eyes into panel_swapchain_,
+    // shown from retained_panel_swapchain_ (see FinishFrame).
+    EyeSwapchain panel_swapchain_{};
+    EyeSwapchain retained_panel_swapchain_{};
+    bool panel_swapchains_ready_ = false;
+    bool panel_layer_failed_ = false;
+    // The retained frame rendered the panel's image into retained_panel_swapchain_.
+    bool retained_panel_valid_ = false;
     OpenXRBackendFrame retained_frame_{};
     uint64_t retained_session_serial_ = 0;
     uint64_t retained_space_serial_ = 0;
@@ -1870,6 +2027,9 @@ private:
     PFN_vkGetSemaphoreFdKHR pfn_get_semaphore_fd_ = nullptr;
     PFN_vkGetAndroidHardwareBufferPropertiesANDROID pfn_get_ahb_properties_ = nullptr;
     std::array<std::array<EyeSlot, kSlotCount>, kOpenXREyeCount> slots_{};
+    // The settings panel's shared buffers, allocated when it first opens.
+    std::array<EyeSlot, kSlotCount> panel_slots_{};
+    bool panel_slots_ready_ = false;
     std::array<Submission, kSubmissionRingSize> submissions_{};
     uint32_t next_submission_ = 0;
     uint32_t next_slot_ = 0;
@@ -1877,7 +2037,7 @@ private:
     // Render-first pacing (PreparePacket): Aurora's release fences arrive while no compositor
     // frame is active, so the copy is recorded later by CopyRenderedEyes.
     bool deferred_copy_ = false;
-    std::array<AuroraVulkanStereoRelease, kOpenXREyeCount> pending_releases_{};
+    std::array<AuroraVulkanStereoRelease, kMaxCopies> pending_releases_{};
     bool have_pending_releases_ = false;
     uint64_t next_packet_serial_ = 1ull << 40; // never collides with the runtime's frame serials
     XrTime last_display_time_ = 0;
@@ -1958,6 +2118,8 @@ bool OpenXRVulkanBackend::RepeatFrame(const OpenXRBackendFrame& frame) {
 bool OpenXRVulkanBackend::Shutdown() { return m_impl->Shutdown(); }
 
 bool OpenXRVulkanBackend::IsBound() const { return m_impl->IsBound(); }
+
+bool OpenXRVulkanBackend::PanelLayerAvailable() const { return m_impl->PanelLayerAvailable(); }
 
 const OpenXRVulkanGraphicsRequirements& OpenXRVulkanBackend::GraphicsRequirements() const {
     return m_impl->GraphicsRequirements();

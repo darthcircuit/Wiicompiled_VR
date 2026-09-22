@@ -40,6 +40,7 @@
 #elif defined(__ANDROID__)
 #include "vr/openxr_android.h"
 #include "vr/openxr_vulkan.h"
+#include <sys/system_properties.h>
 #include <time.h>
 #include <unistd.h>
 #define XR_USE_TIMESPEC
@@ -828,6 +829,12 @@ private:
                                            : OpenXRFrameMode::VirtualScreen;
             presentation.quad_distance_meters = policy.config.hud_distance_meters;
             presentation.quad_width_meters = policy.config.hud_width_meters;
+            // The settings panel gets a compositor layer of its own while it is
+            // open, and Aurora leaves it out of the eyes. A backend that could
+            // not make that layer has the panel drawn into the eyes instead.
+            const bool panel_layer = backend_->PanelLayerAvailable() && !PanelLayerForcedOff();
+            aurora_set_stereo_panel_layer(panel_layer);
+            presentation.panel.requested = panel_layer && OpenXRSettingsPanelOpen();
 
             // Pipeline caches are stored where their stall is invisible: once when a race ends,
             // and by the compiler itself while the headset shows the virtual screen. Never
@@ -888,12 +895,14 @@ private:
             // before FinishFrame submits a layer built from it.
             ServiceRecenterRequest();
             UpdateVirtualScreenPose(frame);
+            const OpenXRPointerScreen panel_screen = SettingsPanelScreen(frame, policy, immersive);
+            PlacePanelLayer(frame, panel_screen);
             if (input_ != nullptr) {
                 const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
                 // After the screen is placed, so the pointer aims at this
                 // frame's screen rather than the previous one's.
                 input_->Sync(frame.xr_frame.predicted_display_time, PointerScreen(frame, policy, immersive),
-                             SettingsPanelScreen(frame, policy, immersive), InputSeatFrame(immersive));
+                             panel_screen, InputSeatFrame(immersive));
             }
 
             if (!frame.expects_gpu_submission) {
@@ -1018,6 +1027,7 @@ private:
 
         SetInterpolationActive(false);
         aurora_set_pipeline_cache_idle_store(false);
+        aurora_set_stereo_panel_layer(false);
         running_.store(false, std::memory_order_release);
         MkwVRPolicySetSessionActive(false);
         if (!stop_.load(std::memory_order_acquire)) {
@@ -1071,10 +1081,12 @@ private:
         // The head pose this packet was located with places the screens and aims the pointer.
         ServiceRecenterRequest();
         UpdateVirtualScreenPose(packet);
+        const OpenXRPointerScreen panel_screen = SettingsPanelScreen(packet, policy, immersive);
+        PlacePanelLayer(packet, panel_screen);
         if (input_ != nullptr) {
             const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
             input_->Sync(packet.xr_frame.predicted_display_time, PointerScreen(packet, policy, immersive),
-                         SettingsPanelScreen(packet, policy, immersive), InputSeatFrame(immersive));
+                         panel_screen, InputSeatFrame(immersive));
         }
         if (!packet.expects_gpu_submission) {
             // Nothing to render (no rendering requested or no tracking): keep the compositor fed.
@@ -1393,6 +1405,42 @@ private:
         return screen;
     }
 
+    // Android: `adb shell setprop debug.wiicompiled.panel_layer 0` draws the settings panel into
+    // the eyes again, to compare the two ways or to rule out a runtime's quad layers. Read about
+    // once a second.
+    bool PanelLayerForcedOff() noexcept {
+#if defined(__ANDROID__)
+        if (panel_layer_poll_ == 0) {
+            panel_layer_poll_ = 72;
+            char value[PROP_VALUE_MAX] = {};
+            const bool off =
+                __system_property_get("debug.wiicompiled.panel_layer", value) > 0 && value[0] == '0';
+            if (off != panel_layer_forced_off_) {
+                panel_layer_forced_off_ = off;
+                RT_LOG(RT_TAG_RUNTIME) << "OpenXR: settings panel "
+                                       << (off ? "drawn into the eyes" : "on its own layer")
+                                       << " (debug.wiicompiled.panel_layer)" << std::endl;
+            }
+        }
+        --panel_layer_poll_;
+        return panel_layer_forced_off_;
+#else
+        return false;
+#endif
+    }
+
+    // The settings panel's layer hangs exactly where its pointer hits are
+    // tested, the rectangle it used to cover in the eyes.
+    static void PlacePanelLayer(OpenXRBackendFrame& frame, const OpenXRPointerScreen& screen) noexcept {
+        OpenXRPanelLayer& panel = frame.presentation.panel;
+        panel.placed = panel.requested && screen.valid;
+        if (panel.placed) {
+            panel.pose = screen.pose;
+            panel.width_meters = 2.0f * screen.half_width_meters;
+            panel.height_meters = 2.0f * screen.half_height_meters;
+        }
+    }
+
     // Centre of the race's 2D screen. ViewFromBase maps a point p of the
     // recorded centre-eye space (in metres) to base + lean * p in the
     // application space, so the screen Aurora hangs hud_distance_meters ahead
@@ -1601,6 +1649,10 @@ private:
     OpenXRLogCallback logger_;
     std::unique_ptr<OpenXRRuntime> runtime_;
     std::unique_ptr<GraphicsBackend> backend_;
+#if defined(__ANDROID__)
+    uint32_t panel_layer_poll_ = 0;
+    bool panel_layer_forced_off_ = false;
+#endif
     std::unique_ptr<OpenXRInput> input_;
     std::thread pacing_thread_;
     std::atomic_bool stop_{false};

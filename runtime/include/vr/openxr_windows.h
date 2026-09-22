@@ -54,6 +54,9 @@ public:
     bool Shutdown() {
         return std::visit([&](auto& backend) -> bool { return backend->Shutdown(); }, backend_);
     }
+    bool PanelLayerAvailable() {
+        return std::visit([&](auto& backend) -> bool { return backend->PanelLayerAvailable(); }, backend_);
+    }
     int64_t SwapchainFormat() {
         return std::visit([&](auto& backend) -> int64_t { return backend->SwapchainFormat(); }, backend_);
     }

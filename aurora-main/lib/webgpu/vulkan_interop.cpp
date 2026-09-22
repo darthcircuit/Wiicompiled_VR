@@ -2,6 +2,7 @@
 
 #include "../internal.hpp"
 #include "../stereo.hpp"
+#include "../stereo_overlay.hpp"
 #include "gpu.hpp"
 
 #if defined(__ANDROID__) && defined(WEBGPU_DAWN)
@@ -105,6 +106,11 @@ struct Import {
   bool accessBegun = false;
 };
 
+// The eyes, then the settings panel's layer image in a slot of its own.
+constexpr uint32_t kPanelIndex = AURORA_VULKAN_STEREO_MAX_TARGETS;
+constexpr uint32_t kMaxImages = AURORA_VULKAN_STEREO_MAX_RELEASES;
+using Releases = std::array<AuroraVulkanStereoRelease, kMaxImages>;
+
 struct PendingTarget {
   AHardwareBuffer* buffer = nullptr;
   uint32_t width = 0;
@@ -146,8 +152,8 @@ public:
     return true;
   }
 
-  bool SetTargets(uint64_t token, const AuroraVulkanStereoTarget* targets,
-                  uint32_t targetCount) noexcept {
+  bool SetTargets(uint64_t token, const AuroraVulkanStereoTarget* targets, uint32_t targetCount,
+                  const AuroraVulkanStereoTarget* panel) noexcept {
     if (token == 0 || targets == nullptr || targetCount == 0 ||
         targetCount > AURORA_VULKAN_STEREO_MAX_TARGETS) {
       return false;
@@ -157,25 +163,36 @@ public:
       return false;
     }
     const int64_t auroraFormat = to_vk_format(m_auroraFormat);
+    const auto valid = [&](const AuroraVulkanStereoTarget& target) {
+      return target.buffer != nullptr && target.width != 0 && target.height != 0 &&
+             same_copy_family(target.vkFormat, auroraFormat);
+    };
     for (uint32_t eye = 0; eye < targetCount; ++eye) {
-      const auto& target = targets[eye];
-      if (target.buffer == nullptr || target.width == 0 || target.height == 0 ||
-          !same_copy_family(target.vkFormat, auroraFormat)) {
+      if (!valid(targets[eye])) {
         return false;
       }
     }
-    for (uint32_t eye = 0; eye < targetCount; ++eye) {
-      m_targets[eye] = {
-          .buffer = targets[eye].buffer,
-          .width = targets[eye].width,
-          .height = targets[eye].height,
-          .vkFormat = targets[eye].vkFormat,
-          .acquireFenceFd = targets[eye].acquireFenceFd,
-          .acquireImageLayout = targets[eye].acquireImageLayout,
-      };
+    if (panel != nullptr && !valid(*panel)) {
+      return false;
     }
-    for (uint32_t eye = targetCount; eye < m_targets.size(); ++eye) {
-      m_targets[eye] = {};
+    m_targets = {};
+    m_imageCount = 0;
+    const auto add = [&](uint32_t index, const AuroraVulkanStereoTarget& target) {
+      m_targets[index] = {
+          .buffer = target.buffer,
+          .width = target.width,
+          .height = target.height,
+          .vkFormat = target.vkFormat,
+          .acquireFenceFd = target.acquireFenceFd,
+          .acquireImageLayout = target.acquireImageLayout,
+      };
+      m_images[m_imageCount++] = index;
+    };
+    for (uint32_t eye = 0; eye < targetCount; ++eye) {
+      add(eye, targets[eye]);
+    }
+    if (panel != nullptr) {
+      add(kPanelIndex, *panel);
     }
     m_frameToken = token;
     m_targetCount = targetCount;
@@ -202,7 +219,7 @@ public:
     if (!m_framePending || !m_encoded || frame.frameToken != m_frameToken) {
       return;
     }
-    std::array<AuroraVulkanStereoRelease, AURORA_VULKAN_STEREO_MAX_TARGETS> releases{};
+    Releases releases{};
     const bool success = EndAccessLocked(releases);
     NotifyLocked(frame.frameToken, success, true, releases);
     ClearFrameLocked();
@@ -215,7 +232,7 @@ public:
     }
     const uint64_t token = m_frameToken;
     const bool encoded = m_encoded;
-    std::array<AuroraVulkanStereoRelease, AURORA_VULKAN_STEREO_MAX_TARGETS> releases{};
+    Releases releases{};
     if (encoded) {
       EndAccessLocked(releases);
       for (auto& release : releases) {
@@ -242,7 +259,7 @@ private:
     const auto& target = m_targets[eye];
     if (source.texture == nullptr || source.format != m_auroraFormat ||
         source.size.width != target.width || source.size.height != target.height) {
-      Log.error("Stereo eye {} does not match its OpenXR Vulkan target ({}x{} vs {}x{})", eye,
+      Log.error("Stereo image {} does not match its OpenXR Vulkan target ({}x{} vs {}x{})", eye,
                 source.size.width, source.size.height, target.width, target.height);
       return nullptr;
     }
@@ -264,7 +281,9 @@ private:
     ahb.handle = target.buffer;
     const wgpu::SharedTextureMemoryDescriptor memoryDescriptor{
         .nextInChain = &ahb,
-        .label = eye == 0 ? "OpenXR left eye AHardwareBuffer" : "OpenXR right eye AHardwareBuffer",
+        .label = eye == 0 ? "OpenXR left eye AHardwareBuffer"
+                 : eye == 1 ? "OpenXR right eye AHardwareBuffer"
+                            : "OpenXR panel AHardwareBuffer",
     };
     import.memory = webgpu::g_device.ImportSharedTextureMemory(&memoryDescriptor);
     if (!import.memory) {
@@ -291,7 +310,9 @@ private:
       return nullptr;
     }
     const wgpu::TextureDescriptor textureDescriptor{
-        .label = eye == 0 ? "OpenXR left eye shared texture" : "OpenXR right eye shared texture",
+        .label = eye == 0 ? "OpenXR left eye shared texture"
+                 : eye == 1 ? "OpenXR right eye shared texture"
+                            : "OpenXR panel shared texture",
         .usage = wgpu::TextureUsage::CopyDst,
         .dimension = wgpu::TextureDimension::e2D,
         .size = {target.width, target.height, 1},
@@ -313,19 +334,29 @@ private:
   }
 
   bool EncodeLocked(wgpu::CommandEncoder& encoder, const stereo::SinkFrame& frame) noexcept {
-    std::array<Import*, AURORA_VULKAN_STEREO_MAX_TARGETS> imports{};
-    for (uint32_t eye = 0; eye < m_targetCount; ++eye) {
-      imports[eye] = EnsureImport(eye, frame.eyes[eye]);
+    std::array<stereo::EyeImage, kMaxImages> sources{};
+    std::array<Import*, kMaxImages> imports{};
+    for (uint32_t n = 0; n < m_imageCount; ++n) {
+      const uint32_t eye = m_images[n];
+      if (eye == kPanelIndex) {
+        if (!stereo_overlay::layer_source(encoder, m_targets[eye].width, m_targets[eye].height, sources[eye])) {
+          return false;
+        }
+      } else {
+        sources[eye] = frame.eyes[eye];
+      }
+      imports[eye] = EnsureImport(eye, sources[eye]);
       if (imports[eye] == nullptr) {
         return false;
       }
     }
-    for (uint32_t eye = 0; eye < m_targetCount; ++eye) {
+    for (uint32_t n = 0; n < m_imageCount; ++n) {
+      const uint32_t eye = m_images[n];
       auto& target = m_targets[eye];
       auto& import = *imports[eye];
       if (import.accessBegun) {
         Log.error("AHardwareBuffer for eye {} is still under a previous access", eye);
-        RollbackAccesses(imports, eye);
+        RollbackAccesses(imports, n);
         return false;
       }
       // The OpenXR side's release barrier leaves the image in acquireImageLayout;
@@ -350,7 +381,7 @@ private:
         close_fd(target.acquireFenceFd);
         if (!acquireFence) {
           Log.error("Dawn could not import the OpenXR copy-out fence for eye {}", eye);
-          RollbackAccesses(imports, eye);
+          RollbackAccesses(imports, n);
           return false;
         }
       }
@@ -370,15 +401,16 @@ private:
       }
       if (import.memory.BeginAccess(import.texture, &begin) != wgpu::Status::Success) {
         Log.error("Dawn BeginAccess failed for stereo eye {}", eye);
-        RollbackAccesses(imports, eye);
+        RollbackAccesses(imports, n);
         return false;
       }
       import.accessBegun = true;
     }
-    for (uint32_t eye = 0; eye < m_targetCount; ++eye) {
+    for (uint32_t n = 0; n < m_imageCount; ++n) {
+      const uint32_t eye = m_images[n];
       const auto& import = *imports[eye];
       const wgpu::TexelCopyTextureInfo source{
-          .texture = *frame.eyes[eye].texture,
+          .texture = *sources[eye].texture,
           .mipLevel = 0,
           .origin = {},
           .aspect = wgpu::TextureAspect::All,
@@ -396,9 +428,10 @@ private:
     return true;
   }
 
-  void RollbackAccesses(const std::array<Import*, AURORA_VULKAN_STEREO_MAX_TARGETS>& imports,
-                        uint32_t count) noexcept {
-    for (uint32_t eye = 0; eye < count; ++eye) {
+  // Ends the accesses begun for the first `count` images of this frame.
+  void RollbackAccesses(const std::array<Import*, kMaxImages>& imports, uint32_t count) noexcept {
+    for (uint32_t n = 0; n < count; ++n) {
+      const uint32_t eye = m_images[n];
       if (imports[eye] != nullptr && imports[eye]->accessBegun) {
         wgpu::SharedTextureMemoryEndAccessState end{};
         imports[eye]->memory.EndAccess(imports[eye]->texture, &end);
@@ -411,13 +444,15 @@ private:
     }
   }
 
-  bool EndAccessLocked(
-      std::array<AuroraVulkanStereoRelease, AURORA_VULKAN_STEREO_MAX_TARGETS>& releases) noexcept {
+  // Fills one release per image of this frame, in order: the eyes, then the panel.
+  bool EndAccessLocked(Releases& releases) noexcept {
     bool success = true;
     for (auto& release : releases) {
       release = {.releaseFenceFd = -1, .releasedImageLayout = VK_IMAGE_LAYOUT_UNDEFINED};
     }
-    for (uint32_t eye = 0; eye < m_targetCount; ++eye) {
+    for (uint32_t n = 0; n < m_imageCount; ++n) {
+      const uint32_t eye = m_images[n];
+      auto& release = releases[n];
       Import* import = m_encodedImports[eye];
       if (import == nullptr || !import->accessBegun) {
         success = false;
@@ -431,7 +466,7 @@ private:
         success = false;
       } else {
         import->initialized = end.initialized;
-        releases[eye].releasedImageLayout = layout.newLayout;
+        release.releasedImageLayout = layout.newLayout;
         for (size_t i = 0; i < end.fenceCount; ++i) {
           wgpu::SharedFenceSyncFDExportInfo syncFd{};
           wgpu::SharedFenceExportInfo info{};
@@ -441,16 +476,16 @@ private:
             // The fence keeps its descriptor; hand the caller an independent one.
             const int duplicate = ::dup(syncFd.handle);
             if (duplicate >= 0) {
-              if (releases[eye].releaseFenceFd >= 0) {
+              if (release.releaseFenceFd >= 0) {
                 // Dawn normally returns exactly one fence per access. Both must
                 // be honoured and one descriptor cannot express two fences, so
                 // the earlier one is retired on the CPU before handing over the
                 // latest.
                 Log.warn("Dawn returned several release fences for eye {}; merging on the CPU", eye);
-                wait_sync_fd(releases[eye].releaseFenceFd);
-                close_fd(releases[eye].releaseFenceFd);
+                wait_sync_fd(release.releaseFenceFd);
+                close_fd(release.releaseFenceFd);
               }
-              releases[eye].releaseFenceFd = duplicate;
+              release.releaseFenceFd = duplicate;
             }
           } else {
             Log.error("Dawn returned a non-sync-fd fence for eye {}", eye);
@@ -482,12 +517,13 @@ private:
     m_encodedImports = {};
     m_frameToken = 0;
     m_targetCount = 0;
+    m_imageCount = 0;
     m_framePending = false;
     m_encoded = false;
   }
 
   void PublishAndClearFrameLocked(uint64_t token, bool success, bool gpuWorkQueued) noexcept {
-    std::array<AuroraVulkanStereoRelease, AURORA_VULKAN_STEREO_MAX_TARGETS> releases{};
+    Releases releases{};
     for (auto& release : releases) {
       release = {.releaseFenceFd = -1, .releasedImageLayout = VK_IMAGE_LAYOUT_UNDEFINED};
     }
@@ -496,10 +532,9 @@ private:
   }
 
   void NotifyLocked(uint64_t token, bool success, bool gpuWorkQueued,
-                    const std::array<AuroraVulkanStereoRelease, AURORA_VULKAN_STEREO_MAX_TARGETS>&
-                        releases) noexcept {
+                    const Releases& releases) noexcept {
     if (m_callback != nullptr) {
-      m_callback(token, success, gpuWorkQueued, releases.data(), m_targetCount, m_userdata);
+      m_callback(token, success, gpuWorkQueued, releases.data(), m_imageCount, m_userdata);
     } else {
       for (auto release : releases) {
         close_fd(release.releaseFenceFd);
@@ -509,8 +544,11 @@ private:
 
   std::mutex m_mutex;
   std::unordered_map<AHardwareBuffer*, Import> m_imports;
-  std::array<PendingTarget, AURORA_VULKAN_STEREO_MAX_TARGETS> m_targets{};
-  std::array<Import*, AURORA_VULKAN_STEREO_MAX_TARGETS> m_encodedImports{};
+  std::array<PendingTarget, kMaxImages> m_targets{};
+  std::array<Import*, kMaxImages> m_encodedImports{};
+  // The slots of m_targets this frame copies into, eyes first.
+  std::array<uint32_t, kMaxImages> m_images{};
+  uint32_t m_imageCount = 0;
   wgpu::TextureFormat m_auroraFormat = wgpu::TextureFormat::Undefined;
   AuroraVulkanStereoSubmittedCallback m_callback = nullptr;
   void* m_userdata = nullptr;
@@ -575,7 +613,13 @@ bool aurora_vulkan_set_stereo_targets(uint64_t frameToken,
                                       const AuroraVulkanStereoTarget* targets,
                                       uint32_t targetCount) {
   using namespace aurora::vulkan_interop;
-  return g_bridge && g_bridge->SetTargets(frameToken, targets, targetCount);
+  return g_bridge && g_bridge->SetTargets(frameToken, targets, targetCount, nullptr);
+}
+
+bool aurora_vulkan_set_stereo_targets_with_panel(uint64_t frameToken, const AuroraVulkanStereoTarget* targets,
+                                                 uint32_t targetCount, const AuroraVulkanStereoTarget* panel) {
+  using namespace aurora::vulkan_interop;
+  return g_bridge && g_bridge->SetTargets(frameToken, targets, targetCount, panel);
 }
 
 bool aurora_vulkan_cancel_stereo_targets(uint64_t frameToken) {
@@ -612,6 +656,11 @@ bool aurora_vulkan_enable_stereo_bridge(AuroraVulkanStereoSubmittedCallback, voi
 }
 
 bool aurora_vulkan_set_stereo_targets(uint64_t, const AuroraVulkanStereoTarget*, uint32_t) {
+  return false;
+}
+
+bool aurora_vulkan_set_stereo_targets_with_panel(uint64_t, const AuroraVulkanStereoTarget*, uint32_t,
+                                                 const AuroraVulkanStereoTarget*) {
   return false;
 }
 

@@ -98,6 +98,9 @@ public:
     bool Shutdown();
 
     bool IsBound() const;
+    // False once the settings panel's own layer could not be set up; the panel
+    // is then drawn into the eyes again.
+    bool PanelLayerAvailable() const;
     const OpenXRD3D12GraphicsRequirements& GraphicsRequirements() const;
     int64_t SwapchainFormat() const;
     const std::string& LastError() const;

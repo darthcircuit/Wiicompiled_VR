@@ -2,6 +2,7 @@
 #include <aurora/vulkan_win32_interop.h>
 #include "../internal.hpp"
 #include "../stereo.hpp"
+#include "../stereo_overlay.hpp"
 #include "gpu.hpp"
 #if defined(_WIN32) && defined(WEBGPU_DAWN) && defined(DAWN_ENABLE_BACKEND_VULKAN)
 #include <windows.h>
@@ -53,27 +54,38 @@ bool CopyCompatible(int64_t a, int64_t b) {
                   ((a == 44 || a == 50) && (b == 44 || b == 50));
 }
 struct Import { uint64_t image; uint32_t width, height; wgpu::TextureFormat format; wgpu::Texture texture; };
+// The eyes, then the settings panel's layer image after them.
+constexpr uint32_t kMaxImages = 3;
 class Bridge {
 public:
   std::mutex mutex;
   std::vector<Import> imports;
-  std::array<AuroraD3D12StereoTarget, 2> targets{};
-  std::array<wgpu::Texture, 2> active{};
+  std::array<AuroraD3D12StereoTarget, kMaxImages> targets{};
+  std::array<wgpu::Texture, kMaxImages> active{};
   uint64_t token = 0;
   uint32_t count = 0;
+  // Images this frame copies: `count` eyes, plus the panel when `panel` is set.
+  uint32_t images = 0;
+  bool panel = false;
   bool encoded = false;
   AuroraD3D12StereoSubmittedCallback callback;
   void* userdata;
   Bridge(AuroraD3D12StereoSubmittedCallback cb, void* data) : callback(cb), userdata(data) {}
-  bool Set(uint64_t next, const AuroraD3D12StereoTarget* data, uint32_t n) {
+  bool Set(uint64_t next, const AuroraD3D12StereoTarget* data, uint32_t n, const AuroraD3D12StereoTarget* panelTarget) {
     if (!next || !data || !n || n > 2) return false;
     std::lock_guard guard(mutex);
     if (token) return false;
+    const auto valid = [](const AuroraD3D12StereoTarget& target) {
+      return target.resource && target.width && target.height;
+    };
     for (uint32_t i = 0; i < n; ++i) {
-      if (!data[i].resource || !data[i].width || !data[i].height) return false;
-      targets[i] = data[i];
+      if (!valid(data[i])) return false;
     }
-    token = next; count = n; return true;
+    if (panelTarget && !valid(*panelTarget)) return false;
+    for (uint32_t i = 0; i < n; ++i) targets[i] = data[i];
+    panel = panelTarget != nullptr;
+    if (panel) targets[n] = *panelTarget;
+    token = next; count = n; images = n + (panel ? 1u : 0u); return true;
   }
   bool Cancel(uint64_t wanted) {
     std::unique_lock guard(mutex, std::try_to_lock);
@@ -83,9 +95,13 @@ public:
   bool Encode(wgpu::CommandEncoder& encoder, const stereo::SinkFrame& frame) {
     std::lock_guard guard(mutex);
     if (!token || encoded || frame.frameToken != token) return false;
+    std::array<stereo::EyeImage, kMaxImages> sources{};
+    for (uint32_t i = 0; i < count; ++i) sources[i] = frame.eyes[i];
+    if (panel && !stereo_overlay::layer_source(encoder, targets[count].width, targets[count].height, sources[count]))
+      return false;
     // Validate/import every target before recording any copy.
-    for (uint32_t i = 0; i < count; ++i) {
-      const auto& eye = frame.eyes[i];
+    for (uint32_t i = 0; i < images; ++i) {
+      const auto& eye = sources[i];
       const auto& target = targets[i];
       if (!eye.texture || eye.size.width != target.width || eye.size.height != target.height ||
           !CopyCompatible(VkFormat(eye.format), target.dxgiFormat)) return false;
@@ -112,9 +128,9 @@ public:
       }
       active[i] = it->texture;
     }
-    for (uint32_t i = 0; i < count; ++i) {
+    for (uint32_t i = 0; i < images; ++i) {
       wgpu::TexelCopyTextureInfo source, destination;
-      source.texture = *frame.eyes[i].texture;
+      source.texture = *sources[i].texture;
       destination.texture = active[i];
       wgpu::Extent3D size{targets[i].width, targets[i].height, 1};
       encoder.CopyTextureToTexture(&source, &destination, &size);
@@ -125,11 +141,11 @@ public:
   void Submitted(const stereo::SinkFrame& frame) {
     std::lock_guard guard(mutex);
     if (!token || !encoded || token != frame.frameToken) return;
-    std::array<void*, 2> textures{};
-    for (uint32_t i = 0; i < count; ++i) textures[i] = active[i].Get();
+    std::array<void*, kMaxImages> textures{};
+    for (uint32_t i = 0; i < images; ++i) textures[i] = active[i].Get();
     // Append the COLOR_ATTACHMENT_OPTIMAL release barriers to Dawn's queue,
     // flush them under its device guard, then allow the XR thread to release.
-    const bool success = api.release(webgpu::g_device.Get(), textures.data(), count) != 0;
+    const bool success = api.release(webgpu::g_device.Get(), textures.data(), images) != 0;
     const auto completed = token;
     token = 0; encoded = false;
     callback(completed, success, userdata);
@@ -160,7 +176,12 @@ bool aurora_vulkan_win32_enable(AuroraD3D12StereoSubmittedCallback cb, void* dat
 }
 bool aurora_vulkan_win32_set_targets(uint64_t token, const AuroraD3D12StereoTarget* targets, uint32_t count) {
   using namespace aurora::vulkan_win32;
-  return bridge && bridge->Set(token, targets, count);
+  return bridge && bridge->Set(token, targets, count, nullptr);
+}
+bool aurora_vulkan_win32_set_targets_with_panel(uint64_t token, const AuroraD3D12StereoTarget* targets, uint32_t count,
+                                                const AuroraD3D12StereoTarget* panel) {
+  using namespace aurora::vulkan_win32;
+  return bridge && bridge->Set(token, targets, count, panel);
 }
 bool aurora_vulkan_win32_cancel(uint64_t token) {
   using namespace aurora::vulkan_win32;
@@ -190,6 +211,8 @@ bool aurora_vulkan_win32_get_handles(AuroraDawnVulkanHandles* handles, int64_t* 
 }
 bool aurora_vulkan_win32_enable(AuroraD3D12StereoSubmittedCallback, void*) { return false; }
 bool aurora_vulkan_win32_set_targets(uint64_t, const AuroraD3D12StereoTarget*, uint32_t) { return false; }
+bool aurora_vulkan_win32_set_targets_with_panel(uint64_t, const AuroraD3D12StereoTarget*, uint32_t,
+                                                const AuroraD3D12StereoTarget*) { return false; }
 bool aurora_vulkan_win32_cancel(uint64_t) { return false; }
 bool aurora_vulkan_win32_disable() { return true; }
 void* aurora_vulkan_win32_lock_queue() { return nullptr; }
