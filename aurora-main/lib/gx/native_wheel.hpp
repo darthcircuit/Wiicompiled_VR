@@ -28,6 +28,16 @@ inline std::vector<NativeWheelArray> nativeWheelArrays;
 inline uint32_t nativeWheelMatches=0;
 inline std::atomic<uint32_t> nativeWheelLastMatches{0};
 
+// A draw folds into the previous one by appending its vertices to that draw's
+// range, so the merged whole renders through the *first* draw's array binding:
+// two draws may only merge when they resolved the same replacement. The
+// decision below is therefore taken once per draw (the ownership walk is far
+// too costly to repeat) and kept with the command it was recorded for. It is
+// cleared with the set, which the runtime posts once a frame, so a command
+// address a later frame's list reuses can never be read as a hit.
+inline NativeWheelArray* nativeWheelLastDecision=nullptr;
+inline const void* nativeWheelLastDrawCommand=nullptr;
+
 // For the host log: why draws of the replaced arrays did or did not take them.
 struct NativeWheelDiagnostics {
     uint32_t sets=0;          // replacement sets cleared since the last report

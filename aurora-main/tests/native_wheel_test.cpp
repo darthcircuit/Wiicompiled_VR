@@ -4,7 +4,9 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <vector>
 
+#include "gx_test_common.hpp"
 #include "gx/native_wheel.hpp"
 
 namespace {
@@ -131,6 +133,75 @@ TEST_F(NativeWheelArrayTest, MultiJointBodyChecksPerPositionOwnership) {
 TEST_F(NativeWheelArrayTest, NonFiniteMatrixNeverMatches) {
   pos(0)[0] = __builtin_nanf("");
   EXPECT_EQ(aurora::gx::native_wheel_array(array, nullptr, 0, 0, 0), nullptr);
+}
+
+// Draw merging around an animated array. A merged draw appends its vertices to the previous draw's range and renders
+// through that draw's array binding, so two draws may merge only when they resolved the same replacement. The kart's
+// display list is hundreds of same-state primitives, and merging them is worth several ms an eye on a tiler.
+class NativeWheelMergeTest : public GXFifoTest {
+protected:
+  void SetUp() override {
+    GXFifoTest::SetUp();
+    aurora::gfx::testing::use_draw_command_tracking(true);
+    aurora::gx::nativeWheelArrays.clear();
+    aurora::gx::nativeWheelLastDecision = nullptr;
+    aurora::gx::nativeWheelLastDrawCommand = nullptr;
+    aurora::gx::NativeWheelArray replacement;
+    replacement.source = source.data();
+    replacement.bytes.assign(source.size(), 0);
+    replacement.bytes[12] = 1; // one animated position
+    aurora::gx::nativeWheelArrays.push_back(replacement);
+    auto& state = aurora::gx::g_gxState;
+    state.lastVtxFmt = GX_VTXFMT0;
+    state.lastVtxSize = 1;
+    state.vtxDesc[GX_VA_POS] = GX_INDEX8;
+    state.arrays[GX_VA_POS].data = source.data();
+    state.arrays[GX_VA_POS].size = static_cast<u32>(source.size());
+    state.arrays[GX_VA_POS].stride = 12;
+    state.stateDirty = true;
+  }
+  void TearDown() override {
+    aurora::gx::nativeWheelArrays.clear();
+    aurora::gx::nativeWheelLastDecision = nullptr;
+    aurora::gx::nativeWheelLastDrawCommand = nullptr;
+  }
+  void draw() {
+    std::vector<u8> fifo{static_cast<u8>(GX_TRIANGLES) | static_cast<u8>(GX_VTXFMT0), 0, 3, 0, 1, 2};
+    decode_fifo(fifo);
+  }
+  // The local vehicle's matrix: the replacement's model-view is all zeroes, and so is a default palette slot.
+  void makeOpponent() { reinterpret_cast<float*>(&aurora::gx::g_gxState.pnMtx[0].pos)[3] = 100.f; }
+  std::array<uint8_t, 36> source{};
+};
+
+TEST_F(NativeWheelMergeTest, PrimitivesSharingTheAnimatedArrayStillMerge) {
+  draw();
+  ASSERT_EQ(aurora::gx::nativeWheelLastDecision, &aurora::gx::nativeWheelArrays.front());
+  draw();
+  EXPECT_EQ(aurora::gfx::g_mergedDrawCallCount, 1u);
+}
+
+TEST_F(NativeWheelMergeTest, PrimitivesThatTakeTheOriginalArrayAlsoStillMerge) {
+  makeOpponent();
+  draw();
+  ASSERT_EQ(aurora::gx::nativeWheelLastDecision, nullptr);
+  draw();
+  EXPECT_EQ(aurora::gfx::g_mergedDrawCallCount, 1u);
+}
+
+TEST_F(NativeWheelMergeTest, OpponentPrimitiveNeverFoldsIntoAnAnimatedDraw) {
+  draw();
+  makeOpponent();
+  draw();
+  EXPECT_EQ(aurora::gfx::g_mergedDrawCallCount, 0u) << "the merged whole would render the opponent animated";
+}
+
+TEST_F(NativeWheelMergeTest, AnimatedPrimitiveNeverFoldsIntoAnOpponentDraw) {
+  makeOpponent();
+  draw();
+  reinterpret_cast<float*>(&aurora::gx::g_gxState.pnMtx[0].pos)[3] = 0.f;
+  draw();
+  EXPECT_EQ(aurora::gfx::g_mergedDrawCallCount, 0u) << "the wheel would render on the original vertices";
 }
 
 } // namespace

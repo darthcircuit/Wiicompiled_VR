@@ -1930,7 +1930,8 @@ static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
 
 static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange,
                                  uint16_t usedPnMtxMask, HashType matrixTopologySignature, HashType geometrySignature,
-                                 bool interpolationIdentityActive, const uint8_t* vertices, uint32_t vtxStride);
+                                 bool interpolationIdentityActive, const uint8_t* vertices, uint32_t vtxStride,
+                                 NativeWheelArray* nativeWheel);
 
 // The per-draw geometry signature, matrix-usage mask and draw-identity hashes exist purely to feed frame interpolation
 // (build_uniform consumes them only after its `frame_interpolation_fps() == 0` early-out).
@@ -1958,6 +1959,25 @@ static uint32_t matrix_index_prefix_size(GXVtxFmt fmt) noexcept {
     }
   }
   return size;
+}
+
+// Which animated vertex array, if any, this draw takes (native_wheel.hpp). Called once per draw, before the merge
+// test, because a merged draw renders through the binding the draw it folds into resolved.
+static NativeWheelArray* resolve_native_wheel(GXVtxFmt fmt, const uint8_t* vertices, u16 vtxCount,
+                                              uint32_t vtxStride) noexcept {
+  // A direct-position draw reads no array at all, and g_gxState.arrays[GX_VA_POS] then still holds whatever was
+  // bound last, which must not be matched against.
+  if (g_gxState.vtxDesc[GX_VA_POS] != GX_INDEX8 && g_gxState.vtxDesc[GX_VA_POS] != GX_INDEX16)
+    LIKELY { return nullptr; }
+  const auto& array = g_gxState.arrays[GX_VA_POS];
+  if (nativeWheelArrays.empty())
+    LIKELY {
+      if (!nativeWheelPreviousSources.empty())
+        UNLIKELY { native_wheel_note_outside(array.data); }
+      return nullptr;
+    }
+  return native_wheel_array(array, vertices, static_cast<u32>(vtxCount) * vtxStride, vtxStride,
+                            matrix_index_prefix_size(fmt));
 }
 
 // Screen-space bounds of a simple orthographic rectangle or line, textured or
@@ -2322,7 +2342,8 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
   const PnMtxUsage matrixUsage = interpolationIdentityActive ? pn_mtx_usage(vertices, vtxCount, vtxSize) : PnMtxUsage{};
   handle_draw_unmerged(prim, fmt, vtxCount, vertRange, matrixUsage.mask, matrixUsage.topologySignature,
                        interpolationIdentityActive ? draw_geometry_signature(fmt, vertices, vtxCount, vtxSize) : 0,
-                       interpolationIdentityActive, vertices, vtxSize);
+                       interpolationIdentityActive, vertices, vtxSize,
+                       resolve_native_wheel(fmt, vertices, vtxCount, vtxSize));
   return true;
 }
 
@@ -2355,15 +2376,21 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   gfx::Range vertRange = push_draw_vertices(vertices, vtxCount, vtxSize);
   pos += totalVtxBytes;
 
-  // Try to merge with previous draw call. A draw that binds a native-wheel source array is decided per draw
-  // (native_wheel_array), so it never folds into a neighbour that resolved the array differently.
-  if (!g_gxState.stateDirty && !(aurora::stereo_frame_provider_active() && g_gxState.projType == GX_ORTHOGRAPHIC) &&
-      !native_wheel_source(g_gxState.arrays[GX_VA_POS].data))
+  // The animated vertex array this draw takes is decided per draw, and the decision is part of what a merge would
+  // share, so resolve it here and hand the result to handle_draw_unmerged rather than deciding twice.
+  NativeWheelArray* const nativeWheel = resolve_native_wheel(fmt, vertices, vtxCount, vtxSize);
+
+  // Try to merge with previous draw call.
+  if (!g_gxState.stateDirty && !(aurora::stereo_frame_provider_active() && g_gxState.projType == GX_ORTHOGRAPHIC))
     LIKELY {
       auto* lastDraw = gfx::get_last_draw_command<DrawData>();
-      // Only if the previous draw call was a single instance draw (no lines/points handling)
+      // Only if the previous draw call was a single instance draw (no lines/points handling), and only into a draw
+      // that resolved the same animated array: the merged whole renders through that draw's binding. Anything the
+      // decision cache cannot vouch for (a command it was not recorded against) stays unmerged.
       if (lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
-          lastDraw->instanceCount == 1)
+          lastDraw->instanceCount == 1 &&
+          (nativeWheelArrays.empty() ||
+           (nativeWheelLastDrawCommand == lastDraw && nativeWheelLastDecision == nativeWheel)))
         LIKELY {
           const auto& indexTemplate = cached_index_template(prim, vtxCount);
           const auto indices = offset_index_template(indexTemplate, lastDraw->vtxCount);
@@ -2392,13 +2419,14 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   const PnMtxUsage matrixUsage = interpolationIdentityActive ? pn_mtx_usage(vertices, vtxCount, vtxSize) : PnMtxUsage{};
   handle_draw_unmerged(prim, fmt, vtxCount, vertRange, matrixUsage.mask, matrixUsage.topologySignature,
                        interpolationIdentityActive ? draw_geometry_signature(fmt, vertices, vtxCount, vtxSize) : 0,
-                       interpolationIdentityActive, vertices, vtxSize);
+                       interpolationIdentityActive, vertices, vtxSize, nativeWheel);
   return true;
 }
 
 static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange,
                                  uint16_t usedPnMtxMask, HashType matrixTopologySignature, HashType geometrySignature,
-                                 bool interpolationIdentityActive, const uint8_t* vertices, uint32_t vtxStride) {
+                                 bool interpolationIdentityActive, const uint8_t* vertices, uint32_t vtxStride,
+                                 NativeWheelArray* nativeWheel) {
   ZoneScoped;
   // GX_CULL_ALL rasterizes nothing on hardware - no color, no depth.
   if (g_gxState.cullMode == GX_CULL_ALL && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS)
@@ -2422,28 +2450,23 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
     }
     auto& array = g_gxState.arrays[i];
     const u32 uploadStride = padded_upload_stride(array.stride);
-    if (i == GX_VA_POS && nativeWheelArrays.empty() && !nativeWheelPreviousSources.empty())
-      UNLIKELY { native_wheel_note_outside(array.data); }
-    if (i == GX_VA_POS && !nativeWheelArrays.empty())
+    if (i == GX_VA_POS && nativeWheel != nullptr)
       UNLIKELY {
-        if (auto* nativeWheel = native_wheel_array(array, vertices, static_cast<u32>(vtxCount) * vtxStride, vtxStride,
-                                                   matrix_index_prefix_size(fmt))) {
-          static unsigned nativeWheelDrawLogs = 0;
-          if (nativeWheelDrawLogs++ < 4) Log.info("Native steering wheel: animated local vehicle vertex array");
-          // Never populate the shared source's cache with the animated copy: later draws of the same asset must
-          // still see the original vertices. The copy takes the same padded upload path as the original.
-          if (nativeWheel->uploaded.size == 0 || nativeWheel->uploadedStride != uploadStride) {
-            AttrArray animated{};
-            animated.data = nativeWheel->bytes.data();
-            animated.size = array.size;
-            animated.stride = array.stride;
-            animated.le = array.le;
-            nativeWheel->uploaded = push_vertex_array(animated, uploadStride);
-            nativeWheel->uploadedStride = uploadStride;
-          }
-          ranges.vaRanges[0] = nativeWheel->uploaded;
-          continue;
+        static unsigned nativeWheelDrawLogs = 0;
+        if (nativeWheelDrawLogs++ < 4) Log.info("Native steering wheel: animated local vehicle vertex array");
+        // Never populate the shared source's cache with the animated copy: later draws of the same asset must
+        // still see the original vertices. The copy takes the same padded upload path as the original.
+        if (nativeWheel->uploaded.size == 0 || nativeWheel->uploadedStride != uploadStride) {
+          AttrArray animated{};
+          animated.data = nativeWheel->bytes.data();
+          animated.size = array.size;
+          animated.stride = array.stride;
+          animated.le = array.le;
+          nativeWheel->uploaded = push_vertex_array(animated, uploadStride);
+          nativeWheel->uploadedStride = uploadStride;
         }
+        ranges.vaRanges[0] = nativeWheel->uploaded;
+        continue;
       }
     if (array.cachedRange.size > 0 && array.cachedStride == uploadStride) {
       ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
@@ -2516,6 +2539,9 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
       .dstAlpha = pipelineState.dstAlpha,
       .screenRect = screen_rect(prim, fmt, vertices, vtxCount, vtxStride),
   });
+  // What the next draw must match to be allowed to fold into this one.
+  nativeWheelLastDrawCommand = gfx::get_last_draw_command<DrawData>();
+  nativeWheelLastDecision = nativeWheel;
   g_gxState.stateDirty = false;
 }
 

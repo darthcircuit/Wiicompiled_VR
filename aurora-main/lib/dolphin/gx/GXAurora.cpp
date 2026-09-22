@@ -26,6 +26,8 @@ extern "C" void aurora_clear_native_wheel_vertices() {
     aurora::gx::nativeWheelPreviousSources.push_back(array.source);
   aurora::gx::native_wheel_report();
   aurora::gx::nativeWheelArrays.clear();
+  aurora::gx::nativeWheelLastDecision = nullptr;
+  aurora::gx::nativeWheelLastDrawCommand = nullptr;
 }
 extern "C" uint32_t aurora_native_wheel_draw_count() { return aurora::gx::nativeWheelLastMatches.load(); }
 extern "C" void aurora_set_native_wheel_vertices(const void* source, const void* replacement, uint32_t size,
@@ -37,6 +39,10 @@ extern "C" void aurora_set_native_wheel_vertices(const void* source, const void*
   array.bytes.assign(bytes, bytes + size);
   std::memcpy(array.modelView.data(), modelView, sizeof(float) * 12);
   aurora::gx::nativeWheelArrays.push_back(std::move(array));
+  // The vector may have moved its elements, and a set changes what a draw resolves to in any case, so the decision
+  // the merge test compares against is dropped rather than left pointing into the old storage.
+  aurora::gx::nativeWheelLastDecision = nullptr;
+  aurora::gx::nativeWheelLastDrawCommand = nullptr;
 }
 
 // Single definition for the `Log` that gx.hpp declares for this directory.
