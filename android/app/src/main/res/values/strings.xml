@@ -141,6 +141,7 @@
     <string name="about_app_name">WiiCompiled OpenXR VR</string>
     <string name="about_app_summary">Mario Kart Wii recompiled to native code, with an OpenXR renderer, running on this headset. No game code and no game data come with it: each game is built from the disc you own.</string>
     <string name="about_credit_vr">Meta Quest port and the OpenXR VR renderer by iChris4.</string>
+    <string name="about_credit_hand_steering">The cockpit\'s turning steering wheel and hand steering by heurazy, from mario-kart-wii-VR-port (GPL v3).</string>
     <string name="about_credit_wiicompiled">WiiCompiled, the static recompilation this is built on, by patchzyy and the static recompilation community.</string>
     <string name="about_credit_retro_rewind">Retro Rewind by ZPL and team, the mod distribution this app can download and play.</string>
     <string name="about_credit_wheel_wizard">Wheel Wizard by Patchzy and WantToBeeMe, the PC launcher this panel is modelled on.</string>
@@ -153,6 +154,7 @@
     <string name="about_licence_text">GNU General Public License v3. Not affiliated with, endorsed by, or associated with Nintendo. Mario Kart Wii is a trademark of Nintendo.</string>
     <string name="about_kit">Game kit</string>
     <string name="about_credit_title_vr">Meta Quest and VR</string>
+    <string name="about_credit_title_hand_steering">Steering wheel and hand steering</string>
     <string name="about_credit_title_wiicompiled">WiiCompiled</string>
     <string name="about_credit_title_retro_rewind">Retro Rewind</string>
     <string name="about_credit_title_wheel_wizard">Wheel Wizard</string>
@@ -184,6 +186,12 @@
     <string name="vr_hide_nothing">Nothing</string>
     <string name="vr_hide_driver">Driver</string>
     <string name="vr_hide_driver_and_kart">Driver and kart</string>
+    <string name="vr_seat">Seat</string>
+    <string name="vr_seat_helper">The cockpit puts you at the driver\'s eyes, life-size, with the steering wheel or handlebar turning within reach. Custom uses the head offsets from the in-headset settings.</string>
+    <string name="vr_seat_cockpit">Cockpit</string>
+    <string name="vr_seat_custom">Custom</string>
+    <string name="vr_hand_steering">Hand steering</string>
+    <string name="vr_hand_steering_helper">In the cockpit, squeeze a grip near the steering wheel or handlebar to grab it, and turn it to steer. Releasing both grips gives steering back to the stick. Hand steering by heurazy.</string>
     <string name="vr_lean_back">Lean back angle</string>
     <string name="vr_lean_back_helper">Tilts the race view back for playing reclined. 0 applies no tilt.</string>
 

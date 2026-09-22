@@ -183,7 +183,8 @@ a 2D Horizon OS panel modelled on the PC launcher, WheelWizard VR, and using its
 palette. **Home** has the Play button and reports a missing or incomplete `DATA`
 (the check is the runtime's own `IsDvdDataRoot`: `files/` and `sys/fst.bin`).
 **Settings** edits `Config.toml` in tabs: VR (camera, rotation, driver hiding,
-lean back, render scale, VR interpolation, virtual screen size and distance),
+seat, hand steering, lean back, render scale, VR interpolation, virtual screen
+size and distance),
 Graphics (resolution, widescreen, bloom, shader stutter), Controls (controller
 mode, vibration, the Wii Remote mapping), Audio, and About (paths, OpenXR
 logging). The launch-time geometry (`render_scale`, `hud_distance_meters`,

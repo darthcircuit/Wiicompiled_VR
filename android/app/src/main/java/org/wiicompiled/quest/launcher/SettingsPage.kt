@@ -115,6 +115,8 @@ class SettingsPage(
 
     private fun buildVr() {
         val firstPerson = { c: TomlConfig -> c.bool("vr", "first_person") ?: false }
+        // The steering wheel and hand steering belong to the cockpit seat.
+        val cockpit = { c: TomlConfig -> firstPerson(c) && stringIndex(c, "vr", "first_person_seat", SEATS) == 0 }
         section(R.string.section_vr_camera) {
             choice(
                 R.string.vr_camera, R.string.vr_camera_helper,
@@ -150,6 +152,20 @@ class SettingsPage(
                     }
                 },
                 enabledIf = firstPerson,
+            )
+            choice(
+                R.string.vr_seat, R.string.vr_seat_helper,
+                listOf(R.string.vr_seat_cockpit, R.string.vr_seat_custom),
+                read = { stringIndex(it, "vr", "first_person_seat", SEATS) },
+                write = { c, index -> c.setString("vr", "first_person_seat", SEATS[index]) },
+                enabledIf = firstPerson,
+            )
+            // heurazy's grab-and-turn wheel: runtime_config.h's kVrHandSteeringDefault is off.
+            toggle(
+                R.string.vr_hand_steering, R.string.vr_hand_steering_helper,
+                read = { it.bool("vr", "hand_steering") ?: false },
+                write = { c, value -> c.setBool("vr", "hand_steering", value) },
+                enabledIf = cockpit,
             )
             slider(
                 R.string.vr_lean_back, R.string.vr_lean_back_helper, -45.0, 45.0, 1.0,
@@ -366,6 +382,7 @@ class SettingsPage(
         }
         section(R.string.section_about_credits) {
             info(R.string.about_credit_title_vr, activity.getString(R.string.about_credit_vr), stacked = true)
+            info(R.string.about_credit_title_hand_steering, activity.getString(R.string.about_credit_hand_steering), stacked = true)
             info(R.string.about_credit_title_wiicompiled, activity.getString(R.string.about_credit_wiicompiled), stacked = true)
             info(R.string.about_credit_title_retro_rewind, activity.getString(R.string.about_credit_retro_rewind), stacked = true)
             info(R.string.about_credit_title_wheel_wizard, activity.getString(R.string.about_credit_wheel_wizard), stacked = true)
@@ -686,6 +703,8 @@ class SettingsPage(
 
     private companion object {
         val ROTATIONS = listOf("yaw", "yaw_pitch", "full")
+        // The runtime's default ("cockpit") first.
+        val SEATS = listOf("cockpit", "custom")
         // The runtime's default ("boost") first: an absent key reads as index 0.
         val PERFORMANCE_LEVELS = listOf("boost", "sustained_high", "sustained_low", "power_savings", "default")
         val CONTROLLER_MODES = listOf("wii_remote", "gamepad")

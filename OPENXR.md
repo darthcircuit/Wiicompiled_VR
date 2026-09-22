@@ -417,7 +417,8 @@ copied array, those that bound one outside the window it was set for, the matche
 closest position matrix was from the expected one; the first such line with a bound draw also prints
 both matrices.
 
-**Hand steering.** `hand_steering = true` (off by default; also in WheelWizard's OpenXR VR settings)
+**Hand steering.** `hand_steering = true` (off by default; also in WheelWizard's OpenXR VR settings
+and the Quest launcher's Settings > VR, beside the seat)
 lets you take hold of the wheel or handlebar with the tracked controllers. Squeeze a grip near it:
 past 55 % squeeze, within `wheel_grab_distance` metres of its plane (default 0.35) and near the rim,
 or near a bar end, scaled by `wheel_grab_assist`. Once taken, only letting go of the grip releases
@@ -441,7 +442,8 @@ aside while it drives.
 
 **Hands and the separate wheel.** Hands are drawn while hand steering is on: the runtime's own hand
 mesh where it offers one (`XR_EXT_hand_tracking` and `XR_FB_hand_tracking_mesh`, requested only when
-hand steering is on at launch), otherwise procedural gloves that curl with the squeeze. They and the
+hand steering is on at launch), otherwise procedural gloves that curl with the squeeze. The Quest
+build declares no hand-tracking permission, so it always draws the gloves. They and the
 separate VR wheel or handlebar travel with the stereo packet in metres in the seated frame, and each
 eye draws them inside the scene's pass just before the first 2D-layer draw, depth-tested with the
 world's own depth mapping, so the kart and the track hide them and the HUD cannot
@@ -764,9 +766,11 @@ ends, including mid-frame flushes, so live setting changes cannot invalidate pen
   Lifecycle events and performance (about 43 game FPS) are still open. Apple visionOS packaging
   is not implemented.
 - Scene-specific comfort options, culling fixes and replay/spectator classification are future work.
-- The cockpit seat, the turning wheel and hand steering have not yet been validated in a headset on
-  this build: the native wheel's match against the race camera's view, bikes and Quacker, and the
-  Quest. Hand steering needs analog grips (Touch); the simple controller profile cannot grab.
+- The cockpit has only been seen in one kart race on a Quest 3 (2026-09-22): the race camera's view
+  matched the scene's exactly and the kart's own wheel animated (228 draws a frame), but the driver's
+  eye was never calibrated, and the fallback placed the wheel centre about 13 cm above eye level.
+  Bikes and Quacker, the PC, and hand steering itself are unvalidated. Hand steering needs analog
+  grips (Touch); the simple controller profile cannot grab.
 - The headset settings panel has no laser beam, only the cursor on the panel itself, and text fields
   cannot be typed into without a keyboard.
 - The desktop window remains available as a mirror/fallback.
