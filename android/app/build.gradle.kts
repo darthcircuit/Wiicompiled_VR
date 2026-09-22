@@ -139,6 +139,32 @@ android {
         }
     }
 
+    flavorDimensions += "headset"
+    productFlavors {
+        create("modernQuest") {
+            dimension = "headset"
+            manifestPlaceholders["mkwQuestSupportedDevices"] = "quest2|quest3|quest3s|questpro"
+            buildConfigField("boolean", "QUEST1_DIRECT_LAUNCH", "false")
+            externalNativeBuild {
+                cmake {
+                    // Snapdragon XR2 and newer. Keep this as the default build target.
+                    arguments += "-DMKW_ANDROID_CPU=cortex-a77"
+                }
+            }
+        }
+        create("quest1") {
+            dimension = "headset"
+            manifestPlaceholders["mkwQuestSupportedDevices"] = "quest|quest2"
+            buildConfigField("boolean", "QUEST1_DIRECT_LAUNCH", "true")
+            externalNativeBuild {
+                cmake {
+                    // Snapdragon 835. cortex-a77 binaries terminate with SIGILL on Quest 1.
+                    arguments += "-DMKW_ANDROID_CPU=kryo"
+                }
+            }
+        }
+    }
+
     externalNativeBuild {
         cmake {
             // aurora-main needs CMake 3.25+, newer than the SDK's bundled 3.22.1;

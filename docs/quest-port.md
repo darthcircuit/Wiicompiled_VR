@@ -107,6 +107,22 @@ the result. Live RGB5A3 menu copies use a minimal RGBA passthrough shader for
 the same reason. Other Android devices retain the normal filtered and
 format-converting paths.
 
+Quest 1 must be built with the `quest1` flavour (`Build-Quest.ps1 -Headset
+quest1`). It targets the Snapdragon 835's Kryo CPU; the modern flavour targets
+`cortex-a77`, whose instructions can terminate the game with `SIGILL` on Quest
+1. Android builds use a pinned Dawn package which does not enable
+`VK_EXT_debug_utils`: the old Quest firmware advertises that extension but
+rejects it when Dawn creates the Vulkan instance.
+
+The final Quest 1 firmware also cannot reliably promote this app's 2D setup
+panel into an immersive activity. Its APK therefore exposes two library
+entries: **WiiCompiled VR** starts the game directly in VR, while
+**WiiCompiled Settings** opens the setup/settings panel. After changing a
+setting, close the panel and start WiiCompiled VR from the library. The Play
+button in the settings panel explains this limitation instead of opening a
+black panel. Modern Quest builds keep the normal single launcher, whose Play
+button starts VR directly.
+
 The workaround was isolated on a physical Quest 1: it changed the boot/menu
 output from flickering black or white frames to a complete menu with character
 and vehicle previews. It does intentionally skip Wii-era RGB5A3 quantization on
@@ -459,7 +475,10 @@ Android facts this design rests on, all measured on a Quest 3:
   also learned `--target-os windows|macos|linux|android` for
   `generate-data-init` and `translate-mod`, for pipelines that generate on
   another host.
-- `android/`: the Gradle project, one app with no flavours.
+- `android/`: the Gradle project, with `modernQuest` (the default script
+  target) and `quest1` headset flavours. They share the application ID and
+  storage, but select the appropriate CPU baseline, supported-device manifest,
+  and launcher behavior.
   `app/src/main/cpp/CMakeLists.txt` adds the repository's `runtime/` as a
   subdirectory with those Android choices and builds both game kit probes
   (the Retro Rewind one only when the translation includes the mod), which
@@ -481,6 +500,7 @@ installer's `BuildWorkspace/generated`, produced by the normal Windows pipeline)
 ```powershell
 powershell -ExecutionPolicy Bypass -File android/Prepare-QuestDependencies.ps1        # SDL3 3.4.4 AAR into android/app/libs
 powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Install             # the app, its game kit and toolchain, debug-signed
+powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Headset quest1 -Install  # Quest 1: Kryo CPU and direct-VR library entry
 powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Install         # your game, against that kit, into Import (or WheelWizard VR's Build for Quest)
 powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Product retro_rewind -Mod <RetroRewind6> -Install  # the mod and its pack (needs translate-mod output)
 adb push MarioKart.iso /sdcard/Download/                                               # then Select disc image in the launcher
