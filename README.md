@@ -54,7 +54,9 @@ Windows builds can render through an OpenXR runtime on D3D12, or on Vulkan with 
 build, without CPU readback. Menus and
 unsupported scenes appear as a head-locked virtual screen; a validated single-camera race switches
 to immersive stereo rendering. VR is opt-in and falls back to the normal desktop renderer if the
-runtime or headset is unavailable. See [`OPENXR.md`](OPENXR.md) for setup, configuration, and the
+runtime or headset is unavailable. In first person you sit in the cockpit, where the steering wheel
+or handlebar turns with your steering, and optional hand steering by heurazy lets you grab it with
+the tracked controllers and turn it. See [`OPENXR.md`](OPENXR.md) for setup, configuration, and the
 current limitations.
 
 **Music ducking.** 
@@ -234,6 +236,8 @@ All translated output is verified against real hardware behavior and most import
   aurora's Direct3D, Vulkan and OpenGL backends.
 - **[OpenXR](https://www.khronos.org/openxr/)** - the Khronos cross-platform API used by the
   experimental VR renderer.
+- **heurazy** - the VR cockpit's turning steering wheel and hand steering, ported from
+  **[mario-kart-wii-VR-port](https://github.com/heurazy/mario-kart-wii-VR-port)** (GPL-3.0).
 - **[Dolphin Emulator](https://github.com/dolphin-emu/dolphin)** - an invaluable reference for Wii
   hardware behavior during development, plus the source of the free DSP coefficient ROM and the
   unmodified default WiiConnect24 bootstrap tree bundled with the runtime.

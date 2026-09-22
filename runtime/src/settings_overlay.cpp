@@ -3,6 +3,7 @@
 #include "aurora_events.h"
 #include "controller_button_names.h"
 #include "controller_mapping_wizard.h"
+#include "gx_native_wheel.h"
 #include "input_bindings.h"
 #include "game_graphics_options.h"
 #include "log_export.h"
@@ -139,6 +140,14 @@ bool g_vrSkipCopyClears = RuntimeConfigFile::VrSkipCopyClears(true);
 bool g_vrHudVirtualScreen = RuntimeConfigFile::VrHudVirtualScreen(true);
 bool g_vrFirstPerson = RuntimeConfigFile::VrFirstPerson(false);
 float g_vrFirstPersonUnitsPerMeter = RuntimeConfigFile::VrFirstPersonUnitsPerMeter();
+// 0 = cockpit, 1 = custom, matching kVrFirstPersonSeatNames.
+constexpr std::array<const char*, 2> kVrFirstPersonSeatNames{"cockpit", "custom"};
+int g_vrFirstPersonSeat = RuntimeConfigFile::VrFirstPersonSeat() == "custom" ? 1 : 0;
+float g_vrCockpitUnitsPerMeter = RuntimeConfigFile::VrCockpitUnitsPerMeter();
+bool g_vrSteeringWheel = RuntimeConfigFile::VrSteeringWheel();
+bool g_vrNativeSteeringWheel = RuntimeConfigFile::VrNativeSteeringWheel();
+bool g_vrHandSteering = RuntimeConfigFile::VrHandSteering();
+mkw::vr::WheelTuning g_vrWheelTuning = RuntimeConfigFile::VrWheelTuning();
 float g_vrFirstPersonHeadUp = RuntimeConfigFile::VrFirstPersonHeadUpMeters();
 float g_vrFirstPersonHeadForward = RuntimeConfigFile::VrFirstPersonHeadForwardMeters();
 float g_vrFirstPersonHeadRight = RuntimeConfigFile::VrFirstPersonHeadRightMeters();
@@ -1113,6 +1122,82 @@ void ApplyVrHudVirtualScreen() {
                                  RuntimeConfigFile::VrHudDistanceMeters(2.0f) * unitsPerMeter);
 }
 
+// The cockpit's steering wheel and hand steering, under the first-person camera.
+void DrawVrSteeringWheelSettings() {
+    ImGui::Separator();
+    ImGui::Text("Steering wheel");
+    ImGui::BeginDisabled(g_vrFirstPersonSeat != 0);
+    if (ImGui::Checkbox("Turn the steering wheel", &g_vrSteeringWheel)) {
+        RuntimeConfigFile::SetVrSteeringWheel(g_vrSteeringWheel);
+        mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("In the cockpit, the kart's steering wheel or the bike's handlebar turns "
+                          "with your steering.");
+    }
+    ImGui::BeginDisabled(!g_vrSteeringWheel);
+    if (ImGui::Checkbox("Use the vehicle's own wheel", &g_vrNativeSteeringWheel)) {
+        RuntimeConfigFile::SetVrNativeSteeringWheel(g_vrNativeSteeringWheel);
+        mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Turns the wheel or handlebar of the vehicle's own model. Off draws a "
+                          "separate VR wheel instead, which is also what appears when a vehicle's "
+                          "own wheel cannot be animated.");
+    }
+    ImGui::EndDisabled();
+    if (ImGui::Checkbox("Hand steering (by heurazy)", &g_vrHandSteering)) {
+        RuntimeConfigFile::SetVrHandSteering(g_vrHandSteering);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Squeeze a grip near the wheel or handlebar to take hold of it, and turn "
+                          "it to steer, with one hand or both. Releasing both grips gives steering "
+                          "back to the stick, which still aims items. The runtime's hand mesh is "
+                          "used when hand steering was on at launch.");
+    }
+    if (g_vrHandSteering && ImGui::TreeNode("Hand steering tuning")) {
+        bool changed = false;
+        changed |= ImGui::SliderFloat("Kart full lock (degrees)", &g_vrWheelTuning.kartDegrees,
+                                      RuntimeConfigFile::kVrWheelDegreesMin,
+                                      RuntimeConfigFile::kVrWheelDegreesMax, "%.0f");
+        changed |= ImGui::SliderFloat("Bike full lock (degrees)", &g_vrWheelTuning.bikeDegrees,
+                                      RuntimeConfigFile::kVrWheelDegreesMin,
+                                      RuntimeConfigFile::kVrWheelDegreesMax, "%.0f");
+        changed |= ImGui::SliderFloat("Grab reach (m)", &g_vrWheelTuning.grabDistance,
+                                      RuntimeConfigFile::kVrWheelGrabDistanceMin,
+                                      RuntimeConfigFile::kVrWheelGrabDistanceMax, "%.2f");
+        changed |= ImGui::SliderFloat("Grab assist", &g_vrWheelTuning.grabAssist,
+                                      RuntimeConfigFile::kVrWheelGrabAssistMin,
+                                      RuntimeConfigFile::kVrWheelGrabAssistMax, "%.2f");
+        changed |= ImGui::SliderFloat("Response", &g_vrWheelTuning.response,
+                                      RuntimeConfigFile::kVrWheelResponseMin,
+                                      RuntimeConfigFile::kVrWheelResponseMax, "%.2f");
+        changed |= ImGui::SliderFloat("Tracking-loss grace (s)", &g_vrWheelTuning.trackingGrace,
+                                      RuntimeConfigFile::kVrWheelTrackingGraceMin,
+                                      RuntimeConfigFile::kVrWheelTrackingGraceMax, "%.2f");
+        changed |= ImGui::Checkbox("Grab and release pulse", &g_vrWheelTuning.haptics);
+        if (ImGui::Button("Reset hand steering tuning")) {
+            g_vrWheelTuning = {};
+            changed = true;
+        }
+        if (changed) {
+            RuntimeConfigFile::SetVrWheelTuning(g_vrWheelTuning);
+        }
+        ImGui::TreePop();
+    }
+    ImGui::EndDisabled();
+    // What the cockpit found, for a report when the wheel does not behave.
+    const auto anchor = mkw::vr::MkwVRFirstPersonGetAnchor();
+    if (anchor.valid && anchor.cockpit) {
+        ImGui::TextDisabled("Cockpit: %s, %s, %.0f units/m, animated draws %u",
+                            anchor.bike ? "handlebar" : "wheel",
+                            !anchor.native_wheel.valid ? "grips not found"
+                            : anchor.native_mesh_prepared ? "vehicle's own"
+                                                          : "VR wheel",
+                            anchor.units_per_meter, GxNativeWheel::LastDrawCount());
+    }
+}
+
 void DrawGraphicsSettings() {
     g_displayMode = static_cast<int>(aurora_get_display_mode());
     struct EffectFlag {
@@ -1391,11 +1476,37 @@ void DrawVrSettings() {
         ImGui::SetTooltip(
             "Moves the camera to the Player 1 driver's head and keeps the horizon level, "
             "instead of riding behind the kart. Applies during a single-screen race; menus "
-            "and split-screen are unaffected. The world scale below replaces "
-            "world_units_per_meter while it is engaged.");
+            "and split-screen are unaffected.");
+    }
+    constexpr std::array<const char*, 2> kSeatLabels{"Cockpit", "Custom"};
+    if (ImGui::Combo("Seat", &g_vrFirstPersonSeat, kSeatLabels.data(), static_cast<int>(kSeatLabels.size()))) {
+        RuntimeConfigFile::SetVrFirstPersonSeat(kVrFirstPersonSeatNames[static_cast<size_t>(g_vrFirstPersonSeat)]);
+        mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+        ApplyVrHudVirtualScreen();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Cockpit sits you at the driver's own eyes, behind the steering wheel, at a "
+            "life-size scale that allows for the character's height, so the wheel is within "
+            "reach. Custom places the head by the world scale and offsets below instead.");
+    }
+    if (g_vrFirstPersonSeat == 0) {
+        if (ImGui::SliderFloat("Cockpit scale (units per metre)", &g_vrCockpitUnitsPerMeter,
+                               RuntimeConfigFile::kVrCockpitUnitsPerMeterMin,
+                               RuntimeConfigFile::kVrCockpitUnitsPerMeterMax, "%.0f")) {
+            RuntimeConfigFile::SetVrCockpitUnitsPerMeter(g_vrCockpitUnitsPerMeter);
+            mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+            ApplyVrHudVirtualScreen();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "100 reads life-size for an average-height driver; taller characters raise it "
+                "further on their own. Raising it shrinks the world around you.");
+        }
     }
     // These are the tuning loop for the anchor: the right head height is a
     // per-taste value that can only really be judged from inside the headset.
+    ImGui::BeginDisabled(g_vrFirstPersonSeat == 0);
     if (ImGui::SliderFloat("World units per metre (first person)", &g_vrFirstPersonUnitsPerMeter,
                            1.0f, 200.0f, "%.1f")) {
         RuntimeConfigFile::SetVrFirstPersonUnitsPerMeter(g_vrFirstPersonUnitsPerMeter);
@@ -1422,8 +1533,9 @@ void DrawVrSettings() {
         mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
     }
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + Scaled(380.0f));
-    ImGui::TextDisabled("Where the head sits in the kart's own frame.");
+    ImGui::TextDisabled("Custom seat: where the head sits in the kart's own frame.");
     ImGui::PopTextWrapPos();
+    ImGui::EndDisabled();
     constexpr std::array<const char*, 3> kRotationLabels{"Yaw only", "Yaw + Pitch", "Full rotation"};
     if (ImGui::Combo("View rotation", &g_vrFirstPersonRotation, kRotationLabels.data(),
                      static_cast<int>(kRotationLabels.size()))) {
@@ -1466,8 +1578,17 @@ void DrawVrSettings() {
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Removes the vehicle as well, leaving nothing of your own kart.");
     }
+    DrawVrSteeringWheelSettings();
     ImGui::Separator();
     if (ImGui::Button("Reset first-person defaults")) {
+        g_vrFirstPersonSeat = 0;
+        g_vrCockpitUnitsPerMeter = RuntimeConfigFile::kVrCockpitUnitsPerMeterDefault;
+        g_vrSteeringWheel = RuntimeConfigFile::kVrSteeringWheelDefault;
+        g_vrNativeSteeringWheel = RuntimeConfigFile::kVrNativeSteeringWheelDefault;
+        RuntimeConfigFile::SetVrFirstPersonSeat(RuntimeConfigFile::kVrFirstPersonSeatDefault);
+        RuntimeConfigFile::SetVrCockpitUnitsPerMeter(g_vrCockpitUnitsPerMeter);
+        RuntimeConfigFile::SetVrSteeringWheel(g_vrSteeringWheel);
+        RuntimeConfigFile::SetVrNativeSteeringWheel(g_vrNativeSteeringWheel);
         g_vrFirstPersonUnitsPerMeter = RuntimeConfigFile::kVrFirstPersonUnitsPerMeterDefault;
         g_vrFirstPersonHeadUp = RuntimeConfigFile::kVrFirstPersonHeadUpDefault;
         g_vrFirstPersonHeadForward = RuntimeConfigFile::kVrFirstPersonHeadForwardDefault;

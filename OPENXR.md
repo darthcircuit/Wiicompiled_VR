@@ -48,15 +48,23 @@ hud_virtual_screen = true
 stop_at_display_copy = true
 skip_copy_clears = true
 first_person = false
-first_person_units_per_meter = 30.0
-first_person_head_up_meters = 3.0
+first_person_seat = "cockpit"
+cockpit_units_per_meter = 100.0
+first_person_units_per_meter = 50.0
+first_person_head_up_meters = 1.5
 first_person_head_forward_meters = 0.0
 first_person_head_right_meters = 0.0
 first_person_hide_driver = true
 first_person_hidden_model = 0
 first_person_rotation = "yaw"
+steering_wheel = true
+native_steering_wheel = true
+hand_steering = false
 performance_level = "boost"
 ```
+
+The seven `wheel_*` hand-steering tuning keys are described in
+[Steering wheel and hand steering](#steering-wheel-and-hand-steering).
 
 To play this installation on the desktop instead, set `enabled = false`, close the game completely,
 and start it again. These settings are read only at launch. The in-game F10 settings bar also
@@ -203,6 +211,12 @@ Raw IR camera dots in `KPADGetUnifiedWpadStatus` stay invalid; the game reads th
 **Settings in the headset.** Left Y opens the settings panel described below; while it is open the
 controllers operate the panel and the game sees them idle.
 
+**Hand steering.** With `hand_steering` on, in the first-person cockpit, a grip squeezed near the
+steering wheel takes hold of it, and while held the wheel steers through the Nunchuk stick's X axis
+and that grip stops pressing C; see [Steering wheel and hand
+steering](#steering-wheel-and-hand-steering). Turning the wheel moves the controllers, and the game's
+own motion detection still reads them, so a sharp enough turn can read as a shake.
+
 `"gamepad"` keeps the controllers one ordinary gamepad read through PAD as a GameCube controller:
 A/B → South/East, X/Y → West/North, index triggers → trigger axes, grips → shoulders, thumbsticks
 → sticks (clicks → stick buttons), left menu → Start. Every binding in the F10 controller menu
@@ -257,9 +271,23 @@ selection, scrolling and the canvas mapping; `gx_fifo_tests` covers where the pa
 
 By default the headset sits where Mario Kart's own chase camera sits, and `world_units_per_meter`
 of 500 presents the race as a small diorama on a table. Turning on `first_person` moves the camera
-to the local driver's head instead, and switches the world scale to
-`first_person_units_per_meter`, whose default of 30 is what makes the race read life-size from the
-seat. It is a matter of taste rather than a property of the game, so the F10 bar exposes it.
+to the local driver's head instead, at one of two seats:
+
+- `first_person_seat = "cockpit"`, the default, sits you at the driver's own eyes, behind the
+  steering wheel, at a life-size scale, so the wheel or handlebar is within reach of your hands.
+  The eye is measured once per race from the character's head bone, while the kart drives straight,
+  undamaged and at normal size, and then frozen; until then the bind pose, or the vehicle's authored
+  seat height, stands in. It is kept at least 0.45 m behind the wheel so a long face or a
+  leaned-forward riding pose cannot put it over the controls. The world scale is
+  `cockpit_units_per_meter` (default 100) multiplied by the character's eye height over 100 units,
+  so tall characters sit at a comparable height, and by the player's current size, so a lightning
+  strike or a mega mushroom resizes the view, the wheel and the grab reach together. The seat
+  follows the simulation's position and driving direction, never the animated chassis, so damage
+  spins and tricks do not throw it around.
+- `first_person_seat = "custom"` places the head at `first_person_head_up_meters` and its two
+  companions in the kart's own frame, at `first_person_units_per_meter`.
+
+Both are a matter of taste rather than properties of the game, so the F10 bar exposes them.
 
 The kart is selected through the game's local-screen-to-racer mapping, including online races
 where your racer is not slot zero. First person requires a locally controlled racer; spectating
@@ -280,9 +308,11 @@ All three are the same construction from a forward and an up axis, differing onl
 they take: pairing a forward with world up is what removes roll. The headset always adds free look
 on top of whichever is chosen, and only the translation onto the head is common to all three.
 
-The head's place in the kart is `first_person_head_up_meters` and its two companions, measured in
-the kart's own frame; the F10 sliders exist because the comfortable value is a matter of taste and
-is best judged from inside the headset.
+In the cockpit, `"yaw"` takes the kart's own driving direction rather than the chase camera's
+lagging heading, from the level seat frame. With the custom seat, the head's place in the kart is
+`first_person_head_up_meters` and its two companions, measured in the kart's own frame; the F10
+sliders exist because the comfortable value is a matter of taste and is best judged from inside the
+headset.
 
 The mode engages only in a single-screen race, the same content that already qualifies for
 immersive stereo. Menus, split-screen, and the virtual-screen fallback are unaffected, and so is
@@ -306,6 +336,65 @@ One limitation is worth knowing: Mario Kart still culls the scene from its own c
 wide head turn in first person can reveal the edge of what the game decided to draw. As with the
 rest of the race instrumentation, the object offsets this reads are specific to the project's
 supported PAL `RMCP01` translation.
+
+## Steering wheel and hand steering
+
+Ported from [heurazy's mario-kart-wii-VR-port](https://github.com/heurazy/mario-kart-wii-VR-port)
+(GPL-3.0-or-later). It applies to the cockpit seat.
+
+**The wheel turns.** With `steering_wheel = true` (the default) the kart's steering wheel or the
+bike's handlebar turns with your steering: the left stick's deflection at the full-lock angle
+(`wheel_kart_degrees` 90, `wheel_bike_degrees` 45), eased so a flicked stick does not snap it round,
+or the hands' own angle while they hold it. `native_steering_wheel = true` turns the vehicle's own
+model. Karts bake the wheel into the body, so at the race draw boundary the runtime decodes the
+body's MDL0 position arrays, turns only the disc around the authored hand grips on a copy, and hands
+the copy to the GX thread; Aurora substitutes it into the draws that bind that array with the
+player's own model-view matrix (`aurora_set_native_wheel_vertices`), checking each changed vertex's
+matrix slot, so an opponent sharing the asset and other joints of the same draw are untouched. The
+guest's own vertices are never written, and the copies are dropped after the frame's draws. Bikes
+turn their handle part in the game already; its copy is only re-seated on the level cockpit frame so
+the bars stay with your hands while the bike banks. If no draw takes the copy for 30 frames the log
+says so and the vehicle falls back to a separate VR wheel, which is also what
+`native_steering_wheel = false` draws.
+
+The copy is matched against the race camera's view (`RaceCamera::GetViewMtx` with no dolly offset),
+because the scene camera is only set once the draws run. The log reports, once a second, how far
+that view is from the scene camera at the seal (`[mkw-vr] cockpit: race camera view vs scene view`)
+and how many draws took the copy; the F10 bar shows the same under the steering-wheel settings.
+
+**Hand steering.** `hand_steering = true` (off by default; also in WheelWizard's OpenXR VR settings)
+lets you take hold of the wheel or handlebar with the tracked controllers. Squeeze a grip near it:
+past 55 % squeeze, within `wheel_grab_distance` metres of its plane (default 0.35) and near the rim,
+or near a bar end, scaled by `wheel_grab_assist`. Once taken, only letting go of the grip releases
+it. One hand steers by its angle around the hub; two hands steer by the line between them, so leaning
+or moving both arms together does not steer, and a hand joining, leaving or crossing the hub keeps
+the steering where it was. Turning past full lock is kept, so retracing the gesture returns to the
+same centre, while the game's steering saturates at full lock. `wheel_response` scales how quickly
+the wheel follows, `wheel_tracking_grace` (seconds) how long a hand that loses tracking keeps hold,
+and `wheel_haptics` gives a short pulse on grab and release.
+
+While the wheel is held it replaces the left stick's X axis, in both the Wii Remote and the gamepad
+presentation, and the game keeps its own steering curve. The stick's Y axis still aims items, and a
+holding grip no longer reaches the game (it would press C on the Nunchuk or a shoulder on the
+gamepad); the triggers, A and the right stick are unchanged. Releasing both grips gives steering back
+to the stick. The settings panel withholds the wheel like any other input.
+
+**Hands and the separate wheel.** Hands are drawn while hand steering is on: the runtime's own hand
+mesh where it offers one (`XR_EXT_hand_tracking` and `XR_FB_hand_tracking_mesh`, requested only when
+hand steering is on at launch), otherwise procedural gloves that curl with the squeeze. They and the
+separate VR wheel or handlebar travel with the stereo packet in metres in the seated frame, and each
+eye draws them inside the scene's pass just before the first 2D-layer draw, depth-tested with the
+world's own depth mapping, so the kart and the track hide them and the HUD cannot
+(`aurora-main/lib/gfx/cockpit.hpp`). The anchor also carries the frame's exact world scale
+(`aurora_set_stereo_scene_anchor_scaled`), and Aurora rescales each eye's head translation to it, so
+a scale change between the XR packet and the frame cannot misplace the hands.
+
+The guest offsets involved (driver, movement, damage, grip frames, bike handle, driver bones and
+their world matrices) are PAL `RMCP01` constants listed with the leaf getter or constructor that
+proves each in `runtime/src/vr/mkw_vr_first_person.cpp`. `mkw_steering_wheel_tests`,
+`mkw_vr_cockpit_tests` and `mkw_vr_hand_steering_tests` cover the grab model, the seat and wheel
+geometry and the hand-off to the game; `gx_fifo_tests` covers the per-draw substitution and the
+overlay geometry, and `cockpit_gpu_smoke` its depth test on a real GPU.
 
 ## Presentation policy
 
@@ -614,6 +703,9 @@ ends, including mid-frame flushes, so live setting changes cannot invalidate pen
   Lifecycle events and performance (about 43 game FPS) are still open. Apple visionOS packaging
   is not implemented.
 - Scene-specific comfort options, culling fixes and replay/spectator classification are future work.
+- The cockpit seat, the turning wheel and hand steering have not yet been validated in a headset on
+  this build: the native wheel's match against the race camera's view, bikes and Quacker, and the
+  Quest. Hand steering needs analog grips (Touch); the simple controller profile cannot grab.
 - The headset settings panel is drawn into the eye images rather than submitted as its own quad
   layer, so its text is resampled once more than a compositor layer's would be. It has no laser
   beam, only the cursor on the panel itself, and text fields cannot be typed into without a keyboard.
