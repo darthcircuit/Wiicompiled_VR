@@ -71,6 +71,23 @@ The runtime's Riivolution patch handling is a port of Dolphin's
 (both marked `SPDX-License-Identifier: GPL-2.0-or-later`).
 Source: <https://github.com/dolphin-emu/dolphin>
 
+### heurazy's mario-kart-wii-VR-port - GPL-3.0-or-later
+
+- Source: <https://github.com/heurazy/mario-kart-wii-VR-port>
+- Author: heurazy
+- License: GNU General Public License v3.0 or later, the same license as WiiCompiled.
+
+The VR cockpit's steering wheel and hand steering are ported from this project: the grab-and-turn
+model (`runtime/include/vr/steering_wheel.h`), the native wheel vertex rotation
+(`runtime/include/vr/native_wheel_mesh.h`), the level seat (`runtime/include/vr/cockpit_stabilizer.h`),
+the runtime hand-mesh loader (`runtime/include/vr/openxr_hand_mesh.h`), the per-draw substitution
+(`aurora-main/include/aurora/native_wheel_match.hpp`, `aurora-main/lib/gx/native_wheel.hpp`), the
+cockpit overlay renderer (`aurora-main/lib/gfx/cockpit.hpp`), their tests, and the seat, eye and
+wheel geometry and guest reads in `runtime/src/vr/mkw_vr_first_person.cpp` and
+`runtime/include/vr/mkw_vr_first_person.h`. The USB wheel and pedal support is ported from it too
+(`runtime/include/physical_wheel.h`, `runtime/src/physical_wheel.cpp` and their test). The files
+carry that attribution in their headers.
+
 ### pugixml - MIT
 
 Copyright (c) 2006-2025 Arseny Kapoulkine.
@@ -241,6 +258,12 @@ Not code, but the documentation this project depends on:
 - [Retro Rewind](https://wiki.tockdom.com/wiki/Retro_Rewind) by ZPL - the mod distribution this
   project can build as a static profile. No Retro Rewind content is redistributed here; users
   supply their own copy.
+- The references heurazy's mario-kart-wii-VR-port credits for the cockpit, none of whose source is
+  compiled into this repository:
+  [AnimalCrossing-VR-MR-Standalone](https://github.com/heurazy/AnimalCrossing-VR-MR-Standalone)
+  (OpenXR hand meshes), [Cyberpunk VR port](https://github.com/dariulone/cyberpunk-vr-port)
+  (squeeze-to-grab steering) and [Pulsar](https://github.com/MelgMKW/Pulsar) (Mario Kart Wii class
+  layouts).
 
 ---
 

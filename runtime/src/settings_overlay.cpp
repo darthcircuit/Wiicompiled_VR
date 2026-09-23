@@ -3,12 +3,15 @@
 #include "aurora_events.h"
 #include "controller_button_names.h"
 #include "controller_mapping_wizard.h"
+#include "gx_native_wheel.h"
 #include "input_bindings.h"
 #include "game_graphics_options.h"
 #include "log_export.h"
+#include "physical_wheel.h"
 #include "music_attenuation.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
+#include "vr/camera_toggle.h"
 #include "vr/mkw_vr_first_person.h"
 #include "vr/mkw_vr_policy.h"
 #include "vr/openxr_diagnostics.h"
@@ -31,6 +34,7 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <unordered_map>
 #include <cctype>
 #include <cfloat>
 #include <charconv>
@@ -130,15 +134,32 @@ int g_displayMode = [] {
 }();
 bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
 bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
-bool g_showFps = RuntimeConfigFile::ShowFps(true);
+bool g_showFps = RuntimeConfigFile::ShowFps();
 // The same default the VR path itself takes (kVrEnabledDefault), so the F10 switch
 // shows what an unconfigured installation actually starts in.
 bool g_vrEnabled = RuntimeConfigFile::VrEnabled(true);
 bool g_vrStopAtDisplayCopy = RuntimeConfigFile::VrStopAtDisplayCopy(true);
 bool g_vrSkipCopyClears = RuntimeConfigFile::VrSkipCopyClears(true);
 bool g_vrHudVirtualScreen = RuntimeConfigFile::VrHudVirtualScreen(true);
+bool g_vrFlatScreen = RuntimeConfigFile::VrFlatScreen();
+#if defined(__ANDROID__)
+bool g_vrPassthrough = RuntimeConfigFile::VrPassthrough();
+#endif
 bool g_vrFirstPerson = RuntimeConfigFile::VrFirstPerson(false);
+bool g_vrFirstPersonToggleClick = RuntimeConfigFile::VrFirstPersonToggleClick();
+// Set from any thread by the right-thumbstick click, applied on the game thread.
+std::atomic<bool> g_firstPersonToggleRequested{false};
+// Per physical gamepad; the VR controllers keep theirs on the XR side.
+std::unordered_map<SDL_JoystickID, mkw::vr::ClickToggle> g_gamepadFirstPersonClicks;
 float g_vrFirstPersonUnitsPerMeter = RuntimeConfigFile::VrFirstPersonUnitsPerMeter();
+// 0 = cockpit, 1 = custom, matching kVrFirstPersonSeatNames.
+constexpr std::array<const char*, 2> kVrFirstPersonSeatNames{"cockpit", "custom"};
+int g_vrFirstPersonSeat = RuntimeConfigFile::VrFirstPersonSeat() == "custom" ? 1 : 0;
+float g_vrCockpitUnitsPerMeter = RuntimeConfigFile::VrCockpitUnitsPerMeter();
+bool g_vrSteeringWheel = RuntimeConfigFile::VrSteeringWheel();
+bool g_vrNativeSteeringWheel = RuntimeConfigFile::VrNativeSteeringWheel();
+bool g_vrHandSteering = RuntimeConfigFile::VrHandSteering();
+mkw::vr::WheelTuning g_vrWheelTuning = RuntimeConfigFile::VrWheelTuning();
 float g_vrFirstPersonHeadUp = RuntimeConfigFile::VrFirstPersonHeadUpMeters();
 float g_vrFirstPersonHeadForward = RuntimeConfigFile::VrFirstPersonHeadForwardMeters();
 float g_vrFirstPersonHeadRight = RuntimeConfigFile::VrFirstPersonHeadRightMeters();
@@ -187,15 +208,15 @@ int g_vrControllerMode = [] {
     return 0;
 }();
 constexpr std::array<const char*, 3> kVrFirstPersonRotationNames{"yaw", "yaw_pitch", "full"};
-int g_vrFirstPersonRotation = [] {
-    const std::string mode = RuntimeConfigFile::VrFirstPersonRotation();
+int VrFirstPersonRotationIndex(std::string_view mode) {
     for (size_t i = 0; i < kVrFirstPersonRotationNames.size(); ++i) {
         if (mode == kVrFirstPersonRotationNames[i]) {
             return static_cast<int>(i);
         }
     }
     return 0;
-}();
+}
+int g_vrFirstPersonRotation = VrFirstPersonRotationIndex(RuntimeConfigFile::VrFirstPersonRotation());
 // SDL_SCANCODE_UNKNOWN means unbound, which is also what an unrecognised
 // name in the config file resolves to rather than silently picking a key.
 SDL_Scancode g_vrRecenterScancode = [] {
@@ -834,6 +855,10 @@ void DrawRumbleSettings() {
 }
 
 void DrawControllerSettings() {
+    if (ImGui::CollapsingHeader("USB wheel and pedals (player 1)")) {
+        physical_wheel::DrawSettings();
+        ImGui::Separator();
+    }
     for (int port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
         const std::string label = "Port " + std::to_string(port + 1);
         ImGui::RadioButton(label.c_str(), &g_controllerPort, port);
@@ -1113,6 +1138,82 @@ void ApplyVrHudVirtualScreen() {
                                  RuntimeConfigFile::VrHudDistanceMeters(2.0f) * unitsPerMeter);
 }
 
+// The cockpit's steering wheel and hand steering, under the first-person camera.
+void DrawVrSteeringWheelSettings() {
+    ImGui::Separator();
+    ImGui::Text("Steering wheel");
+    ImGui::BeginDisabled(g_vrFirstPersonSeat != 0);
+    if (ImGui::Checkbox("Turn the steering wheel", &g_vrSteeringWheel)) {
+        RuntimeConfigFile::SetVrSteeringWheel(g_vrSteeringWheel);
+        mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("In the cockpit, the kart's steering wheel or the bike's handlebar turns "
+                          "with your steering.");
+    }
+    ImGui::BeginDisabled(!g_vrSteeringWheel);
+    if (ImGui::Checkbox("Use the vehicle's own wheel", &g_vrNativeSteeringWheel)) {
+        RuntimeConfigFile::SetVrNativeSteeringWheel(g_vrNativeSteeringWheel);
+        mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Turns the wheel or handlebar of the vehicle's own model. Off draws a "
+                          "separate VR wheel instead, which is also what appears when a vehicle's "
+                          "own wheel cannot be animated.");
+    }
+    ImGui::EndDisabled();
+    if (ImGui::Checkbox("Hand steering (by heurazy)", &g_vrHandSteering)) {
+        RuntimeConfigFile::SetVrHandSteering(g_vrHandSteering);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Squeeze a grip near the wheel or handlebar to take hold of it, and turn "
+                          "it to steer, with one hand or both. Releasing both grips gives steering "
+                          "back to the stick, which still aims items. The runtime's hand mesh is "
+                          "used when hand steering was on at launch.");
+    }
+    if (g_vrHandSteering && ImGui::TreeNode("Hand steering tuning")) {
+        bool changed = false;
+        changed |= ImGui::SliderFloat("Kart full lock (degrees)", &g_vrWheelTuning.kartDegrees,
+                                      RuntimeConfigFile::kVrWheelDegreesMin,
+                                      RuntimeConfigFile::kVrWheelDegreesMax, "%.0f");
+        changed |= ImGui::SliderFloat("Bike full lock (degrees)", &g_vrWheelTuning.bikeDegrees,
+                                      RuntimeConfigFile::kVrWheelDegreesMin,
+                                      RuntimeConfigFile::kVrWheelDegreesMax, "%.0f");
+        changed |= ImGui::SliderFloat("Grab reach (m)", &g_vrWheelTuning.grabDistance,
+                                      RuntimeConfigFile::kVrWheelGrabDistanceMin,
+                                      RuntimeConfigFile::kVrWheelGrabDistanceMax, "%.2f");
+        changed |= ImGui::SliderFloat("Grab assist", &g_vrWheelTuning.grabAssist,
+                                      RuntimeConfigFile::kVrWheelGrabAssistMin,
+                                      RuntimeConfigFile::kVrWheelGrabAssistMax, "%.2f");
+        changed |= ImGui::SliderFloat("Response", &g_vrWheelTuning.response,
+                                      RuntimeConfigFile::kVrWheelResponseMin,
+                                      RuntimeConfigFile::kVrWheelResponseMax, "%.2f");
+        changed |= ImGui::SliderFloat("Tracking-loss grace (s)", &g_vrWheelTuning.trackingGrace,
+                                      RuntimeConfigFile::kVrWheelTrackingGraceMin,
+                                      RuntimeConfigFile::kVrWheelTrackingGraceMax, "%.2f");
+        changed |= ImGui::Checkbox("Grab and release pulse", &g_vrWheelTuning.haptics);
+        if (ImGui::Button("Reset hand steering tuning")) {
+            g_vrWheelTuning = {};
+            changed = true;
+        }
+        if (changed) {
+            RuntimeConfigFile::SetVrWheelTuning(g_vrWheelTuning);
+        }
+        ImGui::TreePop();
+    }
+    ImGui::EndDisabled();
+    // What the cockpit found, for a report when the wheel does not behave.
+    const auto anchor = mkw::vr::MkwVRFirstPersonGetAnchor();
+    if (anchor.valid && anchor.cockpit) {
+        ImGui::TextDisabled("Cockpit: %s, %s, %.0f units/m, animated draws %u",
+                            anchor.bike ? "handlebar" : "wheel",
+                            !anchor.native_wheel.valid ? "grips not found"
+                            : anchor.native_mesh_prepared ? "vehicle's own"
+                                                          : "VR wheel",
+                            anchor.units_per_meter, GxNativeWheel::LastDrawCount());
+    }
+}
+
 void DrawGraphicsSettings() {
     g_displayMode = static_cast<int>(aurora_get_display_mode());
     struct EffectFlag {
@@ -1254,8 +1355,9 @@ void DrawVrSettings() {
         ImGui::SetTooltip(
             "Wii Remote + Nunchuk: the right controller is a Wii Remote, with motion and a pointer "
             "that lands where you aim on the virtual screen; the left one is the Nunchuk.\n"
-            "  Right: A = A, trigger = B, stick up/down = 1/2\n"
-            "  Left: stick = Nunchuk stick, trigger = Z, grip = C, X = -, menu = +, Y = settings panel\n"
+            "  Right: A = A, trigger = B, B = C (look behind), stick up/down = 1/2\n"
+            "  Left: stick = Nunchuk stick, trigger = Z, X = -, menu = +, Y = settings panel\n"
+            "  The grips press nothing; they take hold of the wheel with hand steering.\n"
             "Gamepad: both controllers are one ordinary controller, read as a GameCube pad.\n"
             "Applies immediately; the game sees the controller change as a reconnection.");
     }
@@ -1324,11 +1426,13 @@ void DrawVrSettings() {
     ImGui::PopTextWrapPos();
     ImGui::Separator();
     ImGui::Text("VR 2D layer");
+    ImGui::BeginDisabled(g_vrFlatScreen);
     if (ImGui::Checkbox("2D layer on a virtual screen", &g_vrHudVirtualScreen)) {
         ApplyVrHudVirtualScreen();
         RuntimeConfigFile::SetVrHudVirtualScreen(g_vrHudVirtualScreen);
     }
-    if (ImGui::IsItemHovered()) {
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip(
             "Puts the minimap, race position, item roulette and the rest of the race HUD on a "
             "screen fixed ahead of the kart camera. Turn off to leave them stretched across "
@@ -1367,13 +1471,15 @@ void DrawVrSettings() {
             ImGui::SetTooltip("Click to rebind. Esc cancels, Backspace unbinds.");
         }
     }
+    ImGui::BeginDisabled(g_vrFlatScreen);
     if (ImGui::SliderFloat("Lean back angle (deg)", &g_vrLeanBackDegrees,
                            -RuntimeConfigFile::kVrLeanBackDegreesLimit,
                            RuntimeConfigFile::kVrLeanBackDegreesLimit, "%.1f")) {
         mkw::vr::OpenXRSetLeanBackDegrees(g_vrLeanBackDegrees);
         RuntimeConfigFile::SetVrLeanBackDegrees(g_vrLeanBackDegrees);
     }
-    if (ImGui::IsItemHovered()) {
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip(
             "Tilts the game camera back with you when you play reclined, so set it to "
             "roughly how far back your seat is and the track comes back in front of you "
@@ -1381,21 +1487,79 @@ void DrawVrSettings() {
             "does pitch the view, and looking sideways while it is set will roll the "
             "horizon the way a real recline would.");
     }
+#if defined(__ANDROID__)
+    if (ImGui::Checkbox("Passthrough around the menu screen", &g_vrPassthrough)) {
+        mkw::vr::OpenXRSetPassthrough(g_vrPassthrough);
+        RuntimeConfigFile::SetVrPassthrough(g_vrPassthrough);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Shows your room through the headset's cameras around the menu screen and every "
+            "other screen outside an immersive race, instead of black. Immersive races stay "
+            "fully virtual; the Flat Screen race has the room around it too. "
+            "Applies immediately.");
+    }
+#endif
     ImGui::Separator();
     ImGui::Text("VR camera");
+    if (ImGui::Checkbox("Flat Screen mode", &g_vrFlatScreen)) {
+        RuntimeConfigFile::SetVrFlatScreen(g_vrFlatScreen);
+        mkw::vr::MkwVRPolicySetImmersiveRaces(!g_vrFlatScreen);
+        mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Plays races on the same flat screen as the menus, through the game's own camera, "
+            "instead of all around you in stereo. The first-person camera, hand steering and "
+            "the race view settings do not apply while it is on. Applies immediately.");
+    }
+    // Everything below shapes the immersive race view, which Flat Screen mode replaces.
+    ImGui::BeginDisabled(g_vrFlatScreen);
     if (ImGui::Checkbox("First-person camera", &g_vrFirstPerson)) {
         RuntimeConfigFile::SetVrFirstPerson(g_vrFirstPerson);
         mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
     }
     if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Also toggled by clicking the right thumbstick, on the VR controllers or on a gamepad.");
+    }
+    if (ImGui::Checkbox("Right thumbstick click toggles it", &g_vrFirstPersonToggleClick)) {
+        RuntimeConfigFile::SetVrFirstPersonToggleClick(g_vrFirstPersonToggleClick);
+    }
+    if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
             "Moves the camera to the Player 1 driver's head and keeps the horizon level, "
             "instead of riding behind the kart. Applies during a single-screen race; menus "
-            "and split-screen are unaffected. The world scale below replaces "
-            "world_units_per_meter while it is engaged.");
+            "and split-screen are unaffected.");
+    }
+    constexpr std::array<const char*, 2> kSeatLabels{"Cockpit", "Custom"};
+    if (ImGui::Combo("Seat", &g_vrFirstPersonSeat, kSeatLabels.data(), static_cast<int>(kSeatLabels.size()))) {
+        RuntimeConfigFile::SetVrFirstPersonSeat(kVrFirstPersonSeatNames[static_cast<size_t>(g_vrFirstPersonSeat)]);
+        mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+        ApplyVrHudVirtualScreen();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Cockpit sits you at the driver's own eyes, behind the steering wheel, at a "
+            "life-size scale that allows for the character's height, so the wheel is within "
+            "reach. Custom places the head by the world scale and offsets below instead.");
+    }
+    if (g_vrFirstPersonSeat == 0) {
+        if (ImGui::SliderFloat("Cockpit scale (units per metre)", &g_vrCockpitUnitsPerMeter,
+                               RuntimeConfigFile::kVrCockpitUnitsPerMeterMin,
+                               RuntimeConfigFile::kVrCockpitUnitsPerMeterMax, "%.0f")) {
+            RuntimeConfigFile::SetVrCockpitUnitsPerMeter(g_vrCockpitUnitsPerMeter);
+            mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+            ApplyVrHudVirtualScreen();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "100 reads life-size for an average-height driver; taller characters raise it "
+                "further on their own. Raising it shrinks the world around you.");
+        }
     }
     // These are the tuning loop for the anchor: the right head height is a
     // per-taste value that can only really be judged from inside the headset.
+    ImGui::BeginDisabled(g_vrFirstPersonSeat == 0);
     if (ImGui::SliderFloat("World units per metre (first person)", &g_vrFirstPersonUnitsPerMeter,
                            1.0f, 200.0f, "%.1f")) {
         RuntimeConfigFile::SetVrFirstPersonUnitsPerMeter(g_vrFirstPersonUnitsPerMeter);
@@ -1422,8 +1586,9 @@ void DrawVrSettings() {
         mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
     }
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + Scaled(380.0f));
-    ImGui::TextDisabled("Where the head sits in the kart's own frame.");
+    ImGui::TextDisabled("Custom seat: where the head sits in the kart's own frame.");
     ImGui::PopTextWrapPos();
+    ImGui::EndDisabled();
     constexpr std::array<const char*, 3> kRotationLabels{"Yaw only", "Yaw + Pitch", "Full rotation"};
     if (ImGui::Combo("View rotation", &g_vrFirstPersonRotation, kRotationLabels.data(),
                      static_cast<int>(kRotationLabels.size()))) {
@@ -1466,15 +1631,27 @@ void DrawVrSettings() {
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Removes the vehicle as well, leaving nothing of your own kart.");
     }
+    DrawVrSteeringWheelSettings();
     ImGui::Separator();
     if (ImGui::Button("Reset first-person defaults")) {
+        g_vrFirstPersonSeat = 0;
+        g_vrCockpitUnitsPerMeter = RuntimeConfigFile::kVrCockpitUnitsPerMeterDefault;
+        g_vrSteeringWheel = RuntimeConfigFile::kVrSteeringWheelDefault;
+        g_vrNativeSteeringWheel = RuntimeConfigFile::kVrNativeSteeringWheelDefault;
+        g_vrHandSteering = RuntimeConfigFile::kVrHandSteeringDefault;
+        RuntimeConfigFile::SetVrFirstPersonSeat(RuntimeConfigFile::kVrFirstPersonSeatDefault);
+        RuntimeConfigFile::SetVrCockpitUnitsPerMeter(g_vrCockpitUnitsPerMeter);
+        RuntimeConfigFile::SetVrSteeringWheel(g_vrSteeringWheel);
+        RuntimeConfigFile::SetVrNativeSteeringWheel(g_vrNativeSteeringWheel);
+        RuntimeConfigFile::SetVrHandSteering(g_vrHandSteering);
         g_vrFirstPersonUnitsPerMeter = RuntimeConfigFile::kVrFirstPersonUnitsPerMeterDefault;
         g_vrFirstPersonHeadUp = RuntimeConfigFile::kVrFirstPersonHeadUpDefault;
         g_vrFirstPersonHeadForward = RuntimeConfigFile::kVrFirstPersonHeadForwardDefault;
         g_vrFirstPersonHeadRight = RuntimeConfigFile::kVrFirstPersonHeadRightDefault;
         g_vrFirstPersonHideDriver = RuntimeConfigFile::kVrFirstPersonHideDriverDefault;
         g_vrFirstPersonHiddenModel = RuntimeConfigFile::kVrFirstPersonHiddenModelDefault;
-        g_vrFirstPersonRotation = 0;
+        g_vrFirstPersonRotation =
+            VrFirstPersonRotationIndex(RuntimeConfigFile::kVrFirstPersonRotationDefault);
         RuntimeConfigFile::SetVrFirstPersonRotation(
             RuntimeConfigFile::kVrFirstPersonRotationDefault);
         RuntimeConfigFile::SetVrFirstPersonUnitsPerMeter(g_vrFirstPersonUnitsPerMeter);
@@ -1485,6 +1662,69 @@ void DrawVrSettings() {
         RuntimeConfigFile::SetVrFirstPersonHiddenModel(g_vrFirstPersonHiddenModel);
         mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
         ApplyVrHudVirtualScreen();
+    }
+    ImGui::EndDisabled();
+}
+
+// The right-thumbstick click: flips the first-person camera exactly as its
+// checkbox does, so it does nothing in Flat Screen mode either. Game thread.
+void ToggleFirstPersonCamera() {
+    if (g_vrFlatScreen) {
+        return;
+    }
+    g_vrFirstPerson = !g_vrFirstPerson;
+    RuntimeConfigFile::SetVrFirstPerson(g_vrFirstPerson);
+    mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+    RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] first-person camera " << (g_vrFirstPerson ? "on" : "off")
+                           << " (right thumbstick click)" << std::endl;
+}
+
+// A gamepad whose right thumbstick click reaches the game (bound to a
+// GameCube control on its port) keeps it; toggling the camera as well would
+// fire both.
+bool RightStickDrivesGame(SDL_Gamepad* gamepad) {
+    if (gamepad == nullptr) {
+        return false;
+    }
+    for (uint32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
+        const s32 index = PADGetIndexForPort(port);
+        if (index < 0 || PADGetSDLGamepadForIndex(static_cast<u32>(index)) != gamepad) {
+            continue;
+        }
+        for (auto* mappings : {&PADGetButtonMappings, &PADGetAltButtonMappings}) {
+            u32 count = 0;
+            const PADButtonMapping* list = (*mappings)(port, &count);
+            for (u32 i = 0; list != nullptr && i < count; ++i) {
+                if (list[i].nativeButton == SDL_GAMEPAD_BUTTON_RIGHT_STICK) {
+                    return true;
+                }
+            }
+        }
+        for (size_t control = 0; control < InputBindings::kControls.size(); ++control) {
+            const std::string expression = InputBindings::GetExpression(port, control);
+            if (expression.find("Thumb R") != std::string::npos || expression.find("Button 11") != std::string::npos) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// A physical gamepad's right-thumbstick click, while VR runs.
+void HandleGamepadFirstPersonClick(const SDL_GamepadButtonEvent& event) {
+    const bool right = event.button == SDL_GAMEPAD_BUTTON_RIGHT_STICK;
+    const bool left = event.button == SDL_GAMEPAD_BUTTON_LEFT_STICK;
+    if ((!right && !left) || mkw::vr::OpenXRIsControllerGamepad(event.which)) {
+        return;
+    }
+    SDL_Gamepad* gamepad = SDL_GetGamepadFromID(event.which);
+    auto& click = g_gamepadFirstPersonClicks[event.which];
+    const bool held = right ? event.down : click.Held();
+    const bool partner = left ? event.down : gamepad != nullptr && SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_LEFT_STICK);
+    const bool blocked = g_rebind.active || InputBindings::InputBlocked();
+    if (click.Update(held, partner, blocked) && g_vrFirstPersonToggleClick && mkw::vr::OpenXRIsRunning() &&
+        !RightStickDrivesGame(gamepad)) {
+        ToggleFirstPersonCamera();
     }
 }
 
@@ -1875,6 +2115,12 @@ bool IsMouseActivity(const SDL_Event& event) {
 // Runs on the thread that pumps SDL events (the same one that calls Draw), so
 // the SDL cursor calls are safe here.
 void UpdateCursorAutoHide() {
+#if defined(__ANDROID__)
+    // No pointer icon to manage on a headset, and SDL changes it through Java,
+    // which ART aborts on from a guest fiber's stack: Draw runs on whichever
+    // guest thread advances the retrace. InitializeRuntimeSettings keeps
+    // ImGui's SDL backend off the cursor for the same reason.
+#else
     const bool shouldHide =
         !g_topBarVisible && Clock::now() - g_lastMouseActivity >= kCursorAutoHideDelay;
     if (shouldHide == g_cursorHidden) {
@@ -1889,6 +2135,7 @@ void UpdateCursorAutoHide() {
         ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
         SDL_ShowCursor();
     }
+#endif
 }
 
 // Alt+Enter toggles the display mode inside aurora without going through the
@@ -2045,6 +2292,11 @@ void DrawVrSettingsPanel() {
 } // namespace
 
 void InitializeRuntimeSettings() noexcept {
+#if defined(__ANDROID__)
+    // ImGui_ImplSDL3_NewFrame would otherwise call SDL_SetCursor/SDL_HideCursor
+    // (Java on Android) from the guest fiber that starts the next host frame.
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+#endif
     PAD_HLE_SetRumbleEnabled(g_rumbleEnabled);
     InputBindings::Reload();
     controller_mapping_wizard::LoadPersistedMappings();
@@ -2079,6 +2331,8 @@ void InitializeRuntimeSettings() noexcept {
 
 void RefreshVrHudVirtualScreen() noexcept { ApplyVrHudVirtualScreen(); }
 
+void RequestFirstPersonToggle() noexcept { g_firstPersonToggleRequested.store(true, std::memory_order_release); }
+
 void HandleEvents(const AuroraEvent* events) noexcept {
     if (!events) {
         return;
@@ -2098,6 +2352,9 @@ void HandleEvents(const AuroraEvent* events) noexcept {
                                 IsToggleKey(ev->sdl, SDL_SCANCODE_DELETE))) {
             CompleteRebind(g_rebind.kind == RebindKind::Controller ? PAD_NATIVE_BUTTON_DISABLED
                                                                   : static_cast<uint32_t>(PAD_KEY_INVALID));
+        }
+        if (ev->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || ev->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+            HandleGamepadFirstPersonClick(ev->sdl.gbutton);
         }
         if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_F10)) {
             SetTopBarVisible(!g_topBarVisible);
@@ -2143,9 +2400,9 @@ void ReleaseControllers() noexcept {
 }
 
 void Draw() noexcept {
-    // Wait for the frame worker's DONE phase: it has replayed the previous frame's ImGui draw lists
-    // and started the next ImGui frame, so all overlay callers can now safely issue ImGui commands.
-    aurora_wait_for_frame_worker();
+    // The overlay draws into the game thread's own ImGui frame
+    // (aurora_imgui_host_frame_begin); the worker replays a copy of the draw
+    // data, so there is nothing to wait for here.
     // Explain fallback without interrupting gameplay or capturing input.
     static std::string shownXrError;
     static double xrNoticeUntil = 0.0;
@@ -2174,6 +2431,12 @@ void Draw() noexcept {
     // its "communications interrupted" prompt without polling pads). Same guest
     // thread as PADRead, so no concurrent access to the scanner's state.
     WiiRemoteInput::Poll();
+    // Likewise for the VR controllers' gamepad, so it keeps being written even
+    // while the game is not reading pads.
+    mkw::vr::OpenXRApplyControllerState();
+    if (g_firstPersonToggleRequested.exchange(false, std::memory_order_acq_rel)) {
+        ToggleFirstPersonCamera();
+    }
     ApplyConfiguredMappings();
     PersistDisplayModeIfChanged();
     UpdateCursorAutoHide();

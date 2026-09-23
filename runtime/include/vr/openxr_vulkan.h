@@ -58,12 +58,29 @@ public:
     bool RepeatFrame(const OpenXRBackendFrame& frame);
     bool FinishFrame(OpenXRBackendFrame& frame, bool submit_layer);
 
+    // Render-first pacing, used while VR interpolation is off. A packet is prepared with the
+    // views located for an estimated display time and handed to Aurora without a compositor
+    // frame open; once Aurora has rendered the eyes into the shared buffers, the compositor frame
+    // is begun, the eyes are copied into its swapchain images and it is ended at once. A headset
+    // frame therefore never waits for a game frame: it stays open for the copy alone.
+    OpenXRBeginStatus PreparePacket(const OpenXRPresentation& presentation, OpenXRBackendFrame& packet);
+    bool TryCancelPendingPacket(OpenXRBackendFrame& packet);
+    OpenXRBeginStatus BeginFrameForPacket(const OpenXRBackendFrame& packet, OpenXRBackendFrame& frame);
+    OpenXRSubmissionStatus CopyRenderedEyes(const OpenXRBackendFrame& frame);
+    // One compositor cycle that resubmits the retained layer (or nothing), with no frame left
+    // active: keeps the runtime fed while the eyes are still being rendered and learns the
+    // display timing the next packet is located for.
+    OpenXRBeginStatus KeepAliveCycle();
+
     // Drains this backend's own queue before tearing down. Returns false only
     // when the private device could not be waited on, in which case the caller
     // retains the backend and runtime for the process lifetime.
     bool Shutdown();
 
     bool IsBound() const;
+    // False once the settings panel's own layer could not be set up; the panel
+    // is then drawn into the eyes again.
+    bool PanelLayerAvailable() const;
     const OpenXRVulkanGraphicsRequirements& GraphicsRequirements() const;
     int64_t SwapchainFormat() const;
     const std::string& LastError() const;

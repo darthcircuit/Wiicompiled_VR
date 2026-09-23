@@ -34,6 +34,13 @@ void OpenXRShutdownBeforeAurora() noexcept;
 void OpenXRServiceProducerFrameBoundary() noexcept;
 
 bool OpenXRIsRunning() noexcept;
+
+// Writes the controllers the pacing thread last published to the virtual
+// gamepad. Call it from the thread that polls controllers, wherever the game
+// is about to read them: the pacing thread deliberately leaves SDL alone, since
+// SDL's joystick lock is held for the length of a device enumeration and an
+// OpenXR frame may not wait that long. Cheap and safe to call when VR is off.
+void OpenXRApplyControllerState() noexcept;
 std::string OpenXRLastError();
 
 // Recenters on where the player is sitting now: it moves the immersive race
@@ -52,6 +59,12 @@ void OpenXRRequestRecenter() noexcept;
 // Applies to the immersive race view only; callable from any thread and read
 // once per published frame.
 void OpenXRSetLeanBackDegrees(float degrees) noexcept;
+
+// Shows the room through the headset's cameras around the menu screen and every
+// other virtual screen, never during an immersive race. Only the standalone
+// (Quest) backend offers it; elsewhere this changes nothing. Callable from any
+// thread; applied on the XR pacing thread's next frame.
+void OpenXRSetPassthrough(bool enabled) noexcept;
 
 // Live scene interpolation at the headset's own display deadlines.
 // 0 = Off, 1 = Auto, otherwise 72/90/120 as a rendering-rate ceiling.

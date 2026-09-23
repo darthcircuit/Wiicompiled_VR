@@ -11,6 +11,7 @@
 #include "tracy/Tracy.hpp"
 
 #include <array>
+#include <atomic>
 #include <cmath>
 
 namespace aurora::stereo_overlay {
@@ -74,8 +75,12 @@ struct State {
   std::array<wgpu::BindGroup, AURORA_STEREO_EYE_COUNT> bindGroups;
   float widthFraction = 0.f;
   bool visible = false;
+  // Stands in for the panel in a layer while it is not showing.
+  webgpu::TextureWithSampler transparent;
+  bool transparentCleared = false;
 };
 State g_state;
+std::atomic_bool g_layerMode{false};
 
 bool ensure_pipeline() {
   auto& state = g_state;
@@ -239,6 +244,7 @@ void composite(const wgpu::CommandEncoder& encoder, const wgpu::TextureView& tar
       .label = eyeIndex == 0 ? "Headset panel left eye" : "Headset panel right eye",
       .colorAttachmentCount = attachments.size(),
       .colorAttachments = attachments.data(),
+      .timestampWrites = gfx::gpu_timing_pass(gfx::GpuTimingCategory::Panel),
   };
   const auto pass = encoder.BeginRenderPass(&descriptor);
   pass.SetPipeline(state.pipeline);
@@ -294,6 +300,7 @@ wgpu::CommandBuffer prepare(ImDrawData* drawData, float widthFraction) noexcept 
       .label = "Headset panel ImGui pass",
       .colorAttachmentCount = attachments.size(),
       .colorAttachments = attachments.data(),
+      .timestampWrites = gfx::gpu_timing_pass(gfx::GpuTimingCategory::Panel),
   };
   bool drawn = false;
   {
@@ -312,7 +319,7 @@ wgpu::CommandBuffer prepare(ImDrawData* drawData, float widthFraction) noexcept 
 void composite_immersive(const wgpu::CommandEncoder& encoder, const wgpu::TextureView& eye,
                          const Mat4x4<float>& eyeFrustum, const Mat3x4<float>& viewFromCenter,
                          uint32_t eyeIndex) noexcept {
-  if (!g_state.visible) {
+  if (!g_state.visible || layer_mode()) {
     return;
   }
   float screenWidth = 0.f;
@@ -329,13 +336,59 @@ void composite_immersive(const wgpu::CommandEncoder& encoder, const wgpu::Textur
 
 void composite_flat(const wgpu::CommandEncoder& encoder, const wgpu::TextureView& eye, const wgpu::Extent3D& size,
                     uint32_t eyeIndex) noexcept {
-  if (!g_state.visible || size.width == 0 || size.height == 0) {
+  if (!g_state.visible || layer_mode() || size.width == 0 || size.height == 0) {
     return;
   }
   const float imageAspect = static_cast<float>(size.width) / static_cast<float>(size.height);
   composite(encoder, eye,
             gfx::stereo_replay::overlay_panel_flat_projection(g_state.widthFraction, panel_aspect(), imageAspect),
             eyeIndex);
+}
+
+void set_layer_mode(bool enabled) noexcept { g_layerMode.store(enabled, std::memory_order_release); }
+
+bool layer_mode() noexcept { return g_layerMode.load(std::memory_order_acquire); }
+
+bool layer_source(const wgpu::CommandEncoder& encoder, uint32_t width, uint32_t height, stereo::EyeImage& out) noexcept {
+  auto& state = g_state;
+  const auto format = webgpu::g_graphicsConfig.surfaceConfiguration.format;
+  if (width == 0 || height == 0) {
+    return false;
+  }
+  if (state.visible && state.panel.texture && state.panel.size.width == width && state.panel.size.height == height &&
+      state.panel.format == format) {
+    out = {.texture = &state.panel.texture, .view = &state.panel.view, .size = state.panel.size, .format = format};
+    return true;
+  }
+  if (!state.transparent.texture || state.transparent.size.width != width ||
+      state.transparent.size.height != height || state.transparent.format != format) {
+    state.transparent = webgpu::create_render_texture(width, height, false);
+    state.transparentCleared = false;
+    if (state.transparent.size.width != width || state.transparent.size.height != height) {
+      state.transparent = {};
+      return false;
+    }
+  }
+  if (!state.transparentCleared) {
+    const std::array attachments{
+        wgpu::RenderPassColorAttachment{
+            .view = state.transparent.view,
+            .loadOp = wgpu::LoadOp::Clear,
+            .storeOp = wgpu::StoreOp::Store,
+            .clearValue = {.r = 0.0, .g = 0.0, .b = 0.0, .a = 0.0},
+        },
+    };
+    const wgpu::RenderPassDescriptor descriptor{
+        .label = "Headset panel layer clear",
+        .colorAttachmentCount = attachments.size(),
+        .colorAttachments = attachments.data(),
+    };
+    encoder.BeginRenderPass(&descriptor).End();
+    state.transparentCleared = true;
+  }
+  out = {.texture = &state.transparent.texture, .view = &state.transparent.view, .size = state.transparent.size,
+         .format = format};
+  return true;
 }
 
 void shutdown() noexcept { g_state = {}; }

@@ -50,10 +50,13 @@ The graphics layer is built on
 Play at several times the console's resolution.
 
 **Experimental OpenXR VR.**
-Windows builds can render through a D3D12 OpenXR runtime without CPU readback. Menus and
+Windows builds can render through an OpenXR runtime on D3D12, or on Vulkan with a custom Dawn
+build, without CPU readback. Menus and
 unsupported scenes appear as a head-locked virtual screen; a validated single-camera race switches
 to immersive stereo rendering. VR is opt-in and falls back to the normal desktop renderer if the
-runtime or headset is unavailable. See [`OPENXR.md`](OPENXR.md) for setup, configuration, and the
+runtime or headset is unavailable. In first person you sit in the cockpit, where the steering wheel
+or handlebar turns with your steering, and hand steering by heurazy lets you grab it with the
+tracked controllers and turn it. See [`OPENXR.md`](OPENXR.md) for setup, configuration, and the
 current limitations.
 
 **Music ducking.** 
@@ -97,6 +100,38 @@ Known limitations of the Wii Remote path:
 - Turn the Wii Remote support off in that menu if you use a Mayflash DolphinBar, which already
   presents the remote as a regular gamepad.
 
+**USB steering wheels and pedals.**
+Ported from heurazy's [mario-kart-wii-VR-port](https://github.com/heurazy/mario-kart-wii-VR-port).
+Open **F10 > Controllers > USB wheel and pedals (player 1)**; it is also in the headset's settings
+panel. Pick the steering device and axis and record full left, full right and centre, then each
+pedal's released and fully pressed positions. Assign the right paddle to drift and the left paddle to
+items; trick, confirm, pause and back are optional. Any wheel SDL sees as a joystick works this way,
+with no gamepad mapping: separate USB pedals, reversed axes and combined pedal axes (select the same
+axis for both pedals) all calibrate the same. The settings are saved in `PhysicalWheel.toml` beside
+`Config.toml`.
+
+The wheel is player 1's GameCube controller. Press its confirm button at the title screen so the game
+uses a GameCube controller; its D-pad, confirm and back then work the menus. In a race it owns
+steering and the pedals. The brake pedal brakes, then reverses, and beats the accelerator and drift.
+In VR, the cockpit's wheel turns with it and hand steering steps aside. Setting the VR controllers to
+**Gamepad** keeps them for menus, pause and item aiming alongside the wheel. Light vibration is
+optional, off by default, capped at 15 % and follows the game's own rumble. No centering spring or
+steering force is requested.
+
+Logitech wheels (G29, G920, G923, G27, G25, Driving Force GT, PRO Racing Wheel) are recognised by SDL
+as wheels and marked "(wheel)" in the device list. This has not been tried on a physical wheel yet:
+- Install Logitech G HUB (Logitech Gaming Software for a G27 or G25). Without the driver a Logitech
+  wheel starts in a compatibility mode, typically with a smaller rotation range and both pedals on
+  one axis. A G920 or G923 for Xbox also starts as an Xbox controller, which the game would read as
+  an ordinary pad.
+- Set a G29's mode switch to PS3 on PC.
+- Full lock is wherever you record full left and right. Recording them a quarter turn each way
+  (90°) matches the VR cockpit's wheel, or lower the operating range in G HUB.
+- A Driving Force Shifter's gears reach the game as buttons of the wheel and can be assigned like
+  any other. A gear stays pressed while it is engaged: on the item button it keeps the item held
+  behind you until you shift back to neutral. The clutch is not used.
+- Turn on the centering spring in G HUB if you want the wheel to self-centre.
+
 ## Requirements
 
 - Windows 10 or 11, 64-bit
@@ -131,7 +166,8 @@ Saves and Miis use the normal installation's effective NAND; Retro Rewind retain
 XML-directed saves and ghosts. Graphics, VR preferences, caches, and compiled binaries stay separate.
 Uninstalling either backend in WheelWizard VR preserves configuration and shared progress.
 
-Managed VR launches enable OpenXR with D3D12. If the runtime or headset is unavailable, the game
+Managed VR launches enable OpenXR with D3D12; the Vulkan binding is opt-in through
+`video.graphics_api` (see [OPENXR.md](OPENXR.md)). If the runtime or headset is unavailable, the game
 continues on the desktop and displays the failure briefly; **F10 → VR** retains the explanation.
 See [OpenXR configuration](OPENXR.md) and [distribution and validation](DISTRIBUTION.md).
 
@@ -232,6 +268,8 @@ All translated output is verified against real hardware behavior and most import
   aurora's Direct3D, Vulkan and OpenGL backends.
 - **[OpenXR](https://www.khronos.org/openxr/)** - the Khronos cross-platform API used by the
   experimental VR renderer.
+- **heurazy** - the VR cockpit's turning steering wheel and hand steering, ported from
+  **[mario-kart-wii-VR-port](https://github.com/heurazy/mario-kart-wii-VR-port)** (GPL-3.0).
 - **[Dolphin Emulator](https://github.com/dolphin-emu/dolphin)** - an invaluable reference for Wii
   hardware behavior during development, plus the source of the free DSP coefficient ROM and the
   unmodified default WiiConnect24 bootstrap tree bundled with the runtime.

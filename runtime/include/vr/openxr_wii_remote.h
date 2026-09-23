@@ -48,6 +48,9 @@ OpenXRControllerMode OpenXRGetControllerMode() noexcept;
 // Guest side. True when `sdl_joystick_id` is the OpenXR virtual gamepad and the
 // controllers are currently presented as a Wii Remote.
 bool OpenXRWiiRemoteOwnsGamepad(uint32_t sdl_joystick_id) noexcept;
+// True when `sdl_joystick_id` is the VR controllers' virtual gamepad, in either
+// presentation.
+bool OpenXRIsControllerGamepad(uint32_t sdl_joystick_id) noexcept;
 // Latest published sample; false before the first one or after withdrawal.
 bool OpenXRReadWiiRemote(OpenXRWiiRemoteSample& sample) noexcept;
 // WPADControlMotor for the emulated remote.
@@ -339,10 +342,12 @@ struct HandInputs {
 
 // Adapted from DolphinXR's default "OpenXR Wii Remote" profile
 // (Data/Sys/Profiles/Wiimote):
-//   right A -> A, right trigger -> B, right stick up/down -> 1/2,
+//   right A -> A, right trigger -> B, right B -> C, right stick up/down -> 1/2,
 //   left X -> -, left menu -> +,
-//   left grip -> C, left trigger -> Z, left stick -> Nunchuk stick.
+//   left trigger -> Z, left stick -> Nunchuk stick.
 // HOME has no button; left Y opens the settings panel (openxr_settings_panel.h).
+// The grips press nothing: they take hold of the wheel (openxr_driving.h), and C
+// is the game's look-behind, which a hand on the wheel would otherwise hold down.
 inline uint32_t RemoteButtons(const HandInputs& left, const HandInputs& right) noexcept {
     uint32_t hold = 0;
     const auto press = [&hold](bool held, uint32_t bit) {
@@ -352,11 +357,11 @@ inline uint32_t RemoteButtons(const HandInputs& left, const HandInputs& right) n
     };
     press(right.primary, kButtonA);
     press(right.trigger > kPressThreshold, kButtonB);
+    press(right.secondary, kButtonC);
     press(right.stick_y > kPressThreshold, kButtonOne);
     press(right.stick_y < -kPressThreshold, kButtonTwo);
     press(left.primary, kButtonMinus);
     press(left.menu, kButtonPlus);
-    press(left.squeeze > kPressThreshold, kButtonC);
     press(left.trigger > kPressThreshold, kButtonZ);
     return hold;
 }

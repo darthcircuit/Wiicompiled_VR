@@ -5,6 +5,7 @@
 #include "../gfx/texture_replacement.hpp"
 #include "dolphin/gx/GXAurora.h"
 #include "gx.hpp"
+#include "native_wheel.hpp"
 #include "gx_fmt.hpp"
 #include "pipeline.hpp"
 #include "shader_info.hpp"
@@ -1929,7 +1930,8 @@ static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
 
 static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange,
                                  uint16_t usedPnMtxMask, HashType matrixTopologySignature, HashType geometrySignature,
-                                 bool interpolationIdentityActive, const uint8_t* vertices, uint32_t vtxStride);
+                                 bool interpolationIdentityActive, const uint8_t* vertices, uint32_t vtxStride,
+                                 NativeWheelArray* nativeWheel);
 
 // The per-draw geometry signature, matrix-usage mask and draw-identity hashes exist purely to feed frame interpolation
 // (build_uniform consumes them only after its `frame_interpolation_fps() == 0` early-out).
@@ -1957,6 +1959,25 @@ static uint32_t matrix_index_prefix_size(GXVtxFmt fmt) noexcept {
     }
   }
   return size;
+}
+
+// Which animated vertex array, if any, this draw takes (native_wheel.hpp). Called once per draw, before the merge
+// test, because a merged draw renders through the binding the draw it folds into resolved.
+static NativeWheelArray* resolve_native_wheel(GXVtxFmt fmt, const uint8_t* vertices, u16 vtxCount,
+                                              uint32_t vtxStride) noexcept {
+  // A direct-position draw reads no array at all, and g_gxState.arrays[GX_VA_POS] then still holds whatever was
+  // bound last, which must not be matched against.
+  if (g_gxState.vtxDesc[GX_VA_POS] != GX_INDEX8 && g_gxState.vtxDesc[GX_VA_POS] != GX_INDEX16)
+    LIKELY { return nullptr; }
+  const auto& array = g_gxState.arrays[GX_VA_POS];
+  if (nativeWheelArrays.empty())
+    LIKELY {
+      if (!nativeWheelPreviousSources.empty())
+        UNLIKELY { native_wheel_note_outside(array.data); }
+      return nullptr;
+    }
+  return native_wheel_array(array, vertices, static_cast<u32>(vtxCount) * vtxStride, vtxStride,
+                            matrix_index_prefix_size(fmt));
 }
 
 // Screen-space bounds of a simple orthographic rectangle or line, textured or
@@ -2185,6 +2206,10 @@ static ArrayRef<u16> offset_index_template(const CachedIndexTemplate& indexTempl
 
 struct CachedPipelineState {
   gfx::PipelineRef ref = 0;
+  const PipelineConfig* config = nullptr;
+  mutable gfx::PipelineRef stereoRef = 0;
+  mutable gfx::PipelineRef screenRef = 0;
+  mutable gfx::PipelineRef stereoScreenRef = 0;
   HashType configHash = 0;
   // Carried here so the draw can be recorded without keeping the PipelineConfig that produced it alive; it is the only
   // field of the config the draw itself still needs.
@@ -2210,6 +2235,7 @@ static const CachedPipelineState& cached_pipeline_state(const PipelineConfig& co
   entry.config = config;
   entry.state = {
       .ref = gfx::pipeline_ref(config),
+      .config = &entry.config,
       .configHash = hash,
       .dstAlpha = config.dstAlpha,
       .shaderInfo = build_shader_info(config.shaderConfig),
@@ -2252,37 +2278,20 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
   return state;
 }
 
-// Exact Screen Depth changes shader outputs but no GX pipeline state. Resolve a
-// sibling pipeline only for orthographic draws that can actually reach the VR
-// screen, and memoize it with the same state epoch as the ordinary pipeline.
-static gfx::PipelineRef resolve_exact_screen_depth_pipeline(GXPrimitive prim, GXVtxFmt fmt) {
-  struct Memo {
-    gfx::PipelineRef ref = 0;
-    u32 generation = 0;
-    u32 sampleCount = 0;
-    GXPrimitive prim = static_cast<GXPrimitive>(0);
-    GXVtxFmt fmt = static_cast<GXVtxFmt>(0);
-  };
-  static Memo memo{};
-
-  const u32 sampleCount = gfx::get_sample_count();
-  const u32 generation = g_gxState.pipelineStateGeneration;
-  if (memo.ref != 0 && memo.generation == generation && memo.sampleCount == sampleCount && memo.prim == prim &&
-      memo.fmt == fmt)
-    LIKELY { return memo.ref; }
-
-  PipelineConfig config{};
-  populate_pipeline_config(config, prim, fmt);
-  config.shaderConfig.exactScreenDepth = 1;
-  const gfx::PipelineRef ref = gfx::pipeline_ref(config);
-  memo = Memo{
-      .ref = ref,
-      .generation = generation,
-      .sampleCount = sampleCount,
-      .prim = prim,
-      .fmt = fmt,
-  };
-  return ref;
+// Lazily cache eye-format siblings alongside the ordinary pipeline. Steady-state
+// draws only read the refs: no extra config population/hashing on the Quest CPU.
+// Shader modules are shared by the depth-format variants.
+static void resolve_replay_pipelines(const CachedPipelineState& state, bool screen) {
+  if (state.stereoRef && (!screen || state.stereoScreenRef)) return;
+  PipelineConfig config = *state.config;
+  config.stereoStencil = 1;
+  if (!state.stereoRef) state.stereoRef = gfx::pipeline_ref(config);
+  if (screen && !state.stereoScreenRef) {
+    config.shaderConfig.exactScreenDepth = 1;
+    state.stereoScreenRef = gfx::pipeline_ref(config);
+    config.stereoStencil = 0;
+    state.screenRef = gfx::pipeline_ref(config);
+  }
 }
 
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount, uint32_t vertexBytes) {
@@ -2321,7 +2330,8 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
   const PnMtxUsage matrixUsage = interpolationIdentityActive ? pn_mtx_usage(vertices, vtxCount, vtxSize) : PnMtxUsage{};
   handle_draw_unmerged(prim, fmt, vtxCount, vertRange, matrixUsage.mask, matrixUsage.topologySignature,
                        interpolationIdentityActive ? draw_geometry_signature(fmt, vertices, vtxCount, vtxSize) : 0,
-                       interpolationIdentityActive, vertices, vtxSize);
+                       interpolationIdentityActive, vertices, vtxSize,
+                       resolve_native_wheel(fmt, vertices, vtxCount, vtxSize));
   return true;
 }
 
@@ -2354,13 +2364,21 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   gfx::Range vertRange = push_draw_vertices(vertices, vtxCount, vtxSize);
   pos += totalVtxBytes;
 
-  // Try to merge with previous draw call
+  // The animated vertex array this draw takes is decided per draw, and the decision is part of what a merge would
+  // share, so resolve it here and hand the result to handle_draw_unmerged rather than deciding twice.
+  NativeWheelArray* const nativeWheel = resolve_native_wheel(fmt, vertices, vtxCount, vtxSize);
+
+  // Try to merge with previous draw call.
   if (!g_gxState.stateDirty && !(aurora::stereo_frame_provider_active() && g_gxState.projType == GX_ORTHOGRAPHIC))
     LIKELY {
       auto* lastDraw = gfx::get_last_draw_command<DrawData>();
-      // Only if the previous draw call was a single instance draw (no lines/points handling)
+      // Only if the previous draw call was a single instance draw (no lines/points handling), and only into a draw
+      // that resolved the same animated array: the merged whole renders through that draw's binding. Anything the
+      // decision cache cannot vouch for (a command it was not recorded against) stays unmerged.
       if (lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
-          lastDraw->instanceCount == 1)
+          lastDraw->instanceCount == 1 &&
+          (nativeWheelArrays.empty() ||
+           (nativeWheelLastDrawCommand == lastDraw && nativeWheelLastDecision == nativeWheel)))
         LIKELY {
           const auto& indexTemplate = cached_index_template(prim, vtxCount);
           const auto indices = offset_index_template(indexTemplate, lastDraw->vtxCount);
@@ -2389,13 +2407,14 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   const PnMtxUsage matrixUsage = interpolationIdentityActive ? pn_mtx_usage(vertices, vtxCount, vtxSize) : PnMtxUsage{};
   handle_draw_unmerged(prim, fmt, vtxCount, vertRange, matrixUsage.mask, matrixUsage.topologySignature,
                        interpolationIdentityActive ? draw_geometry_signature(fmt, vertices, vtxCount, vtxSize) : 0,
-                       interpolationIdentityActive, vertices, vtxSize);
+                       interpolationIdentityActive, vertices, vtxSize, nativeWheel);
   return true;
 }
 
 static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange,
                                  uint16_t usedPnMtxMask, HashType matrixTopologySignature, HashType geometrySignature,
-                                 bool interpolationIdentityActive, const uint8_t* vertices, uint32_t vtxStride) {
+                                 bool interpolationIdentityActive, const uint8_t* vertices, uint32_t vtxStride,
+                                 NativeWheelArray* nativeWheel) {
   ZoneScoped;
   // GX_CULL_ALL rasterizes nothing on hardware - no color, no depth.
   if (g_gxState.cullMode == GX_CULL_ALL && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS)
@@ -2419,6 +2438,24 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
     }
     auto& array = g_gxState.arrays[i];
     const u32 uploadStride = padded_upload_stride(array.stride);
+    if (i == GX_VA_POS && nativeWheel != nullptr)
+      UNLIKELY {
+        static unsigned nativeWheelDrawLogs = 0;
+        if (nativeWheelDrawLogs++ < 4) Log.info("Native steering wheel: animated local vehicle vertex array");
+        // Never populate the shared source's cache with the animated copy: later draws of the same asset must
+        // still see the original vertices. The copy takes the same padded upload path as the original.
+        if (nativeWheel->uploaded.size == 0 || nativeWheel->uploadedStride != uploadStride) {
+          AttrArray animated{};
+          animated.data = nativeWheel->bytes.data();
+          animated.size = array.size;
+          animated.stride = array.stride;
+          animated.le = array.le;
+          nativeWheel->uploaded = push_vertex_array(animated, uploadStride);
+          nativeWheel->uploadedStride = uploadStride;
+        }
+        ranges.vaRanges[0] = nativeWheel->uploaded;
+        continue;
+      }
     if (array.cachedRange.size > 0 && array.cachedStride == uploadStride) {
       ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
     } else {
@@ -2459,10 +2496,9 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
   const bool perspective = g_gxState.projType == GX_PERSPECTIVE;
   const auto uniformRanges = build_uniform(info, vertRange.offset, ranges, drawIdentity, perspective, usedPnMtxMask);
   const auto& replayLayout = uniformRanges.replayLayout;
-  const gfx::PipelineRef exactScreenDepthPipeline =
-      aurora::stereo_frame_provider_active() && !replayLayout.perspective && !replayLayout.nativeEfbEffect
-          ? resolve_exact_screen_depth_pipeline(prim, fmt)
-          : 0;
+  const bool stereo = aurora::stereo_frame_provider_active();
+  const bool screen = !replayLayout.perspective && !replayLayout.nativeEfbEffect;
+  if (stereo) resolve_replay_pipelines(pipelineState, screen);
   s_lastDrawRecordedInterpolation = interpolationIdentityActive;
 
   uint32_t instanceCount = 1;
@@ -2475,7 +2511,9 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
   }
   gfx::push_draw_command(DrawData{
       .pipeline = pipeline,
-      .exactScreenDepthPipeline = exactScreenDepthPipeline,
+      .exactScreenDepthPipeline = stereo && screen ? pipelineState.screenRef : 0,
+      .stereoPipeline = stereo ? pipelineState.stereoRef : 0,
+      .stereoScreenPipeline = stereo && screen ? pipelineState.stereoScreenRef : 0,
       .vertRange = vertRange,
       .idxRange = idxRange,
       .uniformRange = uniformRanges.current,
@@ -2490,6 +2528,9 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
       .dstAlpha = pipelineState.dstAlpha,
       .screenRect = screen_rect(prim, fmt, vertices, vtxCount, vtxStride),
   });
+  // What the next draw must match to be allowed to fold into this one.
+  nativeWheelLastDrawCommand = gfx::get_last_draw_command<DrawData>();
+  nativeWheelLastDecision = nativeWheel;
   g_gxState.stateDirty = false;
 }
 

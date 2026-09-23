@@ -9,6 +9,7 @@
 #include "../gx/pipeline.hpp"
 #include "pipeline_cache.hpp"
 #include "stereo_replay.hpp"
+#include "cockpit.hpp"
 #include "tex_copy_conv.hpp"
 #include "tex_palette_conv.hpp"
 #include "texture_replacement.hpp"
@@ -158,6 +159,9 @@ uint32_t g_mergedDrawCallCount = 0;
 
 using CommandList = std::vector<Command>;
 struct RenderPass {
+  // The world depth mapping of this pass's last full-view perspective draw, for
+  // the VR cockpit overlay (set by prepare_stereo_replay_uniforms).
+  cockpit::SceneDepth cockpitDepth{};
   wgpu::TextureView colorView;
   wgpu::TextureView resolveView; // MSAA resolve target; null if msaaSamples == 1
   wgpu::TextureView depthView;
@@ -733,6 +737,13 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
             .clearAlpha = clearAlpha,
             .clearDepth = clearDepth,
         }),
+        .stereoPipeline = aurora::stereo_frame_provider_active() ? pipeline_ref(clear::PipelineConfig{
+            .msaaSamples = msaaSamples,
+            .clearColor = clearColor,
+            .clearAlpha = clearAlpha,
+            .clearDepth = clearDepth,
+            .stereoStencil = true,
+        }) : 0,
         .color =
             wgpu::Color{
                 .r = clearColorValue.x(),
@@ -1057,6 +1068,7 @@ void initialize() {
 }
 
 void shutdown() {
+  cockpit::shutdown();
   shutdown_pipeline_cache();
   gx::clear_shader_module_cache();
   efb_ram::shutdown();
@@ -1512,6 +1524,7 @@ static bool prepare_stereo_replay_uniforms(const StereoReplayFrame& stereoFrame,
   std::array<uint8_t, gx::MaxUniformSize> sourceUniform;
   std::array<uint8_t, gx::MaxUniformSize> eyeUniform;
   for (auto& pass : g_renderPasses) {
+    pass.cockpitDepth = {};
     if (!pass.efbTarget) {
       continue;
     }
@@ -1541,6 +1554,19 @@ static bool prepare_stereo_replay_uniforms(const StereoReplayFrame& stereoFrame,
       std::memcpy(sourceUniform.data(), g_uniforms.data() + draw.uniformRange.offset, draw.uniformRange.size);
       Mat4x4<float> gameProjection;
       std::memcpy(&gameProjection, sourceUniform.data() + layout.projectionOffset, sizeof(gameProjection));
+      // The VR cockpit overlay (hands, synthetic wheel) is drawn in metres and
+      // depth-tested against the world, so it needs the world's own depth
+      // mapping: the backend depth row of a full-view world draw, with this
+      // viewport's depth range folded in because the overlay draws with 0..1.
+      // Camera-attached effects share the camera's projection, so any full-view
+      // perspective draw describes the same mapping.
+      if (layout.perspective && !layout.nativeEfbEffect && gameProjection.m2[3] != 0.0f &&
+          drawViewport.width >= displayRegion.width * 0.9f && drawViewport.height >= displayRegion.height * 0.9f) {
+        const auto row = stereo_replay::backend_ndc_depth_row(gameProjection);
+        const float low = std::clamp(std::min(drawViewport.znear, drawViewport.zfar), 0.f, 1.f);
+        const float high = std::clamp(std::max(drawViewport.znear, drawViewport.zfar), 0.f, 1.f);
+        pass.cockpitDepth = {row[2] * (high - low) - low, row[3] * (high - low), true};
+      }
       // Only a genuinely affine projection carries its NDC position in its clip
       // position, which is what the virtual screen reprojection consumes. GX
       // tracks the projection type separately from the matrix, so a 2D draw
@@ -1724,12 +1750,22 @@ struct RenderInvocation {
   uint32_t localPlayerCount = 1;
   // Inclusive index of the last pass to replay; -1 replays every pass.
   int32_t replayLastPass = -1;
+  // Inclusive index of the last pass that does render work; texture bakes still run for the
+  // passes after it. See last_pass_feeding_replay.
+  int32_t renderLastPass = INT32_MAX;
   bool finalize = true;
   bool replayOnlyEfb = false;
   bool skipCopyClears = false;
   bool encodeTextureBakes = true;
   bool encodeResolves = true;
   bool captureDepth = true;
+  // VR cockpit overlay, drawn inside the scene's pass just before the first
+  // virtual-screen draw so the 2D layer's depth cannot hide it (see render_stereo_eye).
+  const StereoReplayFrame* cockpitFrame = nullptr;
+  wgpu::CommandEncoder* cockpitEncoder = nullptr;
+  cockpit::SceneDepth cockpitDepth{};
+  bool* cockpitDrawn = nullptr;
+  bool* sceneDrawn = nullptr;
 };
 
 static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vector<RenderPass>& passes, u32 idx,
@@ -1740,6 +1776,9 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
   ZoneScoped;
   // Palette conversions, MSAA resolves and EFB copies depend on sealed frame state, not on the
   // interpolation weight, so encode them on the native render and let replay slots sample them.
+  // Eye textures are reused; discard the previous frame's mask, then retain it
+  // across guest passes even if the HUD clears or replaces guest depth.
+  bool stencilInitialized = false;
   for (u32 i = 0; i < renderPasses.size(); ++i) {
     const auto& passInfo = renderPasses[i];
     if (invocation.replayLastPass >= 0 && i > static_cast<u32>(invocation.replayLastPass)) {
@@ -1754,6 +1793,11 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
       for (const auto& conv : passInfo.paletteConvs) {
         tex_palette_conv::run(cmd, conv);
       }
+    }
+    if (static_cast<int32_t>(i) > invocation.renderLastPass) {
+      // Nothing after the last replay-feeding resolve is shown or sampled on a headset; the
+      // bakes above are all these passes owe the eye replays.
+      continue;
     }
     const bool hasRenderWork = passInfo.clearColor || passInfo.clearDepth || !passInfo.commands.empty();
     if (i == renderPasses.size() - 1) {
@@ -1787,19 +1831,30 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
                 },
         },
     };
+    const bool stereoStencil = overrideTarget &&
+        invocation.target->depthFormat == wgpu::TextureFormat::Depth24PlusStencil8;
     const wgpu::RenderPassDepthStencilAttachment depthStencilAttachment{
         .view = depthView,
         .depthLoadOp = passInfo.clearDepth && !dropCopyClear ? wgpu::LoadOp::Clear : wgpu::LoadOp::Load,
         .depthStoreOp = wgpu::StoreOp::Store,
         .depthClearValue = passInfo.clearDepthValue,
+        .stencilLoadOp = stereoStencil ? (stencilInitialized ? wgpu::LoadOp::Load : wgpu::LoadOp::Clear) : wgpu::LoadOp::Undefined,
+        .stencilStoreOp = stereoStencil ? wgpu::StoreOp::Store : wgpu::StoreOp::Undefined,
+        .stencilClearValue = 0,
     };
+    const GpuTimingCategory timingCategory = invocation.stereoEye == 0     ? GpuTimingCategory::EyeLeft
+                                             : invocation.stereoEye == 1   ? GpuTimingCategory::EyeRight
+                                             : invocation.interpolatedFrame >= 0 ? GpuTimingCategory::Interpolated
+                                                                                 : GpuTimingCategory::Mono;
     const wgpu::RenderPassDescriptor renderPassDescriptor{
         .label = render_pass_label(i),
         .colorAttachmentCount = attachments.size(),
         .colorAttachments = attachments.data(),
         .depthStencilAttachment = &depthStencilAttachment,
+        .timestampWrites = gpu_timing_pass(timingCategory),
     };
 
+    if (stereoStencil) stencilInitialized = true;
     auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
     render_pass_impl(pass, renderPasses, i, invocation);
     pass.End();
@@ -1908,13 +1963,26 @@ void seal_frame(SealedFrame& out) noexcept {
   g_currentRenderPass = UINT32_MAX;
 }
 
-void render(SealedFrame& frame, wgpu::CommandEncoder& cmd, int32_t interpolatedFrame, bool finalize) {
+void render(SealedFrame& frame, wgpu::CommandEncoder& cmd, int32_t interpolatedFrame, bool finalize,
+            int32_t nativeRenderLastPass) {
   render_impl(frame.data().passes, cmd,
               RenderInvocation{
                   .interpolatedFrame = interpolatedFrame,
+                  .renderLastPass = nativeRenderLastPass,
                   .finalize = finalize,
                   .encodeTextureBakes = interpolatedFrame < 0,
               });
+}
+
+int32_t last_pass_feeding_replay(const SealedFrame& frame) noexcept {
+  const auto& passes = frame.data().passes;
+  int32_t last = -1;
+  for (size_t i = 0; i < passes.size(); ++i) {
+    if (passes[i].resolveTarget && !passes[i].displayCopyResolve) {
+      last = static_cast<int32_t>(i);
+    }
+  }
+  return last;
 }
 
 bool has_late_stereo_replay(const SealedFrame& frame) noexcept {
@@ -1999,6 +2067,18 @@ void render_stereo_eye(SealedFrame& frame, wgpu::CommandEncoder& cmd, const Ster
   // The eye is a fresh per-frame attachment, not the reused EFB, so replaying
   // past that copy blanks the very image the game presented.
   const int32_t lastPass = get_stereo_stop_at_display_copy() ? displaySource.lastDisplayCopyPass : -1;
+  cockpit::SceneDepth cockpitDepth{};
+  for (size_t i = 0; i < frame.data().passes.size(); ++i) {
+    if (lastPass >= 0 && i > static_cast<size_t>(lastPass)) {
+      break;
+    }
+    if (frame.data().passes[i].cockpitDepth.valid) {
+      cockpitDepth = frame.data().passes[i].cockpitDepth;
+    }
+  }
+  bool cockpitDrawn = false;
+  bool sceneDrawn = false;
+  const bool cockpitActive = stereoFrame.cockpit.active && cockpitDepth.valid;
   render_impl(frame.data().passes, cmd,
               RenderInvocation{
                   .stereoEye = eye,
@@ -2012,7 +2092,17 @@ void render_stereo_eye(SealedFrame& frame, wgpu::CommandEncoder& cmd, const Ster
                   .encodeTextureBakes = false,
                   .encodeResolves = false,
                   .captureDepth = false,
+                  .cockpitFrame = cockpitActive ? &stereoFrame : nullptr,
+                  .cockpitEncoder = &cmd,
+                  .cockpitDepth = cockpitDepth,
+                  .cockpitDrawn = &cockpitDrawn,
+                  .sceneDrawn = &sceneDrawn,
               });
+  // A frame without a virtual-screen draw after its world still gets the
+  // overlay, in a pass of its own over the finished eye.
+  if (cockpitActive && !cockpitDrawn) {
+    cockpit::render(cmd, stereoFrame, eye, cockpitDepth);
+  }
 }
 
 void render(wgpu::CommandEncoder& cmd, int32_t interpolatedFrame, bool finalize) {
@@ -2026,6 +2116,209 @@ void render(wgpu::CommandEncoder& cmd, int32_t interpolatedFrame, bool finalize)
     g_currentRenderPass = UINT32_MAX;
     expire_bind_group_cache();
   }
+}
+
+// --- Per-pass GPU timing (see common.hpp) -------------------------------------------------------
+namespace {
+constexpr uint32_t kGpuTimingSlots = 4;
+constexpr uint32_t kGpuTimingPairs = 62;
+constexpr uint32_t kGpuTimingQueries = 2 * kGpuTimingPairs;
+
+struct GpuTimingSlot {
+  wgpu::QuerySet querySet;
+  wgpu::Buffer resolve;
+  wgpu::Buffer readback;
+  std::array<wgpu::PassTimestampWrites, kGpuTimingPairs> writes{};
+  std::array<GpuTimingCategory, kGpuTimingPairs> categories{};
+  uint32_t pairs = 0;
+  bool open = false;    // between the frame's begin and end
+  bool reading = false; // readback in flight or mapped
+  bool mapped = false;  // the callback ran; the encoding thread unmaps on reuse
+};
+
+std::atomic<bool> g_gpuTimingEnabled{false};
+std::array<GpuTimingSlot, kGpuTimingSlots> g_gpuTimingSlots;
+uint32_t g_gpuTimingNextSlot = 0;
+int32_t g_gpuTimingCurrent = -1;
+bool g_gpuTimingReady = false;
+// Guards the totals below and every slot's reading/mapped flags: the map callback may run on
+// whichever thread processes Dawn's events.
+std::mutex g_gpuTimingMutex;
+std::array<uint64_t, static_cast<size_t>(GpuTimingCategory::Count)> g_gpuTimingTotalsNs{};
+uint64_t g_gpuTimingSpanNs = 0;
+uint32_t g_gpuTimingFrames = 0;
+uint32_t g_gpuTimingSkipped = 0;
+
+bool gpu_timing_create_slots() {
+  if (g_gpuTimingReady) {
+    return true;
+  }
+  if (!webgpu::g_timestampQueriesSupported || !webgpu::g_device) {
+    return false;
+  }
+  for (auto& slot : g_gpuTimingSlots) {
+    const wgpu::QuerySetDescriptor querySetDescriptor{
+        .label = "GPU timing queries",
+        .type = wgpu::QueryType::Timestamp,
+        .count = kGpuTimingQueries,
+    };
+    slot.querySet = webgpu::g_device.CreateQuerySet(&querySetDescriptor);
+    const wgpu::BufferDescriptor resolveDescriptor{
+        .label = "GPU timing resolve",
+        .usage = wgpu::BufferUsage::QueryResolve | wgpu::BufferUsage::CopySrc,
+        .size = kGpuTimingQueries * sizeof(uint64_t),
+    };
+    slot.resolve = webgpu::g_device.CreateBuffer(&resolveDescriptor);
+    const wgpu::BufferDescriptor readbackDescriptor{
+        .label = "GPU timing readback",
+        .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
+        .size = kGpuTimingQueries * sizeof(uint64_t),
+    };
+    slot.readback = webgpu::g_device.CreateBuffer(&readbackDescriptor);
+  }
+  g_gpuTimingReady = true;
+  return true;
+}
+} // namespace
+
+void gpu_timing_set_enabled(bool enabled) noexcept { g_gpuTimingEnabled.store(enabled, std::memory_order_relaxed); }
+bool gpu_timing_enabled() noexcept { return g_gpuTimingEnabled.load(std::memory_order_relaxed); }
+
+void gpu_timing_begin_frame() noexcept {
+  g_gpuTimingCurrent = -1;
+  if (!gpu_timing_enabled() || !gpu_timing_create_slots()) {
+    return;
+  }
+  const uint32_t index = g_gpuTimingNextSlot;
+  g_gpuTimingNextSlot = (g_gpuTimingNextSlot + 1) % kGpuTimingSlots;
+  auto& slot = g_gpuTimingSlots[index];
+  {
+    std::lock_guard lock(g_gpuTimingMutex);
+    if (slot.reading && !slot.mapped) {
+      ++g_gpuTimingSkipped; // the GPU is more than a ring behind; leave this frame untimed
+      return;
+    }
+    if (slot.mapped) {
+      slot.readback.Unmap();
+      slot.mapped = false;
+    }
+    slot.reading = false;
+  }
+  slot.pairs = 0;
+  slot.open = true;
+  g_gpuTimingCurrent = static_cast<int32_t>(index);
+}
+
+const wgpu::PassTimestampWrites* gpu_timing_pass(GpuTimingCategory category) noexcept {
+  if (g_gpuTimingCurrent < 0) {
+    return nullptr;
+  }
+  auto& slot = g_gpuTimingSlots[static_cast<size_t>(g_gpuTimingCurrent)];
+  if (!slot.open || slot.pairs >= kGpuTimingPairs) {
+    return nullptr;
+  }
+  const uint32_t i = slot.pairs++;
+  slot.writes[i] = wgpu::PassTimestampWrites{
+      .querySet = slot.querySet,
+      .beginningOfPassWriteIndex = 2 * i,
+      .endOfPassWriteIndex = 2 * i + 1,
+  };
+  slot.categories[i] = category;
+  return &slot.writes[i];
+}
+
+void gpu_timing_end_frame(wgpu::CommandEncoder& encoder) noexcept {
+  if (g_gpuTimingCurrent < 0) {
+    return;
+  }
+  auto& slot = g_gpuTimingSlots[static_cast<size_t>(g_gpuTimingCurrent)];
+  slot.open = false;
+  if (slot.pairs == 0) {
+    g_gpuTimingCurrent = -1;
+    return;
+  }
+  const uint32_t queries = 2 * slot.pairs;
+  encoder.ResolveQuerySet(slot.querySet, 0, queries, slot.resolve, 0);
+  encoder.CopyBufferToBuffer(slot.resolve, 0, slot.readback, 0, queries * sizeof(uint64_t));
+}
+
+void gpu_timing_after_submit() noexcept {
+  if (g_gpuTimingCurrent < 0) {
+    return;
+  }
+  const uint32_t index = static_cast<uint32_t>(g_gpuTimingCurrent);
+  g_gpuTimingCurrent = -1;
+  auto& slot = g_gpuTimingSlots[index];
+  const uint32_t pairs = slot.pairs;
+  {
+    std::lock_guard lock(g_gpuTimingMutex);
+    slot.reading = true;
+    slot.mapped = false;
+  }
+  slot.readback.MapAsync(
+      wgpu::MapMode::Read, 0, 2 * pairs * sizeof(uint64_t), wgpu::CallbackMode::AllowSpontaneous,
+      [index, pairs](wgpu::MapAsyncStatus status, wgpu::StringView) {
+        auto& slot = g_gpuTimingSlots[index];
+        std::lock_guard lock(g_gpuTimingMutex);
+        if (status != wgpu::MapAsyncStatus::Success) {
+          slot.reading = false;
+          return;
+        }
+        const auto* stamps =
+            static_cast<const uint64_t*>(slot.readback.GetConstMappedRange(0, 2 * pairs * sizeof(uint64_t)));
+        if (stamps != nullptr) {
+          uint64_t first = UINT64_MAX;
+          uint64_t last = 0;
+          for (uint32_t i = 0; i < pairs; ++i) {
+            const uint64_t begin = stamps[2 * i];
+            const uint64_t end = stamps[2 * i + 1];
+            if (end < begin) {
+              continue;
+            }
+            g_gpuTimingTotalsNs[static_cast<size_t>(slot.categories[i])] += end - begin;
+            first = std::min(first, begin);
+            last = std::max(last, end);
+          }
+          if (last > first) {
+            g_gpuTimingSpanNs += last - first;
+          }
+          ++g_gpuTimingFrames;
+        }
+        slot.mapped = true;
+      });
+}
+
+std::string gpu_timing_report() {
+  std::lock_guard lock(g_gpuTimingMutex);
+  if (g_gpuTimingFrames == 0 && g_gpuTimingSkipped == 0) {
+    return {};
+  }
+  static constexpr std::array<const char*, static_cast<size_t>(GpuTimingCategory::Count)> kNames{
+      "mono", "eyeL", "eyeR", "interp", "screen", "panel", "efbcopy", "palette", "peek", "snapshot", "present"};
+  std::string text;
+  if (g_gpuTimingFrames != 0) {
+    const double frames = g_gpuTimingFrames;
+    uint64_t sum = 0;
+    text += fmt::format("GPU ms/frame over {} frames: passes-span={:.2f}", g_gpuTimingFrames,
+                        static_cast<double>(g_gpuTimingSpanNs) / 1e6 / frames);
+    for (size_t i = 0; i < kNames.size(); ++i) {
+      if (g_gpuTimingTotalsNs[i] == 0) {
+        continue;
+      }
+      sum += g_gpuTimingTotalsNs[i];
+      text += fmt::format(" {}={:.2f}", kNames[i], static_cast<double>(g_gpuTimingTotalsNs[i]) / 1e6 / frames);
+    }
+    const uint64_t between = g_gpuTimingSpanNs > sum ? g_gpuTimingSpanNs - sum : 0;
+    text += fmt::format(" between-passes={:.2f}", static_cast<double>(between) / 1e6 / frames);
+  }
+  if (g_gpuTimingSkipped != 0) {
+    text += fmt::format(" (untimed frames: {})", g_gpuTimingSkipped);
+  }
+  g_gpuTimingTotalsNs.fill(0);
+  g_gpuTimingSpanNs = 0;
+  g_gpuTimingFrames = 0;
+  g_gpuTimingSkipped = 0;
+  return text;
 }
 
 void after_submit() noexcept {
@@ -2223,6 +2516,24 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
                    draw.gx.interpolatedUniformRanges[invocation.interpolatedFrame].size != 0) {
           uniformOverride = &draw.gx.interpolatedUniformRanges[invocation.interpolatedFrame];
         }
+        // Draw against world depth and mark visible cockpit samples before HUD
+        // depth replaces it. The screen pipelines reject those stencil samples.
+        if (invocation.cockpitFrame != nullptr && overrideTarget) {
+          if (draw.gx.uniformReplayLayout.perspective) {
+            *invocation.sceneDrawn = true;
+          }
+          if (virtualScreenDraw && *invocation.sceneDrawn && !*invocation.cockpitDrawn) {
+            cockpit::render(*invocation.cockpitEncoder, *invocation.cockpitFrame, invocation.stereoEye,
+                            invocation.cockpitDepth, &pass);
+            *invocation.cockpitDrawn = true;
+            encodeState = {};
+            encodeState.boundTextureBindGroup = gx::g_emptyTextureBindGroup.Get();
+            pass.SetBindGroup(0, g_staticBindGroup);
+            pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
+            scissorStateKnown = false;
+            viewportStateKnown = false;
+          }
+        }
         // Such a draw no longer lands where the game aimed it, while the
         // recorded scissor still describes the rectangle it occupied on the flat
         // frame (Mario Kart clips the item roulette that way). Honouring that
@@ -2240,10 +2551,15 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
           apply_viewport(fullEyeDraw);
         }
         gx::render(draw.gx, pass, encodeState, renderPasses[idx].requireReadyPipelines, uniformOverride,
-                   virtualScreenDraw ? draw.gx.exactScreenDepthPipeline : 0);
+                   overrideTarget && invocation.target->depthFormat == wgpu::TextureFormat::Depth24PlusStencil8
+                       ? (virtualScreenDraw ? draw.gx.stereoScreenPipeline : draw.gx.stereoPipeline)
+                       : (virtualScreenDraw ? draw.gx.exactScreenDepthPipeline : 0));
       } break;
       case ShaderType::Clear: {
         auto clearDraw = draw.clear;
+        if (overrideTarget && invocation.target->depthFormat == wgpu::TextureFormat::Depth24PlusStencil8) {
+          clearDraw.pipeline = clearDraw.stereoPipeline;
+        }
         if (multiplayer) {
           const auto& sc = clearDraw.scissor;
           if (clearDraw.copyClear ||
@@ -2478,3 +2794,32 @@ void aurora_pop_debug_group() {
 }
 
 const AuroraStats* aurora_get_stats() { return &aurora::gfx::g_stats; }
+
+void aurora_set_vr_hand_mesh(uint32_t hand, const AuroraVRHandVertex* vertices, uint32_t vertexCount,
+                             const uint16_t* indices, uint32_t indexCount, const float* bindPoses,
+                             const int32_t* parents, uint32_t jointCount) {
+  using namespace aurora::gfx::cockpit;
+  if (hand >= 2) {
+    return;
+  }
+  std::shared_ptr<HandMesh> mesh;
+  if (vertices && indices && bindPoses && parents && jointCount == 26 && vertexCount > 0 && vertexCount <= 65535 &&
+      indexCount <= 100000 && indexCount % 3 == 0) {
+    for (uint32_t i = 0; i < indexCount; ++i) {
+      if (indices[i] >= vertexCount) {
+        return;
+      }
+    }
+    mesh = std::make_shared<HandMesh>();
+    mesh->vertices.assign(vertices, vertices + vertexCount);
+    mesh->indices.assign(indices, indices + indexCount);
+    for (int j = 0; j < 26; ++j) {
+      mesh->bind[j] = from_pose(bindPoses + j * 7);
+      mesh->inverseBind[j] = inverse(mesh->bind[j]);
+      mesh->parents[j] = parents[j];
+    }
+  }
+  std::lock_guard lock(meshMutex);
+  meshes[hand] = std::move(mesh);
+  ++meshRevision;
+}

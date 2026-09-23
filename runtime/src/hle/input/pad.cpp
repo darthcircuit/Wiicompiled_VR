@@ -2,6 +2,9 @@
 #include "memory.h"
 #include "hle/controller_status_contract.h"
 #include "input_bindings.h"
+#include "physical_wheel.h"
+#include "vr/mkw_vr_policy.h"
+#include "vr/openxr_integration.h"
 #include "wii_remote_input.h"
 
 #include <algorithm>
@@ -116,6 +119,9 @@ extern "C" uint32_t PAD__Read_HLE(uint32_t statusPtr)
     PADStatus statuses[PAD_CHANMAX]{};
     // Keep looking for a Bluetooth Wii Remote that dropped out (or was turned on late).
     WiiRemoteInput::Poll();
+    // The VR controllers the pacing thread published reach SDL here, on the
+    // thread that polls controllers, rather than from the pacing thread itself.
+    mkw::vr::OpenXRApplyControllerState();
     uint32_t rumbleMask = PADRead(statuses);
     // Wii Remotes reach the game through KPAD, not as GameCube pads. This also
     // applies while input is blocked (overlay open) so the port does not flip
@@ -124,6 +130,12 @@ extern "C" uint32_t PAD__Read_HLE(uint32_t statusPtr)
 
     FillTriggersHeldByButtons(statuses);
     InputBindings::Apply(statuses);
+    // A USB wheel is player 1's GameCube controller: it owns port 0 in a race
+    // and adds its buttons to it in menus. It advertises port 0's rumble.
+    if (physical_wheel::ReadPad(statuses[0], InputBindings::InputBlocked(),
+                                mkw::vr::MkwVRPolicyGetSnapshot().scene.mode == mkw::vr::VRSceneMode::Race)) {
+        rumbleMask |= PAD_CHAN0_BIT;
+    }
 
     try {
         for (uint32_t i = 0; i < PAD_CHANMAX; ++i) {
@@ -155,6 +167,8 @@ extern "C" void PAD__ControlMotor_HLE(int32_t chan, uint32_t command)
     if (command == PAD_MOTOR_RUMBLE && !g_rumbleEnabled.load(std::memory_order_relaxed)) {
         command = PAD_MOTOR_STOP;
     }
-    PADControlMotor(chan, command);
+    if (!physical_wheel::Motor(chan, command)) {
+        PADControlMotor(chan, command);
+    }
 }
 PPC_NATIVE_OVERRIDE_VOID(801AF908, PAD__ControlMotor_HLE, (int32_t chan, uint32_t command), (chan, command));

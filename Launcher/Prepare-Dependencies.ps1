@@ -9,7 +9,9 @@ param(
     [string]$Destination,
     # Windows metadata source for cppwinrt.exe: 'local' (this machine's WinMetadata), 'sdk', or an
     # installed SDK version such as 10.0.26100.0.
-    [string]$CppWinRtInput = 'local'
+    [string]$CppWinRtInput = 'local',
+    # Output of Build-DawnVulkan.ps1. Rebuild native_prebuilt after changing Dawn.
+    [string]$DawnVulkanPackage
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,6 +29,11 @@ $runtimeCMake = Join-Path $repoRoot 'runtime\CMakeLists.txt'
 # FETCHCONTENT_SOURCE_DIR_<UPPERCASE NAME> (NativeBuildFlags.ps1), so the names are the declared
 # FetchContent names, not the upstream project names.
 $packages = @(
+    [pscustomobject]@{
+        Name = 'vulkan_headers'; File = 'vulkan-headers-015e25c3c91b70eb1a754d36fb14c4ba6ad9b0b9.tar.gz'
+        Uris = @('https://github.com/KhronosGroup/Vulkan-Headers/archive/015e25c3c91b70eb1a754d36fb14c4ba6ad9b0b9.tar.gz')
+        Pins = @(@{ File = $runtimeCMake; Text = 'Vulkan-Headers/archive/015e25c3c91b70eb1a754d36fb14c4ba6ad9b0b9.tar.gz' })
+    },
     [pscustomobject]@{
         Name = 'SDL'; File = 'SDL3-3.4.4.tar.gz'
         Uris = @('https://github.com/libsdl-org/SDL/releases/download/release-3.4.4/SDL3-3.4.4.tar.gz')
@@ -175,6 +182,22 @@ function Expand-Package([string]$Archive, [string]$Target) {
 foreach ($package in $packages) {
     Assert-Pinned $package
     $target = Join-Path $Destination $package.Name
+    if ($package.Name -eq 'dawn_prebuilt' -and $DawnVulkanPackage) {
+        $custom = [IO.Path]::GetFullPath($DawnVulkanPackage)
+        $manifest = Get-Content -LiteralPath (Join-Path $custom 'aurora-vulkan.json') -Raw | ConvertFrom-Json
+        $dll = Join-Path $custom 'bin\webgpu_dawn.dll'
+        if ($manifest.SourceRevision -ne '13abc3bc8ea2d3c2050f9e77a12d012108ceee24' -or
+            $manifest.AuroraVulkanAbi -ne 1 -or
+            (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash.ToLowerInvariant() -ne $manifest.DllSha256) {
+            throw 'Custom Dawn package provenance or DLL hash does not match.'
+        }
+        if (Test-Path -LiteralPath $target) {
+            throw "Use a fresh dependency destination for custom Dawn: $target already exists."
+        }
+        Copy-Item -LiteralPath $custom -Destination $target -Recurse
+        Write-Host 'Prepared custom Dawn with Windows Vulkan OpenXR support'
+        continue
+    }
     if (Test-Path -LiteralPath $target -PathType Container) { continue }
     Expand-Package (Get-Archive $package) $target
     Write-Host "Prepared $($package.Name)"

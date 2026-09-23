@@ -1,4 +1,5 @@
 #include "depth_peek.hpp"
+#include "common.hpp"
 
 #include "../dolphin/vi/vi_internal.hpp"
 #include "../gx/gx.hpp"
@@ -403,6 +404,7 @@ void encode_frame_snapshot(const wgpu::CommandEncoder& cmd, const wgpu::TextureV
 
   const wgpu::ComputePassDescriptor passDescriptor{
       .label = "Depth Peek Compute Pass",
+      .timestampWrites = gpu_timing_pass(GpuTimingCategory::DepthPeek),
   };
   const auto pass = cmd.BeginComputePass(&passDescriptor);
   pass.SetPipeline(g_pipeline);

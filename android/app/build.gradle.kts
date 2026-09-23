@@ -101,8 +101,8 @@ android {
         // Quest 2 ships Android 10 (API 29); AHardwareBuffer/Vulkan 1.1 need 26+.
         minSdk = 29
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2.0-quest"
+        versionCode = 4
+        versionName = "0.4.0-quest"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         for ((name, value) in discPins) {

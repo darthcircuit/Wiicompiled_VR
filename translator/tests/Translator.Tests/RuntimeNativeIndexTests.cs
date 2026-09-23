@@ -80,4 +80,47 @@ public sealed class RuntimeNativeIndexTests
                 Directory.Delete(directory, recursive: true);
         }
     }
+
+    [Fact]
+    public void BuildReadsGxDeferredOverridesLikeTheStubsTheyExpandTo()
+    {
+        // runtime/src/hle/gx: the macro defines Deferred itself and registers it through
+        // PPC_NATIVE_OVERRIDE_VOID; missing it put a translated copy of the function beside
+        // the native one (duplicate symbols at link time).
+        var directory = Path.Combine(Path.GetTempPath(), $"mkw-native-deferred-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            File.WriteAllText(Path.Combine(directory, "gx_internal.h"), """
+                #define GX_DEFERRED_OVERRIDE_VOID(addr_hex, name, arg_list, call_list) \
+                    extern "C" void name arg_list { GxThread::Post(&name##_gx GX_COMMA_ARGS call_list); } \
+                    PPC_NATIVE_OVERRIDE_VOID(addr_hex, name, arg_list, call_list)
+                """);
+            File.WriteAllText(Path.Combine(directory, "gx_pixel.cpp"), """
+                static void Deferred_gx(uint32_t mode, float value) { GXSetDither(mode); (void)value; }
+                GX_DEFERRED_OVERRIDE_VOID(80172930, Deferred, (uint32_t mode, float value), (mode, value));
+                """);
+
+            var index = RuntimeNativeIndexBuilder.Build(directory);
+            var registration = Assert.Single(index.Registrations);
+            Assert.Equal(0x80172930u, registration.Address);
+            Assert.Equal("Deferred", registration.Symbol);
+            Assert.True(registration.ExcludesBaseTranslation);
+
+            var abi = Assert.Single(index.VoidStubAbis);
+            Assert.Equal(["f1", "r3"], abi.ArgumentRegisters);
+            Assert.Equal(["f1"], abi.ScalarFloatArgumentRegisters);
+
+            // Analyzed from the hand-written Deferred_gx body, as the stub was before it moved.
+            var effect = Assert.Single(index.Effects);
+            Assert.True(effect.IsPrecise);
+            Assert.Equal(1u << 3, effect.Contract.GprReadBeforeWriteMask);
+            Assert.Equal(1u << 1, effect.Contract.FprReadBeforeWriteMask);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+                Directory.Delete(directory, recursive: true);
+        }
+    }
 }

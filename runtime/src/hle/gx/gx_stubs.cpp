@@ -3,18 +3,7 @@
 
 extern "C" void __GXSetSUTexRegs();
 
-// ============================================================================
-// FIFO Write Helpers
-// ============================================================================
-
-extern "C" void GX_HLE_FIFO_WriteFloat(float val) {
-    u32 raw; std::memcpy(&raw, &val, 4);
-    try { HleFifoWrite(raw, 4); } catch (...) { RT_LOGF(RT_TAG_GX, "FIFO write float failed\n"); }
-}
-
-extern "C" void GX_HLE_FIFO_Write32(uint32_t val) { HleFifoWrite(val, 4); }
-extern "C" void GX_HLE_FIFO_Write16(uint16_t val) { HleFifoWrite(static_cast<u32>(val), 2); }
-extern "C" void GX_HLE_FIFO_Write8(uint8_t val) { HleFifoWrite(static_cast<u32>(val), 1); }
+// The FIFO write helpers (GX_HLE_FIFO_Write*) live in gx_fifo.cpp.
 
 extern "C" void GX__SetDrawSync_8016ed08(uint32_t token) {
     (void)token;
@@ -36,15 +25,21 @@ extern "C" void GX__FinishInterruptHandler_8016ed94() {
 }
 PPC_NATIVE_OVERRIDE_VOID(8016ed94, GX__FinishInterruptHandler_8016ed94, (), ());
 
+static void GX__DrawDone_gx() { GXDrawDone(); }
 extern "C" void GX__DrawDone_8016eab0() {
     try { Memory::Write8(kGxDrawDoneFlagAddr, 0); } catch (...) {}
-    GXDrawDone(); GX__FinishInterruptHandler_8016ed94();
+    // Hardware blocks here until the GP has consumed the FIFO: post the drain
+    // and wait for the GX thread to reach it before raising the finish flags.
+    GxThread::Post(&GX__DrawDone_gx);
+    GxThread::Drain();
+    GX__FinishInterruptHandler_8016ed94();
 }
 PPC_NATIVE_OVERRIDE_VOID(8016eab0, GX__DrawDone_8016eab0, (), ());
 
+static void GX__PixModeSync_gx() { GXPixModeSync(); }
 extern "C" void GX__PixModeSync_8016eb70() {
     try { uint32_t gd = Memory::Read32(kGXDataPtrAddr); if (gd) Memory::Write16(gd + 2, 0); } catch (...) {}
-    GXPixModeSync();
+    GxThread::Post(&GX__PixModeSync_gx);
 }
 PPC_NATIVE_OVERRIDE_VOID(8016eb70, GX__PixModeSync_8016eb70, (), ());
 
@@ -59,8 +54,9 @@ PPC_NATIVE_OVERRIDE_VOID(8016b720, __GX__InitRevisionBits_8016b720, (), ());
 // Texture State Management - Aurora handles internally
 // ============================================================================
 
+static void __GX__SetSUTexRegs_gx() { __GXSetSUTexRegs(); }
 extern "C" void __GX__SetSUTexRegs_801712f0() {
-    __GXSetSUTexRegs();
+    GxThread::Post(&__GX__SetSUTexRegs_gx);
     try { uint32_t gd = Memory::Read32(kGXDataPtrAddr); if (gd) Memory::Write16(gd + 2, 0); } catch (...) {}
 }
 PPC_NATIVE_OVERRIDE_VOID(801712f0, __GX__SetSUTexRegs_801712f0, (), ());
@@ -81,8 +77,9 @@ PPC_NATIVE_OVERRIDE_VOID(80171c28, __GX__FlushTextureState_80171c28, (), ());
 // Copy Configuration - No-ops for features Aurora doesn't use
 // ============================================================================
 
+static void GX__SetDispCopyFrame2Field_gx(uint32_t f) { GXSetDispCopyFrame2Field(f); }
 extern "C" void GX__SetDispCopyFrame2Field_8016f5f8(uint32_t f) {
-    GXSetDispCopyFrame2Field(f);
+    GxThread::Post(&GX__SetDispCopyFrame2Field_gx, f);
     try {
         const uint32_t gd = Memory::Read32(kGXDataPtrAddr);
         if (gd) {
@@ -93,8 +90,9 @@ extern "C" void GX__SetDispCopyFrame2Field_8016f5f8(uint32_t f) {
 }
 PPC_NATIVE_OVERRIDE_VOID(8016f5f8, GX__SetDispCopyFrame2Field_8016f5f8, (uint32_t f), (f));
 
+static void GX__SetCopyClamp_gx(uint32_t c) { GXSetCopyClamp(static_cast<GXFBClamp>(c)); }
 extern "C" void GX__SetCopyClamp_8016f618(uint32_t c) {
-    GXSetCopyClamp(static_cast<GXFBClamp>(c));
+    GxThread::Post(&GX__SetCopyClamp_gx, c);
     try {
         const uint32_t gd = Memory::Read32(kGXDataPtrAddr);
         if (gd) {
@@ -106,8 +104,9 @@ extern "C" void GX__SetCopyClamp_8016f618(uint32_t c) {
 }
 PPC_NATIVE_OVERRIDE_VOID(8016f618, GX__SetCopyClamp_8016f618, (uint32_t c), (c));
 
+static void GX__ClearBoundingBox_gx() { GXClearBoundingBox(); }
 extern "C" void GX__ClearBoundingBox_8016fecc() {
-    GXClearBoundingBox();
+    GxThread::Post(&GX__ClearBoundingBox_gx);
     try {
         const uint32_t gd = Memory::Read32(kGXDataPtrAddr);
         if (gd) Memory::Write16(gd + 2, 0);

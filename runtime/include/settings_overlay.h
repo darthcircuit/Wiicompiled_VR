@@ -16,6 +16,10 @@ void AdvancePresentedFrame() noexcept;
 // converted with the world scale currently in effect, so switching the
 // first-person camera on or off has to repeat it.
 void RefreshVrHudVirtualScreen() noexcept;
+// Flips the first-person camera exactly as its F10 checkbox does, on the game
+// thread at the next frame. Callable from any thread (the VR controllers'
+// right-thumbstick click).
+void RequestFirstPersonToggle() noexcept;
 // Put host controllers back to a neutral state before the process ends.
 void ReleaseControllers() noexcept;
 } // namespace settings_overlay

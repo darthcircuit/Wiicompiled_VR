@@ -2,6 +2,7 @@
 
 #include "../internal.hpp"
 #include "../stereo.hpp"
+#include "../stereo_overlay.hpp"
 #include "gpu.hpp"
 
 #if defined(_WIN32) && defined(WEBGPU_DAWN) && defined(DAWN_ENABLE_BACKEND_D3D12)
@@ -126,6 +127,11 @@ struct SharedFenceDxgiHandleWire {
   void* handle = nullptr;
 };
 
+// The eyes, then the settings panel's layer image in a slot of its own so the
+// eye intermediates are never resized for it.
+constexpr uint32_t kPanelIndex = AURORA_D3D12_STEREO_MAX_TARGETS;
+constexpr uint32_t kMaxImages = AURORA_D3D12_STEREO_MAX_TARGETS + 1;
+
 struct IntermediateEye {
   ComPtr<ID3D12Resource> resource;
   wgpu::SharedTextureMemory memory;
@@ -153,8 +159,8 @@ struct InFlightCommand {
   // both sides of every copy alive until this submission's fence completes;
   // an eye-size change may otherwise replace the bridge intermediate while
   // the GPU is still reading it.
-  std::array<ComPtr<ID3D12Resource>, AURORA_D3D12_STEREO_MAX_TARGETS> sources;
-  std::array<ComPtr<ID3D12Resource>, AURORA_D3D12_STEREO_MAX_TARGETS> destinations;
+  std::array<ComPtr<ID3D12Resource>, kMaxImages> sources;
+  std::array<ComPtr<ID3D12Resource>, kMaxImages> destinations;
 };
 
 class StereoBridge final {
@@ -209,38 +215,51 @@ public:
     return WaitForGpuLocked();
   }
 
-  bool SetTargets(uint64_t token, const AuroraD3D12StereoTarget* targets,
-                  uint32_t targetCount) noexcept {
+  bool SetTargets(uint64_t token, const AuroraD3D12StereoTarget* targets, uint32_t targetCount,
+                  const AuroraD3D12StereoTarget* panel) noexcept {
     if (token == 0 || targets == nullptr || targetCount == 0 ||
         targetCount > AURORA_D3D12_STEREO_MAX_TARGETS) {
       return false;
     }
+    const auto valid = [](const AuroraD3D12StereoTarget& target) {
+      if (target.resource == nullptr || target.width == 0 || target.height == 0 ||
+          target.dxgiFormat == DXGI_FORMAT_UNKNOWN) {
+        return false;
+      }
+      const D3D12_RESOURCE_DESC desc = static_cast<ID3D12Resource*>(target.resource)->GetDesc();
+      return desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.Width >= target.width &&
+             desc.Height >= target.height && desc.DepthOrArraySize == 1 && desc.MipLevels == 1 &&
+             desc.SampleDesc.Count == 1 &&
+             same_copy_family(desc.Format, static_cast<DXGI_FORMAT>(target.dxgiFormat));
+    };
     std::lock_guard lock(m_mutex);
     if (m_framePending || m_encoded) {
       return false;
     }
     for (uint32_t eye = 0; eye < targetCount; ++eye) {
-      if (targets[eye].resource == nullptr || targets[eye].width == 0 ||
-          targets[eye].height == 0 || targets[eye].dxgiFormat == DXGI_FORMAT_UNKNOWN) {
+      if (!valid(targets[eye])) {
         return false;
       }
-      auto* resource = static_cast<ID3D12Resource*>(targets[eye].resource);
-      const D3D12_RESOURCE_DESC desc = resource->GetDesc();
-      if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-          desc.Width < targets[eye].width || desc.Height < targets[eye].height ||
-          desc.DepthOrArraySize != 1 || desc.MipLevels != 1 || desc.SampleDesc.Count != 1 ||
-          !same_copy_family(desc.Format, static_cast<DXGI_FORMAT>(targets[eye].dxgiFormat))) {
-        return false;
-      }
-      m_targets[eye] = {
-          .resource = resource,
-          .width = targets[eye].width,
-          .height = targets[eye].height,
-          .format = static_cast<DXGI_FORMAT>(targets[eye].dxgiFormat),
-      };
     }
-    for (uint32_t eye = targetCount; eye < m_targets.size(); ++eye) {
-      m_targets[eye] = {};
+    if (panel != nullptr && !valid(*panel)) {
+      return false;
+    }
+    m_targets = {};
+    m_imageCount = 0;
+    const auto add = [&](uint32_t index, const AuroraD3D12StereoTarget& target) {
+      m_targets[index] = {
+          .resource = static_cast<ID3D12Resource*>(target.resource),
+          .width = target.width,
+          .height = target.height,
+          .format = static_cast<DXGI_FORMAT>(target.dxgiFormat),
+      };
+      m_images[m_imageCount++] = index;
+    };
+    for (uint32_t eye = 0; eye < targetCount; ++eye) {
+      add(eye, targets[eye]);
+    }
+    if (panel != nullptr) {
+      add(kPanelIndex, *panel);
     }
     m_frameToken = token;
     m_targetCount = targetCount;
@@ -307,7 +326,7 @@ private:
     if (source.texture == nullptr || sourceFormat == DXGI_FORMAT_UNKNOWN ||
         source.size.width != m_targets[eye].width || source.size.height != m_targets[eye].height ||
         !same_copy_family(sourceFormat, m_targets[eye].format)) {
-      Log.error("Stereo eye {} does not match its OpenXR D3D12 target", eye);
+      Log.error("Stereo image {} does not match its OpenXR D3D12 target", eye);
       return false;
     }
     if (intermediate.texture && intermediate.width == source.size.width &&
@@ -350,7 +369,9 @@ private:
     wire.resource = intermediate.resource;
     const wgpu::SharedTextureMemoryDescriptor memoryDescriptor{
         .nextInChain = &wire.chain,
-        .label = eye == 0 ? "OpenXR left eye intermediate" : "OpenXR right eye intermediate",
+        .label = eye == 0 ? "OpenXR left eye intermediate"
+                 : eye == 1 ? "OpenXR right eye intermediate"
+                            : "OpenXR panel intermediate",
     };
     intermediate.memory = webgpu::g_device.ImportSharedTextureMemory(&memoryDescriptor);
     if (!intermediate.memory) {
@@ -368,7 +389,9 @@ private:
       return false;
     }
     const wgpu::TextureDescriptor textureDescriptor{
-        .label = eye == 0 ? "OpenXR left eye shared texture" : "OpenXR right eye shared texture",
+        .label = eye == 0 ? "OpenXR left eye shared texture"
+                 : eye == 1 ? "OpenXR right eye shared texture"
+                            : "OpenXR panel shared texture",
         .usage = wgpu::TextureUsage::CopyDst,
         .dimension = wgpu::TextureDimension::e2D,
         .size = {source.size.width, source.size.height, 1},
@@ -391,12 +414,22 @@ private:
 
   bool EncodeLocked(wgpu::CommandEncoder& encoder, const stereo::SinkFrame& frame) noexcept {
     CollectCompletedCommandsLocked();
-    for (uint32_t eye = 0; eye < m_targetCount; ++eye) {
-      if (!EnsureIntermediate(eye, frame.eyes[eye])) {
+    std::array<stereo::EyeImage, kMaxImages> sources{};
+    for (uint32_t n = 0; n < m_imageCount; ++n) {
+      const uint32_t eye = m_images[n];
+      if (eye == kPanelIndex) {
+        if (!stereo_overlay::layer_source(encoder, m_targets[eye].width, m_targets[eye].height, sources[eye])) {
+          return false;
+        }
+      } else {
+        sources[eye] = frame.eyes[eye];
+      }
+      if (!EnsureIntermediate(eye, sources[eye])) {
         return false;
       }
     }
-    for (uint32_t eye = 0; eye < m_targetCount; ++eye) {
+    for (uint32_t n = 0; n < m_imageCount; ++n) {
+      const uint32_t eye = m_images[n];
       auto& intermediate = m_intermediates[eye];
       const std::array fences{m_webgpuFence};
       const std::array values{m_lastExternalFenceValue};
@@ -410,7 +443,8 @@ private:
       }
       if (intermediate.memory.BeginAccess(intermediate.texture, &begin) != wgpu::Status::Success) {
         Log.error("Dawn BeginAccess failed for stereo eye {}", eye);
-        for (uint32_t begunEye = 0; begunEye < eye; ++begunEye) {
+        for (uint32_t m = 0; m < n; ++m) {
+          const uint32_t begunEye = m_images[m];
           wgpu::SharedTextureMemoryEndAccessState end{};
           m_intermediates[begunEye].memory.EndAccess(m_intermediates[begunEye].texture, &end);
           m_intermediates[begunEye].initialized = end.initialized;
@@ -424,10 +458,11 @@ private:
     // to one. If a later BeginAccess fails, the rollback above can therefore
     // end the earlier accesses without leaving an unsubmitted copy that uses
     // a texture after its access interval.
-    for (uint32_t eye = 0; eye < m_targetCount; ++eye) {
+    for (uint32_t n = 0; n < m_imageCount; ++n) {
+      const uint32_t eye = m_images[n];
       const auto& intermediate = m_intermediates[eye];
       const wgpu::TexelCopyTextureInfo source{
-          .texture = *frame.eyes[eye].texture,
+          .texture = *sources[eye].texture,
           .mipLevel = 0,
           .origin = {},
           .aspect = wgpu::TextureAspect::All,
@@ -446,7 +481,8 @@ private:
 
   bool EndAccessLocked() noexcept {
     bool success = true;
-    for (uint32_t eye = 0; eye < m_targetCount; ++eye) {
+    for (uint32_t n = 0; n < m_imageCount; ++n) {
+      const uint32_t eye = m_images[n];
       auto& intermediate = m_intermediates[eye];
       if (!intermediate.accessBegun) {
         success = false;
@@ -467,8 +503,8 @@ private:
   bool EnqueueNativeCopyLocked() noexcept {
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> list;
-    std::array<ComPtr<ID3D12Resource>, AURORA_D3D12_STEREO_MAX_TARGETS> sources;
-    std::array<ComPtr<ID3D12Resource>, AURORA_D3D12_STEREO_MAX_TARGETS> destinations;
+    std::array<ComPtr<ID3D12Resource>, kMaxImages> sources;
+    std::array<ComPtr<ID3D12Resource>, kMaxImages> destinations;
     if (FAILED(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                                  IID_PPV_ARGS(&allocator))) ||
         FAILED(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(),
@@ -477,7 +513,8 @@ private:
       return false;
     }
 
-    for (uint32_t eye = 0; eye < m_targetCount; ++eye) {
+    for (uint32_t n = 0; n < m_imageCount; ++n) {
+      const uint32_t eye = m_images[n];
       const auto& source = m_intermediates[eye];
       const auto& destination = m_targets[eye];
       sources[eye] = source.resource;
@@ -564,6 +601,7 @@ private:
     }
     m_frameToken = 0;
     m_targetCount = 0;
+    m_imageCount = 0;
     m_framePending = false;
     m_encoded = false;
   }
@@ -625,8 +663,11 @@ private:
   ComPtr<ID3D12CommandQueue> m_queue;
   ComPtr<ID3D12Fence> m_fence;
   wgpu::SharedFence m_webgpuFence;
-  std::array<IntermediateEye, AURORA_D3D12_STEREO_MAX_TARGETS> m_intermediates{};
-  std::array<PendingTarget, AURORA_D3D12_STEREO_MAX_TARGETS> m_targets{};
+  std::array<IntermediateEye, kMaxImages> m_intermediates{};
+  std::array<PendingTarget, kMaxImages> m_targets{};
+  // The slots of m_targets this frame copies into, eyes first.
+  std::array<uint32_t, kMaxImages> m_images{};
+  uint32_t m_imageCount = 0;
   std::vector<InFlightCommand> m_commands;
   AuroraD3D12StereoSubmittedCallback m_callback = nullptr;
   void* m_userdata = nullptr;
@@ -701,7 +742,13 @@ bool aurora_d3d12_set_stereo_targets(uint64_t frameToken,
                                      const AuroraD3D12StereoTarget* targets,
                                      uint32_t targetCount) {
   using namespace aurora::d3d12_interop;
-  return g_bridge && g_bridge->SetTargets(frameToken, targets, targetCount);
+  return g_bridge && g_bridge->SetTargets(frameToken, targets, targetCount, nullptr);
+}
+
+bool aurora_d3d12_set_stereo_targets_with_panel(uint64_t frameToken, const AuroraD3D12StereoTarget* targets,
+                                                uint32_t targetCount, const AuroraD3D12StereoTarget* panel) {
+  using namespace aurora::d3d12_interop;
+  return g_bridge && g_bridge->SetTargets(frameToken, targets, targetCount, panel);
 }
 
 bool aurora_d3d12_cancel_stereo_targets(uint64_t frameToken) {
@@ -741,6 +788,11 @@ bool aurora_d3d12_enable_stereo_bridge(AuroraD3D12StereoSubmittedCallback, void*
 }
 
 bool aurora_d3d12_set_stereo_targets(uint64_t, const AuroraD3D12StereoTarget*, uint32_t) {
+  return false;
+}
+
+bool aurora_d3d12_set_stereo_targets_with_panel(uint64_t, const AuroraD3D12StereoTarget*, uint32_t,
+                                                const AuroraD3D12StereoTarget*) {
   return false;
 }
 

@@ -2,6 +2,7 @@
 #include "gx_stream_common.h"
 #include "gx_cp_decode.h"
 #include "isa/big_endian.h"
+#include "runtime_log.h"
 
 // Opcode constants and the stream helpers this file shares with gx_dl.cpp /
 // gx_vertex.cpp; see gx_stream_common.h.
@@ -346,7 +347,9 @@ void SubmitAttribute(GXAttr attr, float* comps, const VtxAttrFmt& fmt, const u32
 // `val` is a raw big-endian bit pattern: the FIFO stream is type-agnostic, and
 // the float entry point converts before it gets here.
 void HleFifoWrite(u32 val, uint32_t sizeBytes) {
-    const bool recordOnly = IsDisplayListActive();
+    // Display-list recording is game-thread state; bytes only reach the GX
+    // thread when nothing is being recorded, so it must not consult it.
+    const bool recordOnly = !GxThread::IsGxThread() && IsDisplayListActive();
     if (recordOnly) {
         WriteDisplayListData(val, sizeBytes);
         return;
@@ -480,7 +483,7 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
             const uint32_t listSize = ReadBE32(data + 5);
             if (!consumeBytes(9, sink)) break;
             if (listAddr != 0 && listSize > 0) {
-                GX__CallDisplayList_80172f64(listAddr, listSize);
+                GX__CallDisplayList_gx(listAddr, listSize);
             }
             continue;
         }
@@ -682,7 +685,8 @@ static uint32_t ApplyFifoPacketsDirect(const uint8_t* data, uint32_t sizeBytes) 
     while (offset < sizeBytes) {
         // Re-tested per packet, not once per burst: nothing currently re-enters GX HLE mid-walk,
         // but if it ever does, breaking here just hands the remainder to the ring.
-        if (IsDisplayListActive() || g_hleGxState.inBegin || g_hleGxState.fifoByteCount != 0) {
+        if ((!GxThread::IsGxThread() && IsDisplayListActive()) || g_hleGxState.inBegin ||
+            g_hleGxState.fifoByteCount != 0) {
             break;
         }
 
@@ -775,17 +779,50 @@ static bool WriteDisplayListBurst(const uint8_t* data, uint32_t sizeBytes) {
     return true;
 }
 
-extern "C" void GX_HLE_FIFO_WriteBurst(const uint8_t* data, uint32_t sizeBytes) {
-    if (data == nullptr || sizeBytes == 0) {
-        return;
-    }
-
-    if (IsDisplayListActive() && WriteDisplayListBurst(data, sizeBytes)) {
-        return;
-    }
-
+// GX-thread side of the write-gather pipe (or inline when the thread is off).
+extern "C" void GxFifoConsumeBytes(const uint8_t* data, uint32_t sizeBytes) {
     const uint32_t applied = ApplyFifoPacketsDirect(data, sizeBytes);
     if (applied < sizeBytes) {
         HleFifoWriteBurstChunked(data + applied, sizeBytes - applied);
     }
+}
+
+// Game-thread fronts of the write-gather pipe. Display-list recording is
+// resolved here (it writes guest memory); everything else is parsed now or
+// posted to the GX thread as raw bytes, in call order.
+static inline void GxFifoFrontWrite(u32 val, uint32_t sizeBytes) {
+    if (IsDisplayListActive()) {
+        WriteDisplayListData(val, sizeBytes);
+        return;
+    }
+    if (GxThread::Enabled()) {
+        GxThread::PostFifoWord(val, sizeBytes);
+        return;
+    }
+    HleFifoWrite(val, sizeBytes);
+}
+
+extern "C" void GX_HLE_FIFO_WriteFloat(float val) {
+    u32 raw; std::memcpy(&raw, &val, 4);
+    try { GxFifoFrontWrite(raw, 4); } catch (...) { RT_LOGF(RT_TAG_GX, "FIFO write float failed\n"); }
+}
+extern "C" void GX_HLE_FIFO_Write32(uint32_t val) { GxFifoFrontWrite(val, 4); }
+extern "C" void GX_HLE_FIFO_Write16(uint16_t val) { GxFifoFrontWrite(static_cast<u32>(val), 2); }
+extern "C" void GX_HLE_FIFO_Write8(uint8_t val) { GxFifoFrontWrite(static_cast<u32>(val), 1); }
+
+extern "C" void GX_HLE_FIFO_WriteBurst(const uint8_t* data, uint32_t sizeBytes) {
+    if (data == nullptr || sizeBytes == 0) {
+        return;
+    }
+    if (IsDisplayListActive()) {
+        if (!WriteDisplayListBurst(data, sizeBytes)) {
+            HleFifoWriteBurstChunked(data, sizeBytes);
+        }
+        return;
+    }
+    if (GxThread::Enabled()) {
+        GxThread::PostFifoBytes(data, sizeBytes);
+        return;
+    }
+    GxFifoConsumeBytes(data, sizeBytes);
 }

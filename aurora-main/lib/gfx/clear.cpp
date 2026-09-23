@@ -105,7 +105,7 @@ fn fs_main() -> FragmentOutput {
       .targets = &colorTarget,
   };
   const wgpu::DepthStencilState depthStencil{
-      .format = g_graphicsConfig.depthFormat,
+      .format = config.stereoStencil ? wgpu::TextureFormat::Depth24PlusStencil8 : g_graphicsConfig.depthFormat,
       .depthWriteEnabled = config.clearDepth,
       .depthCompare = wgpu::CompareFunction::Always,
   };

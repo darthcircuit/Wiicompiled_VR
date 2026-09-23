@@ -3,6 +3,18 @@ include(GoogleTest)
 
 option(AURORA_GPU_SMOKE_TESTS "Build opt-in tests requiring a desktop GPU" OFF)
 if (AURORA_GPU_SMOKE_TESTS AND AURORA_ENABLE_GX AND WIN32)
+  # Exercises the custom Dawn DLL's Aurora Vulkan ABI (patches/dawn). Run it with that
+  # webgpu_dawn.dll beside the executable; the stock prebuilt Dawn lacks the exports and the
+  # test reports that at startup. Vulkan headers come from the SDK or any tree on
+  # AURORA_TEST_VULKAN_INCLUDE (the runtime's FetchContent copy works).
+  find_path(AURORA_TEST_VULKAN_INCLUDE vulkan/vulkan.h HINTS "$ENV{VULKAN_SDK}/Include")
+  if (AURORA_TEST_VULKAN_INCLUDE)
+    add_executable(vulkan_native_bridge_smoke vulkan_native_bridge_smoke.cpp)
+    target_include_directories(vulkan_native_bridge_smoke PRIVATE ../include "${AURORA_TEST_VULKAN_INCLUDE}")
+    target_link_libraries(vulkan_native_bridge_smoke PRIVATE dawn::webgpu_dawn dawn::dawncpp_headers)
+  else ()
+    message(STATUS "vulkan_native_bridge_smoke skipped: no vulkan/vulkan.h (set VULKAN_SDK or AURORA_TEST_VULKAN_INCLUDE)")
+  endif ()
   add_executable(stereo_frame_worker_smoke stereo_frame_worker_smoke.cpp)
   target_include_directories(stereo_frame_worker_smoke PRIVATE ../lib)
   target_link_libraries(stereo_frame_worker_smoke PRIVATE aurora::core aurora::gx aurora::main aurora::vi
@@ -15,6 +27,13 @@ if (AURORA_GPU_SMOKE_TESTS AND AURORA_ENABLE_GX AND WIN32)
   target_include_directories(efb_ram_lifetime_smoke PRIVATE ../lib)
   target_link_libraries(efb_ram_lifetime_smoke PRIVATE aurora::core aurora::gx aurora::main aurora::vi
                         dawn::dawncpp_headers)
+  # VR cockpit overlay (hands, synthetic wheel) against real scene depth. Standalone: it
+  # defines the GPU globals itself and needs only the header.
+  add_executable(cockpit_gpu_smoke cockpit_gpu_smoke.cpp)
+  target_include_directories(cockpit_gpu_smoke PRIVATE ../include ../lib)
+  target_compile_definitions(cockpit_gpu_smoke PRIVATE AURORA TARGET_PC WEBGPU_DAWN)
+  target_link_libraries(cockpit_gpu_smoke PRIVATE fmt::fmt xxhash absl::flat_hash_map absl::btree
+                        dawn::webgpu_dawn dawn::dawncpp_headers TracyClient ${AURORA_SDL3_TARGET})
 endif ()
 
 if (NOT TARGET gtest)
@@ -36,6 +55,8 @@ if (AURORA_ENABLE_GX)
     stereo_replay_test.cpp
     stereo_interpolation_test.cpp
     stereo_mirror_test.cpp
+    native_wheel_test.cpp
+    cockpit_geometry_test.cpp
     texture_bind_group_cache_key_test.cpp
     ../lib/gfx/efb_ram_encoder.cpp
     # GX API implementations (encoders)

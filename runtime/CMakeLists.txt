@@ -286,6 +286,15 @@ if(MKW_PROJECT_COMPILE_DEFINITIONS)
     add_compile_definitions(${MKW_PROJECT_COMPILE_DEFINITIONS})
 endif()
 
+if(MKW_PLATFORM_WINDOWS AND MKW_ENABLE_OPENXR)
+    include(FetchContent)
+    FetchContent_Declare(vulkan_headers
+        URL "https://github.com/KhronosGroup/Vulkan-Headers/archive/015e25c3c91b70eb1a754d36fb14c4ba6ad9b0b9.tar.gz"
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(vulkan_headers)
+    include_directories("${vulkan_headers_SOURCE_DIR}/include")
+endif()
+
 set(MKW_OPENXR_TARGET "")
 if(MKW_ENABLE_OPENXR)
     if(NOT MKW_PLATFORM_WINDOWS AND NOT MKW_PLATFORM_LINUX AND NOT MKW_PLATFORM_ANDROID)
@@ -340,6 +349,7 @@ endif()
 # a registration file is silently never compiled and never errors. The stale-glob
 # failure mode is worth far more than the milliseconds.
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
+set_source_files_properties(src/vr/openxr_vulkan_win32.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
 if(MKW_PLATFORM_MACOS)
     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory.cpp")
     # HostContext's Apple Silicon backend is implemented in a small assembly
@@ -397,6 +407,26 @@ target_include_directories(mkw_vr_first_person_tests PRIVATE "${CMAKE_CURRENT_LI
 target_compile_features(mkw_vr_first_person_tests PRIVATE cxx_std_17)
 add_test(NAME mkw_vr_first_person_tests COMMAND mkw_vr_first_person_tests)
 
+# The first-person cockpit (seated eye, wheel and handlebar geometry, level seat,
+# native wheel vertices) and hand steering (grab, turn, hand-off to the game),
+# ported from heurazy's mario-kart-wii-VR-port. All header-only.
+foreach(test_name mkw_steering_wheel_tests mkw_vr_cockpit_tests mkw_vr_hand_steering_tests mkw_vr_camera_toggle_tests)
+    string(REGEX REPLACE "^mkw_" "" test_source "${test_name}")
+    add_executable(${test_name} "${CMAKE_CURRENT_LIST_DIR}/tests/${test_source}.cpp")
+    target_include_directories(${test_name} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
+    target_compile_features(${test_name} PRIVATE cxx_std_17)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+endforeach()
+
+# The USB wheel's calibration and GameCube pad mapping (physical_wheel.h),
+# ported from heurazy's mario-kart-wii-VR-port. Header-only; needs dolphin/pad.h.
+add_executable(mkw_physical_wheel_tests "${CMAKE_CURRENT_LIST_DIR}/tests/physical_wheel_tests.cpp")
+target_include_directories(mkw_physical_wheel_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include"
+                                                           "${CMAKE_CURRENT_LIST_DIR}/../aurora-main/include")
+target_compile_definitions(mkw_physical_wheel_tests PRIVATE TARGET_PC)
+target_compile_features(mkw_physical_wheel_tests PRIVATE cxx_std_17)
+add_test(NAME mkw_physical_wheel_tests COMMAND mkw_physical_wheel_tests)
+
 # The VR controllers' Wii Remote presentation (accelerometer frame, pointer
 # raycast, debounce, button profile) is header-only for the same reason.
 add_executable(mkw_vr_wii_remote_tests "${CMAKE_CURRENT_LIST_DIR}/tests/vr_wii_remote_tests.cpp")
@@ -453,6 +483,16 @@ if(MKW_ENABLE_OPENXR AND MKW_PLATFORM_WINDOWS)
     target_compile_features(mkw_openxr_replay_tests PRIVATE cxx_std_17)
     set_target_properties(mkw_openxr_replay_tests PROPERTIES UNITY_BUILD OFF)
     add_test(NAME mkw_openxr_replay_tests COMMAND mkw_openxr_replay_tests)
+    add_executable(mkw_openxr_vulkan_replay_tests
+        tests/openxr_d3d12_replay_tests.cpp src/vr/openxr_vulkan_win32.cpp src/vr/openxr_diagnostics.cpp)
+    target_include_directories(mkw_openxr_vulkan_replay_tests PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/include"
+        "${CMAKE_CURRENT_LIST_DIR}/../aurora-main/include"
+        "$<TARGET_PROPERTY:${MKW_OPENXR_TARGET},INTERFACE_INCLUDE_DIRECTORIES>")
+    target_compile_definitions(mkw_openxr_vulkan_replay_tests PRIVATE MKW_ENABLE_OPENXR=1 TEST_WINDOWS_VULKAN=1)
+    target_compile_features(mkw_openxr_vulkan_replay_tests PRIVATE cxx_std_17)
+    set_target_properties(mkw_openxr_vulkan_replay_tests PROPERTIES UNITY_BUILD OFF)
+    add_test(NAME mkw_openxr_vulkan_replay_tests COMMAND mkw_openxr_vulkan_replay_tests)
 endif()
 
 add_executable(mkw_nand_save_tests "${CMAKE_CURRENT_LIST_DIR}/tests/nand_save_tests.cpp")

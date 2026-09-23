@@ -3,6 +3,8 @@
 #include <aurora/math.hpp>
 #include <webgpu/webgpu_cpp.h>
 
+#include "stereo.hpp"
+
 #include <cstdint>
 
 struct ImDrawData;
@@ -27,6 +29,20 @@ void composite_immersive(const wgpu::CommandEncoder& encoder, const wgpu::Textur
 // Draws it over a virtual-screen eye image, which is shown flat as a quad.
 void composite_flat(const wgpu::CommandEncoder& encoder, const wgpu::TextureView& eye, const wgpu::Extent3D& size,
                     uint32_t eyeIndex) noexcept;
+
+// Layer mode: the OpenXR backend shows the panel as its own compositor quad
+// layer, sharp at any eye resolution, so it is no longer drawn into the eyes
+// (both composite functions do nothing). Any thread; read by the frame worker.
+void set_layer_mode(bool enabled) noexcept;
+bool layer_mode() noexcept;
+
+// Frame worker, inside a stereo sink: the image to copy into a panel layer of
+// width x height in the eyes' format. That is the panel while it is showing at
+// exactly that size, and otherwise a transparent image of that size, so a layer
+// asked for before the panel's first frame (or after it closed) shows nothing.
+// A transparent image is cleared once, by a pass recorded into `encoder`.
+// False only when no image can be made.
+bool layer_source(const wgpu::CommandEncoder& encoder, uint32_t width, uint32_t height, stereo::EyeImage& out) noexcept;
 
 void shutdown() noexcept;
 

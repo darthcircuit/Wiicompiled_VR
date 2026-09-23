@@ -45,6 +45,10 @@ bool OpenXRWiiRemoteOwnsGamepad(uint32_t sdl_joystick_id) noexcept {
            wii_remote_bridge::g_joystick_id.load(std::memory_order_relaxed) == sdl_joystick_id;
 }
 
+bool OpenXRIsControllerGamepad(uint32_t sdl_joystick_id) noexcept {
+    return sdl_joystick_id != 0 && wii_remote_bridge::g_joystick_id.load(std::memory_order_relaxed) == sdl_joystick_id;
+}
+
 bool OpenXRReadWiiRemote(OpenXRWiiRemoteSample& sample) noexcept {
     auto& published = wii_remote_bridge::Published();
     std::lock_guard lock(published.mutex);

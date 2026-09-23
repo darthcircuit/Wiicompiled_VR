@@ -27,12 +27,29 @@ bool ValidateGuestLightObj(uint32_t addr, const char* operation) {
     return false;
 }
 
-float ReadGuestLightFloat(uint32_t addr, uint32_t offset) {
-    return Memory::ReadFloat32(addr + offset);
+// The SDK copies the light object into the FIFO at call time, so the guest
+// object is snapshotted on the game thread and decoded on the GX thread.
+struct GuestLightSnapshot {
+    uint32_t words[kLightObjSize / 4];
+};
+
+GuestLightSnapshot SnapshotGuestLight(uint32_t addr) {
+    GuestLightSnapshot snapshot{};
+    for (uint32_t i = 0; i < kLightObjSize / 4; ++i) {
+        snapshot.words[i] = Memory::Read32(addr + i * 4);
+    }
+    return snapshot;
 }
 
-void InitializeHostLightFromGuest(GXLightObj& host, uint32_t guestAddr) {
-    GXInitLightColor(&host, DecodeGxColor(Memory::Read32(guestAddr + kColorOffset)));
+float ReadGuestLightFloat(const GuestLightSnapshot& light, uint32_t offset) {
+    float value;
+    const uint32_t bits = light.words[offset / 4];
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+void InitializeHostLightFromGuest(GXLightObj& host, const GuestLightSnapshot& guestAddr) {
+    GXInitLightColor(&host, DecodeGxColor(guestAddr.words[kColorOffset / 4]));
     GXInitLightAttn(
         &host,
         ReadGuestLightFloat(guestAddr, kAttnAOffset + 0),
@@ -62,11 +79,14 @@ void InitializeHostLightFromGuest(GXLightObj& host, uint32_t guestAddr) {
 // Light Object Load
 // ============================================================================
 
+static void GX__LoadLightObjImm_gx(GuestLightSnapshot light, uint32_t lid) {
+    GXLightObj host{};
+    InitializeHostLightFromGuest(host, light);
+    GXLoadLightObjImm(&host, static_cast<GXLightID>(lid));
+}
 extern "C" void GX__LoadLightObjImm_80170320(uint32_t la, uint32_t lid) {
     if (!ValidateGuestLightObj(la, "GXLoadLightObjImm")) return;
-    GXLightObj host{};
-    InitializeHostLightFromGuest(host, la);
-    GXLoadLightObjImm(&host, static_cast<GXLightID>(lid));
+    GxThread::Post(&GX__LoadLightObjImm_gx, SnapshotGuestLight(la), lid);
 }
 PPC_NATIVE_OVERRIDE_VOID(80170320, GX__LoadLightObjImm_80170320, (uint32_t la, uint32_t lid), (la, lid));
 
@@ -74,24 +94,28 @@ PPC_NATIVE_OVERRIDE_VOID(80170320, GX__LoadLightObjImm_80170320, (uint32_t la, u
 // Channel Control
 // ============================================================================
 
-extern "C" void GX__SetChanAmbColor_8017039c(uint32_t c, uint32_t cp) {
+static void GX__SetChanAmbColor_gx(uint32_t c, uint32_t colorWord) {
     EnsureAuroraFrameActive();
-    GXColor color = DecodeGxColor(Memory::Read32(cp));
-    GXSetChanAmbColor((GXChannelID)c, color);
+    GXSetChanAmbColor((GXChannelID)c, DecodeGxColor(colorWord));
+}
+extern "C" void GX__SetChanAmbColor_8017039c(uint32_t c, uint32_t cp) {
+    GxThread::Post(&GX__SetChanAmbColor_gx, c, Memory::Read32(cp));
 }
 PPC_NATIVE_OVERRIDE_VOID(8017039c, GX__SetChanAmbColor_8017039c, (uint32_t c, uint32_t cp), (c, cp));
 
-extern "C" void GX__SetChanMatColor_80170474(uint32_t c, uint32_t cp) {
+static void GX__SetChanMatColor_gx(uint32_t c, uint32_t colorWord) {
     EnsureAuroraFrameActive();
-    GXColor color = DecodeGxColor(Memory::Read32(cp));
-    GXSetChanMatColor((GXChannelID)c, color);
+    GXSetChanMatColor((GXChannelID)c, DecodeGxColor(colorWord));
+}
+extern "C" void GX__SetChanMatColor_80170474(uint32_t c, uint32_t cp) {
+    GxThread::Post(&GX__SetChanMatColor_gx, c, Memory::Read32(cp));
 }
 PPC_NATIVE_OVERRIDE_VOID(80170474, GX__SetChanMatColor_80170474, (uint32_t c, uint32_t cp), (c, cp));
 
-extern "C" void GX__SetNumChans_8017054c(uint32_t n) { GXSetNumChans((u8)n); }
-PPC_NATIVE_OVERRIDE_VOID(8017054c, GX__SetNumChans_8017054c, (uint32_t n), (n));
+static void GX__SetNumChans_8017054c_gx(uint32_t n) { GXSetNumChans((u8)n); }
+GX_DEFERRED_OVERRIDE_VOID(8017054c, GX__SetNumChans_8017054c, (uint32_t n), (n));
 
-extern "C" void GX__SetChanCtrl_80170570(uint32_t ch, uint32_t en, uint32_t as, uint32_t ms, uint32_t lm, uint32_t df, uint32_t af) {
+static void GX__SetChanCtrl_80170570_gx(uint32_t ch, uint32_t en, uint32_t as, uint32_t ms, uint32_t lm, uint32_t df, uint32_t af) {
     GXSetChanCtrl((GXChannelID)ch, en!=0, (GXColorSrc)as, (GXColorSrc)ms, lm, (GXDiffuseFn)df, (GXAttnFn)af);
 }
-PPC_NATIVE_OVERRIDE_VOID(80170570, GX__SetChanCtrl_80170570, (uint32_t ch, uint32_t en, uint32_t as, uint32_t ms, uint32_t lm, uint32_t df, uint32_t af), (ch, en, as, ms, lm, df, af));
+GX_DEFERRED_OVERRIDE_VOID(80170570, GX__SetChanCtrl_80170570, (uint32_t ch, uint32_t en, uint32_t as, uint32_t ms, uint32_t lm, uint32_t df, uint32_t af), (ch, en, as, ms, lm, df, af));

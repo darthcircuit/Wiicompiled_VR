@@ -58,6 +58,8 @@ extern wgpu::RenderPipeline g_CopyPipeline;
 extern wgpu::BindGroup g_CopyBindGroup;
 extern wgpu::Instance g_instance;
 extern bool g_bcTexturesSupported;
+// The device was created with TimestampQuery, so passes may carry timestamp writes (gfx::gpu_timing_*).
+extern bool g_timestampQueriesSupported;
 
 bool initialize(AuroraBackend backend);
 void shutdown();

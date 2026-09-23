@@ -3,6 +3,7 @@
 #include "settings_overlay.h"
 #include "runtime_config.h"
 #include "fiber_manager.h"
+#include "gx_thread.h"
 
 #include <aurora/aurora.h>
 #include <aurora/event.h>
@@ -142,7 +143,11 @@ inline bool BeginAuroraFrame() {
     if (!aurora_begin_frame()) {
         return false;
     }
-    ApplyPendingMkwDynamicAspectSurface();
+    // The viewport policy writes guest memory (EGG screen records), so the GX
+    // thread leaves it to the game thread's present path.
+    if (!GxThread::IsGxThread()) {
+        ApplyPendingMkwDynamicAspectSurface();
+    }
     return true;
 }
 

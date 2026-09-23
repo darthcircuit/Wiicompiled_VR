@@ -8,6 +8,10 @@
 #include <cstdio>
 #include <cstdlib>
 
+// Game-thread mirror for the GXGet* overrides; the parser state in
+// g_hleGxState belongs to the GX thread.
+GxGameSideVertexState g_gxGameVertexState;
+
 namespace {
 uint32_t CanonicalVtxAttr(uint32_t attr) {
     return attr == GX_VA_NBT ? GX_VA_NRM : attr;
@@ -31,7 +35,7 @@ void ApplyAuroraVtxStateForBegin(GXVtxFmt fmt) {
 // Vertex Descriptor
 // ============================================================================
 
-extern "C" void GX__ClearVtxDesc_8016dc34() {
+static void GX__ClearVtxDesc_8016dc34_gx() {
     bool changed = false;
     for(int i=0; i<26; ++i){
         changed |= g_hleGxState.vtxDesc[i] != GX_NONE;
@@ -41,9 +45,15 @@ extern "C" void GX__ClearVtxDesc_8016dc34() {
     // GXClearVtxDesc resets descriptors only; array base/stride state persists.
     GXClearVtxDesc();
 }
+extern "C" void GX__ClearVtxDesc_8016dc34() {
+    for (int i = 0; i < 26; ++i) {
+        g_gxGameVertexState.vtxDesc[i] = GX_NONE;
+    }
+    GxThread::Post(&GX__ClearVtxDesc_8016dc34_gx);
+}
 PPC_NATIVE_OVERRIDE_VOID(8016dc34, GX__ClearVtxDesc_8016dc34, (), ());
 
-extern "C" void GX__SetVtxDesc_8016d3a4(uint32_t a, uint32_t t) {
+static void GX__SetVtxDesc_8016d3a4_gx(uint32_t a, uint32_t t) {
     const uint32_t attr = CanonicalVtxAttr(a);
     if(attr>=26||attr==GX_VA_NULL) return;
     const GXAttrType oldType = g_hleGxState.vtxDesc[attr];
@@ -54,6 +64,16 @@ extern "C" void GX__SetVtxDesc_8016d3a4(uint32_t a, uint32_t t) {
     if (g_hleGxState.vtxDesc[attr] != oldType) g_hleGxState.InvalidateVtxLayoutHash();
     if(IsMatrixIndexAttr((GXAttr)attr)) return;
     GXSetVtxDesc((GXAttr)a, (t==GX_INDEX8||t==GX_INDEX16)?GX_DIRECT:(GXAttrType)t);
+}
+extern "C" void GX__SetVtxDesc_8016d3a4(uint32_t a, uint32_t t) {
+    const uint32_t attr = CanonicalVtxAttr(a);
+    if (attr < 26 && attr != GX_VA_NULL) {
+        g_gxGameVertexState.vtxDesc[attr] = (GXAttrType)t;
+        if (a == GX_VA_NBT) {
+            g_gxGameVertexState.vtxDesc[GX_VA_NBT] = GX_NONE;
+        }
+    }
+    GxThread::Post(&GX__SetVtxDesc_8016d3a4_gx, a, t);
 }
 PPC_NATIVE_OVERRIDE_VOID(8016d3a4, GX__SetVtxDesc_8016d3a4, (uint32_t a, uint32_t t), (a, t));
 
@@ -72,7 +92,7 @@ extern "C" void GX__GetVtxDesc_8016d9f0(uint32_t a, uint32_t tp) {
     GXAttrType type = GX_NONE;
     const uint32_t attr = CanonicalVtxAttr(a);
     if (attr < GX_VA_MAX_ATTR && attr != GX_VA_NULL) {
-        type = g_hleGxState.vtxDesc[attr];
+        type = g_gxGameVertexState.vtxDesc[attr];
     }
     if (tp) {
         Memory::Write32(tp, static_cast<uint32_t>(type));
@@ -88,11 +108,11 @@ extern "C" void GX__GetVtxDescv_8016dba4(uint32_t la) {
     uint32_t p = la;
     for (uint32_t a = GX_VA_PNMTXIDX; a <= GX_VA_TEX7; ++a) {
         Memory::Write32(p, a);
-        Memory::Write32(p + 4, static_cast<uint32_t>(g_hleGxState.vtxDesc[a]));
+        Memory::Write32(p + 4, static_cast<uint32_t>(g_gxGameVertexState.vtxDesc[a]));
         p += 8;
     }
     Memory::Write32(p, GX_VA_NBT);
-    Memory::Write32(p + 4, static_cast<uint32_t>(g_hleGxState.vtxDesc[GX_VA_NRM]));
+    Memory::Write32(p + 4, static_cast<uint32_t>(g_gxGameVertexState.vtxDesc[GX_VA_NRM]));
     p += 8;
     Memory::Write32(p, GX_VA_NULL);
 }
@@ -102,7 +122,7 @@ PPC_NATIVE_OVERRIDE_VOID(8016dba4, GX__GetVtxDescv_8016dba4, (uint32_t la), (la)
 // Vertex Attribute Format
 // ============================================================================
 
-extern "C" void GX__SetVtxAttrFmt_8016dc68(uint32_t vf, uint32_t a, uint32_t c, uint32_t t, uint32_t fr) {
+static void GX__SetVtxAttrFmt_8016dc68_gx(uint32_t vf, uint32_t a, uint32_t c, uint32_t t, uint32_t fr) {
     const uint32_t attr = CanonicalVtxAttr(a);
     if(vf<8&&attr<26){
         const VtxAttrFmt oldFmt = g_hleGxState.vtxAttrFmt[vf][attr];
@@ -122,6 +142,19 @@ extern "C" void GX__SetVtxAttrFmt_8016dc68(uint32_t vf, uint32_t a, uint32_t c, 
     }
     GXSetVtxAttrFmt((GXVtxFmt)vf, (GXAttr)a, (GXCompCnt)c, (GXCompType)t, (u8)fr);
 }
+extern "C" void GX__SetVtxAttrFmt_8016dc68(uint32_t vf, uint32_t a, uint32_t c, uint32_t t, uint32_t fr) {
+    const uint32_t attr = CanonicalVtxAttr(a);
+    if (vf < 8 && attr < 26) {
+        VtxAttrFmt& fmt = g_gxGameVertexState.vtxAttrFmt[vf][attr];
+        fmt.cnt = (GXCompCnt)c;
+        fmt.type = (GXCompType)t;
+        fmt.frac = (u8)fr;
+        if (a == GX_VA_NBT) {
+            g_gxGameVertexState.vtxAttrFmt[vf][GX_VA_NBT] = {};
+        }
+    }
+    GxThread::Post(&GX__SetVtxAttrFmt_8016dc68_gx, vf, a, c, t, fr);
+}
 PPC_NATIVE_OVERRIDE_VOID(8016dc68, GX__SetVtxAttrFmt_8016dc68, (uint32_t vf, uint32_t a, uint32_t c, uint32_t t, uint32_t fr), (vf, a, c, t, fr));
 
 extern "C" void GX__SetVtxAttrFmtv_8016de08(uint32_t vf, uint32_t la) {
@@ -139,7 +172,7 @@ extern "C" void GX__GetVtxAttrFmt_8016e04c(uint32_t vf, uint32_t a, uint32_t cp,
     VtxAttrFmt fmt{};
     const uint32_t attr = CanonicalVtxAttr(a);
     if (vf < 8 && attr < GX_VA_MAX_ATTR && attr != GX_VA_NULL) {
-        fmt = g_hleGxState.vtxAttrFmt[vf][attr];
+        fmt = g_gxGameVertexState.vtxAttrFmt[vf][attr];
     }
     if (cp) {
         Memory::Write32(cp, static_cast<uint32_t>(fmt.cnt));
@@ -162,7 +195,7 @@ extern "C" void GX__GetVtxAttrFmtv_8016e2b8(uint32_t vf, uint32_t la) {
     for (uint32_t a = GX_VA_POS; a <= GX_VA_TEX7; ++a) {
         VtxAttrFmt fmt{};
         if (vf < 8) {
-            fmt = g_hleGxState.vtxAttrFmt[vf][a];
+            fmt = g_gxGameVertexState.vtxAttrFmt[vf][a];
         }
         Memory::Write32(p, a);
         Memory::Write32(p + 4, static_cast<uint32_t>(fmt.cnt));
@@ -178,11 +211,11 @@ PPC_NATIVE_OVERRIDE_VOID(8016e2b8, GX__GetVtxAttrFmtv_8016e2b8, (uint32_t vf, ui
 // Vertex Arrays
 // ============================================================================
 
-extern "C" void GX__SetArray_8016e32c(uint32_t a, uint32_t ba, uint32_t str) {
+static void GX__SetArray_8016e32c_gx(uint32_t a, uint32_t ba, uint32_t str) {
     const uint32_t attr = CanonicalVtxAttr(a);
     if(attr<26){ g_hleGxState.vtxArray[attr].base=ba; g_hleGxState.vtxArray[attr].stride=str; }
 }
-PPC_NATIVE_OVERRIDE_VOID(8016e32c, GX__SetArray_8016e32c, (uint32_t a, uint32_t ba, uint32_t str), (a, ba, str));
+GX_DEFERRED_OVERRIDE_VOID(8016e32c, GX__SetArray_8016e32c, (uint32_t a, uint32_t ba, uint32_t str), (a, ba, str));
 
 // Switch-artifact entry point for the same SDK function; forwards rather than
 // repeating the body.
@@ -193,12 +226,12 @@ PPC_NATIVE_OVERRIDE_VOID(8016e1c4, GX__SetArray_8016e1c4, (uint32_t a, uint32_t 
 // Texture Coordinate Generation
 // ============================================================================
 
-extern "C" void GX__SetNumTexGens_8016e5a4(uint32_t n) {
+static void GX__SetNumTexGens_8016e5a4_gx(uint32_t n) {
     GXSetNumTexGens((u8)n);
 }
-PPC_NATIVE_OVERRIDE_VOID(8016e5a4, GX__SetNumTexGens_8016e5a4, (uint32_t n), (n));
+GX_DEFERRED_OVERRIDE_VOID(8016e5a4, GX__SetNumTexGens_8016e5a4, (uint32_t n), (n));
 
-extern "C" void GX__SetTexCoordGen2_8016e37c(uint32_t dc, uint32_t f, uint32_t sp, uint32_t m, uint32_t n, uint32_t pm) {
+static void GX__SetTexCoordGen2_8016e37c_gx(uint32_t dc, uint32_t f, uint32_t sp, uint32_t m, uint32_t n, uint32_t pm) {
     if (sp >= static_cast<uint32_t>(GX_MAX_TEXGENSRC)) {
         uint32_t pc = 0;
         uint32_t lr = 0;
@@ -212,24 +245,24 @@ extern "C" void GX__SetTexCoordGen2_8016e37c(uint32_t dc, uint32_t f, uint32_t s
     }
     GXSetTexCoordGen2((GXTexCoordID)dc, (GXTexGenType)f, (GXTexGenSrc)sp, m, (GXBool)n, pm);
 }
-PPC_NATIVE_OVERRIDE_VOID(8016e37c, GX__SetTexCoordGen2_8016e37c, (uint32_t dc, uint32_t f, uint32_t sp, uint32_t m, uint32_t n, uint32_t pm), (dc, f, sp, m, n, pm));
+GX_DEFERRED_OVERRIDE_VOID(8016e37c, GX__SetTexCoordGen2_8016e37c, (uint32_t dc, uint32_t f, uint32_t sp, uint32_t m, uint32_t n, uint32_t pm), (dc, f, sp, m, n, pm));
 
-extern "C" void GX__EnableTexOffsets_8016f37c(uint32_t coord, uint32_t lineEnable, uint32_t pointEnable) {
+static void GX__EnableTexOffsets_8016f37c_gx(uint32_t coord, uint32_t lineEnable, uint32_t pointEnable) {
     GXEnableTexOffsets(static_cast<GXTexCoordID>(coord),
                        lineEnable ? GX_TRUE : GX_FALSE,
                        pointEnable ? GX_TRUE : GX_FALSE);
 }
-PPC_NATIVE_OVERRIDE_VOID(8016f37c, GX__EnableTexOffsets_8016f37c, (uint32_t coord, uint32_t lineEnable, uint32_t pointEnable), (coord, lineEnable, pointEnable));
+GX_DEFERRED_OVERRIDE_VOID(8016f37c, GX__EnableTexOffsets_8016f37c, (uint32_t coord, uint32_t lineEnable, uint32_t pointEnable), (coord, lineEnable, pointEnable));
 
-extern "C" void GX__SetLineWidth_8016f314(uint32_t width, uint32_t texOffsets) {
+static void GX__SetLineWidth_8016f314_gx(uint32_t width, uint32_t texOffsets) {
     GXSetLineWidth(static_cast<u8>(width), static_cast<GXTexOffset>(texOffsets));
 }
-PPC_NATIVE_OVERRIDE_VOID(8016f314, GX__SetLineWidth_8016f314, (uint32_t width, uint32_t texOffsets), (width, texOffsets));
+GX_DEFERRED_OVERRIDE_VOID(8016f314, GX__SetLineWidth_8016f314, (uint32_t width, uint32_t texOffsets), (width, texOffsets));
 
-extern "C" void GX__SetPointSize_8016f348(uint32_t pointSize, uint32_t texOffsets) {
+static void GX__SetPointSize_8016f348_gx(uint32_t pointSize, uint32_t texOffsets) {
     GXSetPointSize(static_cast<u8>(pointSize), static_cast<GXTexOffset>(texOffsets));
 }
-PPC_NATIVE_OVERRIDE_VOID(8016f348, GX__SetPointSize_8016f348, (uint32_t pointSize, uint32_t texOffsets), (pointSize, texOffsets));
+GX_DEFERRED_OVERRIDE_VOID(8016f348, GX__SetPointSize_8016f348, (uint32_t pointSize, uint32_t texOffsets), (pointSize, texOffsets));
 
 // ============================================================================
 // Begin/End Drawing
@@ -284,6 +317,13 @@ void ServiceDeferredTimingDuringGxWork() {
 }
 }
 
+void GX__Begin_gx(uint32_t t, uint32_t vf, uint32_t nv) {
+    ApplyAuroraVtxStateForBegin(static_cast<GXVtxFmt>(vf));
+    g_hleGxState.currentVtxFmt=(GXVtxFmt)vf; g_hleGxState.currentPrim=(GXPrimitive)t;
+    g_hleGxState.vertsRemaining=nv; g_hleGxState.inBegin=true; g_hleGxState.auroraBeginCalled=false;
+    g_hleGxState.fifoReadOffset = 0;
+    g_hleGxState.fifoByteCount=0; g_hleGxState.ResetVertex();
+}
 extern "C" void GX__Begin_8016f0f0(uint32_t t, uint32_t vf, uint32_t nv) {
     if(IsDisplayListActive()){
         WriteDisplayListData((u8)(t|vf), 1);
@@ -291,21 +331,19 @@ extern "C" void GX__Begin_8016f0f0(uint32_t t, uint32_t vf, uint32_t nv) {
         return;
     }
     ServiceDeferredTimingDuringGxWork();
-    ApplyAuroraVtxStateForBegin(static_cast<GXVtxFmt>(vf));
-    g_hleGxState.currentVtxFmt=(GXVtxFmt)vf; g_hleGxState.currentPrim=(GXPrimitive)t;
-    g_hleGxState.vertsRemaining=nv; g_hleGxState.inBegin=true; g_hleGxState.auroraBeginCalled=false;
-    g_hleGxState.fifoReadOffset = 0;
-    g_hleGxState.fifoByteCount=0; g_hleGxState.ResetVertex();
+    GxThread::Post(&GX__Begin_gx, t, vf, nv);
 }
 PPC_NATIVE_OVERRIDE_VOID(8016f0f0, GX__Begin_8016f0f0, (uint32_t t, uint32_t vf, uint32_t nv), (t, vf, nv));
 
-extern "C" void GX__End_80044b30() { g_hleGxState.inBegin=false; GXEnd(); }
-PPC_NATIVE_OVERRIDE_VOID(80044b30, GX__End_80044b30, (), ());
+static void GX__End_80044b30_gx() { g_hleGxState.inBegin=false; GXEnd(); }
+GX_DEFERRED_OVERRIDE_VOID(80044b30, GX__End_80044b30, (), ());
 
 extern "C" void GX__End_80048c30() { GX__End_80044b30(); }
 PPC_NATIVE_OVERRIDE_VOID(80048c30, GX__End_80048c30, (), ());
 
-extern "C" void GX__DrawSphere_80172a30(uint32_t numMajor, uint32_t numMinor) {
+// Runs whole on the GX thread: it edits the parser's descriptor state and
+// restores it, so the game-side mirror is unchanged on return.
+static void GX__DrawSphere_80172a30_gx(uint32_t numMajor, uint32_t numMinor) {
     constexpr uint32_t kAttrCount = 26;
     constexpr float kSphereRadius = 1.0f;
     constexpr float kPi = 3.14159265358979323846f;
@@ -330,13 +368,13 @@ extern "C" void GX__DrawSphere_80172a30(uint32_t numMajor, uint32_t numMinor) {
         g_hleGxState.InvalidateVtxLayoutHash();
         GXClearVtxDesc();
 
-        GX__SetVtxDesc_8016d3a4(GX_VA_POS, GX_DIRECT);
-        GX__SetVtxDesc_8016d3a4(GX_VA_NRM, GX_DIRECT);
-        GX__SetVtxAttrFmt_8016dc68(GX_VTXFMT3, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
-        GX__SetVtxAttrFmt_8016dc68(GX_VTXFMT3, GX_VA_NRM, GX_NRM_XYZ, GX_F32, 0);
+        GX__SetVtxDesc_8016d3a4_gx(GX_VA_POS, GX_DIRECT);
+        GX__SetVtxDesc_8016d3a4_gx(GX_VA_NRM, GX_DIRECT);
+        GX__SetVtxAttrFmt_8016dc68_gx(GX_VTXFMT3, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+        GX__SetVtxAttrFmt_8016dc68_gx(GX_VTXFMT3, GX_VA_NRM, GX_NRM_XYZ, GX_F32, 0);
         if (hadTex0) {
-            GX__SetVtxDesc_8016d3a4(GX_VA_TEX0, GX_DIRECT);
-            GX__SetVtxAttrFmt_8016dc68(GX_VTXFMT3, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+            GX__SetVtxDesc_8016d3a4_gx(GX_VA_TEX0, GX_DIRECT);
+            GX__SetVtxAttrFmt_8016dc68_gx(GX_VTXFMT3, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
         }
 
         const float majorStep = kPi / static_cast<float>(numMajor);
@@ -400,12 +438,12 @@ extern "C" void GX__DrawSphere_80172a30(uint32_t numMajor, uint32_t numMinor) {
     for (uint32_t attr = 0; attr < kAttrCount; ++attr) {
         const GXAttrType type = savedVtxDesc[attr];
         if (type != GX_NONE) {
-            GX__SetVtxDesc_8016d3a4(attr, static_cast<uint32_t>(type));
+            GX__SetVtxDesc_8016d3a4_gx(attr, static_cast<uint32_t>(type));
         }
     }
     for (uint32_t attr = GX_VA_POS; attr <= GX_VA_TEX7; ++attr) {
         const VtxAttrFmt& fmt = savedFmt3[attr];
-        GX__SetVtxAttrFmt_8016dc68(GX_VTXFMT3, attr, static_cast<uint32_t>(fmt.cnt), static_cast<uint32_t>(fmt.type), fmt.frac);
+        GX__SetVtxAttrFmt_8016dc68_gx(GX_VTXFMT3, attr, static_cast<uint32_t>(fmt.cnt), static_cast<uint32_t>(fmt.type), fmt.frac);
     }
 }
-PPC_NATIVE_OVERRIDE_VOID(80172a30, GX__DrawSphere_80172a30, (uint32_t numMajor, uint32_t numMinor), (numMajor, numMinor));
+GX_DEFERRED_OVERRIDE_VOID(80172a30, GX__DrawSphere_80172a30, (uint32_t numMajor, uint32_t numMinor), (numMajor, numMinor));

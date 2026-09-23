@@ -13,6 +13,7 @@
 
 #include "fs_helper.hpp"
 #include "internal.hpp"
+#include "stereo_overlay.hpp"
 #include "webgpu/gpu.hpp"
 #include "window.hpp"
 
@@ -28,7 +29,11 @@ static std::string g_imguiLog{};
 static bool g_useSdlRenderer = false;
 // Set once ImGui::Render() has produced this frame's draw data. Interpolation encodes up to four
 // ImGui passes per frame, and every one of them used to rebuild the draw lists from scratch.
-static bool g_frameDataBuilt = false;
+static bool g_frameDataBuilt = true;
+// Host-owned frames (see imgui.hpp). Once the host begins one, aurora never calls new_frame() or
+// ImGui::Render() itself; the sealed frame carries the host's copy of the draw data instead.
+static bool g_hostFrames = false;
+static bool g_hostFrameOpen = false;
 
 static std::vector<SDL_Texture*> g_sdlTextures;
 static std::vector<wgpu::Texture> g_wgpuTextures;
@@ -179,7 +184,7 @@ void new_frame(const AuroraWindowSize& size) noexcept {
 
 void render_frame_data() noexcept {
   ZoneScoped;
-  if (g_frameDataBuilt) {
+  if (g_frameDataBuilt || g_hostFrames) {
     return;
   }
   ImGui::Render();
@@ -190,6 +195,11 @@ void render_frame_data() noexcept {
 
 void render(const wgpu::RenderPassEncoder& pass) noexcept {
   ZoneScoped;
+  if (g_hostFrames) {
+    // The shared context's draw data belongs to the host's current frame now;
+    // a sealed frame without a host copy has nothing safe to draw.
+    return;
+  }
   render_frame_data();
 
   auto* data = ImGui::GetDrawData();
@@ -203,6 +213,71 @@ void render(const wgpu::RenderPassEncoder& pass) noexcept {
     ImGui_ImplWGPU_RenderDrawData(data, pass.Get());
     pass.PopDebugGroup();
   }
+}
+
+struct HostFrame {
+  ImDrawData data{};
+  std::vector<ImDrawList*> lists;
+  ~HostFrame() {
+    for (ImDrawList* list : lists) {
+      IM_DELETE(list);
+    }
+  }
+};
+
+void host_frame_begin(const AuroraWindowSize& size) noexcept {
+  g_hostFrames = true;
+  if (g_hostFrameOpen) {
+    return;
+  }
+  if (!g_frameDataBuilt) {
+    // aurora started this frame itself before the host took over: adopt it.
+    g_hostFrameOpen = true;
+    return;
+  }
+  new_frame(size);
+  g_hostFrameOpen = true;
+}
+
+HostFramePtr host_frame_end() noexcept {
+  ZoneScoped;
+  if (!g_hostFrameOpen) {
+    host_frame_begin(window::get_window_size());
+  }
+  ImGui::Render();
+  ImDrawData* source = ImGui::GetDrawData();
+  source->FramebufferScale = ImGui::GetIO().DisplayFramebufferScale;
+  auto frame = std::make_shared<HostFrame>();
+  frame->data = *source;
+  frame->data.CmdLists.clear();
+  frame->lists.reserve(static_cast<size_t>(source->CmdListsCount));
+  for (int i = 0; i < source->CmdListsCount; ++i) {
+    const ImDrawList* src = source->CmdLists[i];
+    ImDrawList* copy = IM_NEW(ImDrawList)(src->_Data);
+    copy->CmdBuffer = src->CmdBuffer;
+    copy->IdxBuffer = src->IdxBuffer;
+    copy->VtxBuffer = src->VtxBuffer;
+    copy->Flags = src->Flags;
+    frame->lists.push_back(copy);
+    frame->data.CmdLists.push_back(copy);
+  }
+  g_hostFrameOpen = false;
+  g_frameDataBuilt = true;
+  return frame;
+}
+
+bool host_frames_active() noexcept { return g_hostFrames; }
+
+const ImDrawData* host_frame_draw_data(const HostFrame& frame) noexcept { return &frame.data; }
+
+void render(const wgpu::RenderPassEncoder& pass, const ImDrawData* data) noexcept {
+  ZoneScoped;
+  if (g_useSdlRenderer || data == nullptr) {
+    return;
+  }
+  pass.PushDebugGroup("Aurora: Dear Imgui");
+  ImGui_ImplWGPU_RenderDrawData(const_cast<ImDrawData*>(data), pass.Get());
+  pass.PopDebugGroup();
 }
 
 StereoOverlay latch_stereo_overlay() noexcept {
@@ -273,6 +348,8 @@ extern "C" {
 ImTextureID aurora_imgui_add_texture(uint32_t width, uint32_t height, const void* rgba8) {
   return aurora::imgui::add_texture(width, height, static_cast<const uint8_t*>(rgba8));
 }
+
+void aurora_set_stereo_panel_layer(bool enabled) { aurora::stereo_overlay::set_layer_mode(enabled); }
 
 void aurora_imgui_set_stereo_overlay(ImDrawData* drawData, float widthFraction) {
   std::lock_guard lock(aurora::imgui::g_stereoOverlayMutex);

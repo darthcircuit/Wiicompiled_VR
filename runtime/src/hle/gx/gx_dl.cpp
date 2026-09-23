@@ -28,9 +28,13 @@ using GxCpDecode::SameVtxAttrFmt;
 // Small display lists dominate the in-race call count. Cache them as well, but
 // cap both individual entries and aggregate copied command bytes so malformed
 // guest input cannot turn this optimization into unbounded host allocation.
-constexpr uint32_t kDlScanCacheMaxEntryBytes = 64u * 1024u;
+// The entry cap was 64 KiB: a list above it was never cached and its index
+// scan ran on every call, which on a Retro Rewind track with large shape lists
+// was 11% of the game thread on a Quest 3. Only lists that need flattening
+// store a copy, and the aggregate cap still bounds those.
+constexpr uint32_t kDlScanCacheMaxEntryBytes = 4u * 1024u * 1024u;
 constexpr size_t kDlScanCacheMaxEntries = 8192;
-constexpr size_t kDlScanCacheMaxStoredBytes = 8u * 1024u * 1024u;
+constexpr size_t kDlScanCacheMaxStoredBytes = 32u * 1024u * 1024u;
 
 // Display-list write tracking (audit F6a): re-digesting every list every call is the
 // costliest step of GX__CallDisplayList, and wasted on BRRES shape lists that are written
@@ -124,7 +128,7 @@ static inline void AppendLytQuadVertices(uint8_t* packet, uint32_t& pos, float x
     AppendLytQuadVertex(packet, pos, x0, y1, texCoordAddr, texCoordCount, 16, colors, 2);
 }
 
-static bool CanSubmitLytDrawDirect(int texCoordCount, const uint32_t* colors) {
+static bool CanSubmitLytDrawDirect(int texCoordCount, bool hasColors) {
     if (texCoordCount < 0 || texCoordCount > 8) {
         return false;
     }
@@ -135,7 +139,6 @@ static bool CanSubmitLytDrawDirect(int texCoordCount, const uint32_t* colors) {
         return false;
     }
 
-    const bool hasColors = colors != nullptr;
     const auto& clrFmt = g_hleGxState.vtxAttrFmt[GX_VTXFMT0][GX_VA_CLR0];
     if (hasColors) {
         if (g_hleGxState.vtxDesc[GX_VA_CLR0] != GX_DIRECT ||
@@ -175,33 +178,30 @@ static bool CanSubmitLytDrawDirect(int texCoordCount, const uint32_t* colors) {
     return true;
 }
 
-static bool SubmitLytDrawDirect(float x0, float y0, float x1, float y1, int texCoordCount,
-                                uint32_t texCoordAddr, const uint32_t* colors) {
-    if (!CanSubmitLytDrawDirect(texCoordCount, colors)) {
-        return false;
+// One nw4r::lyt quad as a GX draw packet (3-byte header, 4 vertices), built on
+// the game thread from the guest's layout data and submitted on the GX thread,
+// whose descriptor state decides between the raw-draw fast path and the packet
+// parser.
+struct GxLytQuadPacket {
+    uint32_t bytes = 0;
+    int32_t texCoordCount = 0;
+    bool hasColors = false;
+    uint8_t data[3u + 4u * (8u + 4u + 8u * 8u)];
+};
+
+static void GxLytQuad_gx(GxLytQuadPacket packet) {
+    if (CanSubmitLytDrawDirect(packet.texCoordCount, packet.hasColors)) {
+        EnsureAuroraFrameActive();
+        ApplyAuroraVtxDesc();
+        ApplyAuroraVtxAttrFmtForDisplayList(GX_VTXFMT0, false);
+        EnsureDefaultGxAlphaCompare();
+        if (aurora::gx::fifo::submit_raw_draw(GX_QUADS, GX_VTXFMT0, packet.data + 3, 4, packet.bytes - 3u)) {
+            GXMarkFrameWork();
+            SyncAppliedVtxStateFromHleReal();
+            return;
+        }
     }
-
-
-    EnsureAuroraFrameActive();
-
-    ApplyAuroraVtxDesc();
-
-    ApplyAuroraVtxAttrFmtForDisplayList(GX_VTXFMT0, false);
-
-    EnsureDefaultGxAlphaCompare();
-
-
-    std::array<uint8_t, 4u * (8u + 4u + 8u * 8u)> vertices{};
-    uint32_t pos = 0;
-    AppendLytQuadVertices(vertices.data(), pos, x0, y0, x1, y1, texCoordAddr, texCoordCount, colors);
-
-    if (!aurora::gx::fifo::submit_raw_draw(GX_QUADS, GX_VTXFMT0, vertices.data(), 4, pos)) {
-        return false;
-    }
-    GXMarkFrameWork();
-
-    SyncAppliedVtxStateFromHleReal();
-    return true;
+    SubmitLytDrawPacket(packet.data, packet.bytes);
 }
 
 static inline void EmitLytDrawQuad(uint32_t posAddr, uint32_t sizeAddr, int texCoordCount,
@@ -213,10 +213,6 @@ static inline void EmitLytDrawQuad(uint32_t posAddr, uint32_t sizeAddr, int texC
     const float x1 = static_cast<float>(x0 + Memory::ReadFloat32(sizeAddr));
     const float y1 = static_cast<float>(y0 - Memory::ReadFloat32(sizeAddr + 4));
 
-    if (SubmitLytDrawDirect(x0, y0, x1, y1, texCoordCount, texCoordAddr, colors)) {
-        return;
-    }
-
     // GX has exactly 8 texture coordinates, so nw4r::lyt cannot ask for more.
     // The fixed packet buffer below is sized for that maximum; bail rather than
     // overrun it if the guest ever hands us something else.
@@ -224,12 +220,15 @@ static inline void EmitLytDrawQuad(uint32_t posAddr, uint32_t sizeAddr, int texC
         return;
     }
 
-    std::array<uint8_t, 3u + 4u * (8u + 4u + 8u * 8u)> packet{};
+    GxLytQuadPacket packet{};
+    packet.texCoordCount = texCoordCount;
+    packet.hasColors = colors != nullptr;
     uint32_t pos = 0;
-    packet[pos++] = GX_DRAW_QUADS_CMD | GX_VTXFMT0;
-    BigEndian::Append16(packet.data(), pos, 4);
-    AppendLytQuadVertices(packet.data(), pos, x0, y0, x1, y1, texCoordAddr, texCoordCount, colors);
-    SubmitLytDrawPacket(packet.data(), pos);
+    packet.data[pos++] = GX_DRAW_QUADS_CMD | GX_VTXFMT0;
+    BigEndian::Append16(packet.data, pos, 4);
+    AppendLytQuadVertices(packet.data, pos, x0, y0, x1, y1, texCoordAddr, texCoordCount, colors);
+    packet.bytes = pos;
+    GxThread::Post(&GxLytQuad_gx, packet);
 }
 
 static uint32_t SubmitDLVertex(const uint8_t* ptr, GXVtxFmt vtxfmt, const GXAttrType* sourceVtxDesc) {
@@ -1289,7 +1288,8 @@ extern "C" void GxNotifyDisplayListMemoryWrite(uint32_t addr, uint32_t size) {
     GxGuestWrite::NotifyWrite(addr, size);
 }
 
-extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes) {
+// The list itself is read when the GX thread reaches the call, as the GP does.
+void GX__CallDisplayList_gx(uint32_t listAddr, uint32_t nbytes) {
     if (nbytes == 0 || listAddr == 0) return;
     try {
         const uint8_t* list = static_cast<const uint8_t*>(GuestToHostPtr(listAddr, nbytes));
@@ -1483,6 +1483,9 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
     } catch (...) {}
 }
 
+extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes) {
+    GxThread::Post(&GX__CallDisplayList_gx, listAddr, nbytes);
+}
 PPC_NATIVE_OVERRIDE_VOID(80172F64, GX__CallDisplayList_80172f64, (uint32_t listAddr, uint32_t nbytes), (listAddr, nbytes));
 
 extern "C" void nw4r__lyt__detail__DrawQuad_800847c0(CpuContext* ctx) {

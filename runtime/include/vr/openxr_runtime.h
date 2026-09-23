@@ -106,6 +106,23 @@ public:
     OpenXRRuntime(OpenXRRuntime&&) = delete;
     OpenXRRuntime& operator=(OpenXRRuntime&&) = delete;
 
+    // Same-device Vulkan runtimes may touch Dawn's queue in frame/swapchain
+    // calls. Share Dawn's device guard; never hold it across xrWaitFrame.
+    struct GraphicsQueueGuard {
+        GraphicsQueueGuard(void* value, void (*release)(void*)) : token(value), unlock(release) {}
+        GraphicsQueueGuard(const GraphicsQueueGuard&) = delete;
+        GraphicsQueueGuard& operator=(const GraphicsQueueGuard&) = delete;
+        void* token;
+        void (*unlock)(void*);
+        ~GraphicsQueueGuard() { if (token && unlock) unlock(token); }
+    };
+    void SetGraphicsQueueGuard(void* (*lock)(), void (*unlock)(void*)) {
+        m_queue_lock = lock; m_queue_unlock = unlock;
+    }
+    GraphicsQueueGuard LockGraphicsQueue() const {
+        return {m_queue_lock ? m_queue_lock() : nullptr, m_queue_unlock};
+    }
+
     // Creates the instance, resolves the HMD system, and enumerates the stereo
     // view configuration. Returns false without terminating the application;
     // the caller should continue in non-VR mode.
@@ -153,6 +170,11 @@ public:
     OpenXRFrameStatus WaitFrame(OpenXRFrame& frame);
     bool BeginFrame(const OpenXRFrame& frame);
     bool LocateViews(OpenXRFrame& frame);
+    // Locates the views for `display_time` outside the frame protocol, for a
+    // packet whose eyes are rendered before the compositor frame that will show
+    // them is begun (the standalone backend's render-first pacing). Fills the
+    // frame's display time, views, flags and validity; requires a running session.
+    bool LocateViewsAt(XrTime display_time, OpenXRFrame& frame);
     bool EndFrame(
         const OpenXRFrame& frame,
         const XrCompositionLayerBaseHeader* const* layers,
@@ -209,6 +231,8 @@ public:
     const OpenXRError& LastError() const { return m_last_error; }
 
 private:
+    void* (*m_queue_lock)() = nullptr;
+    void (*m_queue_unlock)(void*) = nullptr;
     enum class FramePhase {
         Idle,
         Waited,
@@ -224,6 +248,7 @@ private:
     bool EnumerateSwapchainFormats();
     bool HandleSessionStateChanged(const XrEventDataSessionStateChanged& event);
     bool IsFrameTokenCurrent(const OpenXRFrame& frame, FramePhase expected) const;
+    bool LocateViewsForFrame(OpenXRFrame& frame);
     void ResetFrameState();
     void DestroyReferenceSpaces();
     void ResetSessionState();

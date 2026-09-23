@@ -80,6 +80,7 @@ wgpu::Instance g_instance;
 static wgpu::AdapterInfo g_adapterInfo;
 static wgpu::SurfaceCapabilities g_surfaceCapabilities;
 bool g_bcTexturesSupported;
+bool g_timestampQueriesSupported = false;
 // Written by Dawn's device-loss callback and consumed at ordered frame boundaries. Keep the
 // callback free of logging, allocation, teardown and renderer state mutation.
 static std::atomic_bool g_deviceLost{false};
@@ -702,6 +703,12 @@ bool initialize(AuroraBackend auroraBackend) {
         g_bcTexturesSupported = true;
         requiredFeatures.push_back(feature);
       }
+      // Per-pass GPU timing for the frame-rate log (gfx::gpu_timing_*). Requesting the feature
+      // costs nothing until a pass carries timestamp writes.
+      if (feature == wgpu::FeatureName::TimestampQuery) {
+        g_timestampQueriesSupported = true;
+        requiredFeatures.push_back(feature);
+      }
       // The presenter calls device and queue methods while the frame worker encodes, which Dawn only
       // supports with this feature; without it the two race inside the device's dynamic uploader.
       if (feature == wgpu::FeatureName::ImplicitDeviceSynchronization) {
@@ -769,10 +776,15 @@ bool initialize(AuroraBackend auroraBackend) {
     if (g_backendType == wgpu::BackendType::Vulkan) {
       enableToggles.push_back("vulkan_monolithic_pipeline_cache");
     }
+    // Dawn quantizes timestamp queries to 100 us for web privacy; the per-pass GPU timing wants
+    // the raw values.
+    const std::array<const char*, 1> disableToggles{"timestamp_quantization"};
     const wgpu::DawnTogglesDescriptor togglesDescriptor({
         .nextInChain = &cacheDescriptor,
         .enabledToggleCount = enableToggles.size(),
         .enabledToggles = enableToggles.data(),
+        .disabledToggleCount = g_timestampQueriesSupported ? disableToggles.size() : 0,
+        .disabledToggles = disableToggles.data(),
     });
 #endif
     wgpu::DeviceDescriptor deviceDescriptor;

@@ -10,9 +10,67 @@
 
 #include "../../gfx/common.hpp"
 #include "../../gx/fifo.hpp"
+#include "../../gx/native_wheel.hpp"
+
+// GX-thread entry points for the VR native steering wheel (native_wheel.hpp).
+// The runtime posts these in order with the frame's draws.
+extern "C" void aurora_clear_native_wheel_vertices() {
+  // Clearing an empty set reports nothing, so a host that clears both before and after a frame's draws keeps
+  // that frame's count.
+  if (aurora::gx::nativeWheelArrays.empty()) return;
+  aurora::gx::fifo::drain();
+  aurora::gx::nativeWheelLastMatches.store(aurora::gx::nativeWheelMatches);
+  aurora::gx::nativeWheelMatches = 0;
+  aurora::gx::nativeWheelPreviousSources.clear();
+  for (const auto& array : aurora::gx::nativeWheelArrays)
+    aurora::gx::nativeWheelPreviousSources.push_back(array.source);
+  aurora::gx::native_wheel_report();
+  aurora::gx::nativeWheelArrays.clear();
+  aurora::gx::nativeWheelLastDecision = nullptr;
+  aurora::gx::nativeWheelLastDrawCommand = nullptr;
+}
+extern "C" uint32_t aurora_native_wheel_draw_count() { return aurora::gx::nativeWheelLastMatches.load(); }
+extern "C" void aurora_set_native_wheel_vertices(const void* source, const void* replacement, uint32_t size,
+                                                 const float* modelView) {
+  if (!source || !replacement || !modelView || !size || size > 65536) return;
+  aurora::gx::NativeWheelArray array;
+  array.source = source;
+  const auto* bytes = static_cast<const uint8_t*>(replacement);
+  array.bytes.assign(bytes, bytes + size);
+  std::memcpy(array.modelView.data(), modelView, sizeof(float) * 12);
+  aurora::gx::nativeWheelArrays.push_back(std::move(array));
+  // The vector may have moved its elements, and a set changes what a draw resolves to in any case, so the decision
+  // the merge test compares against is dropped rather than left pointing into the old storage.
+  aurora::gx::nativeWheelLastDecision = nullptr;
+  aurora::gx::nativeWheelLastDrawCommand = nullptr;
+}
 
 // Single definition for the `Log` that gx.hpp declares for this directory.
 aurora::Module Log("aurora::gx");
+
+namespace aurora::gx {
+// Called as a set is cleared: a line at about half a second, five seconds and
+// a minute of sets, with the matrices on the first report that saw a draw.
+void native_wheel_report() {
+    auto& diagnostics=nativeWheelDiagnostics;
+    ++diagnostics.sets;
+    ++nativeWheelClears;
+    if(nativeWheelClears!=30 && nativeWheelClears!=300 && nativeWheelClears!=3600) return;
+    ::Log.info("Native steering wheel: {} sets; draws binding a replaced array {} ({} with a larger range, {} outside a "
+             "set); matched {}; closest position matrix off by {} ({} matrices)",
+             diagnostics.sets,diagnostics.boundDraws,diagnostics.oversizeDraws,diagnostics.outsideDraws,
+             diagnostics.matchedDraws,diagnostics.bestError,diagnostics.bestIndexed?"indexed":"current");
+    if(diagnostics.boundDraws!=0 && nativeWheelReports++==0) {
+        const auto& m=diagnostics.bestMatrix;
+        const auto& e=diagnostics.expected;
+        ::Log.info("Native steering wheel: closest [{} {} {} {} | {} {} {} {} | {} {} {} {}] expected [{} {} {} {} | {} {} "
+                 "{} {} | {} {} {} {}]",
+                 m[0],m[1],m[2],m[3],m[4],m[5],m[6],m[7],m[8],m[9],m[10],m[11],
+                 e[0],e[1],e[2],e[3],e[4],e[5],e[6],e[7],e[8],e[9],e[10],e[11]);
+    }
+    diagnostics={};
+}
+} // namespace aurora::gx
 
 static void GXWriteString(const char* label) {
   auto length = strlen(label);

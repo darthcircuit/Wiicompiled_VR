@@ -723,7 +723,10 @@ bool OpenXRRuntime::BeginFrame(const OpenXRFrame& frame) {
     }
 
     XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
-    const XrResult result = xrBeginFrame(m_session, &begin_info);
+    const XrResult result = diagnostics::Measure(diagnostics::Stage::BeginCall, [&] {
+        const auto queue_guard = LockGraphicsQueue();
+        return xrBeginFrame(m_session, &begin_info);
+    });
     if (XR_FAILED(result)) {
         m_frame_phase = FramePhase::Idle;
         m_active_frame_serial = 0;
@@ -741,6 +744,19 @@ bool OpenXRRuntime::LocateViews(OpenXRFrame& frame) {
         return Fail(XR_ERROR_CALL_ORDER_INVALID, "xrLocateViews",
                     "frame token is stale or xrBeginFrame was not called");
     }
+    return LocateViewsForFrame(frame);
+}
+
+bool OpenXRRuntime::LocateViewsAt(XrTime display_time, OpenXRFrame& frame) {
+    ClearError();
+    if (!HasSession() || !m_session_running) {
+        return Fail(XR_ERROR_SESSION_NOT_RUNNING, "xrLocateViews", "the session is not running");
+    }
+    frame.predicted_display_time = display_time;
+    return LocateViewsForFrame(frame);
+}
+
+bool OpenXRRuntime::LocateViewsForFrame(OpenXRFrame& frame) {
     frame.views_valid = false;
     frame.view_state_flags = 0;
     if (!frame.should_render) {
@@ -756,9 +772,11 @@ bool OpenXRRuntime::LocateViews(OpenXRFrame& frame) {
     locate_info.space = m_app_space;
     XrViewState view_state{XR_TYPE_VIEW_STATE};
     uint32_t view_count = 0;
-    if (!Check(xrLocateViews(m_session, &locate_info, &view_state,
-                             kOpenXREyeCount, &view_count, frame.views.data()),
-               "xrLocateViews")) {
+    const XrResult locate_result = diagnostics::Measure(diagnostics::Stage::LocateViews, [&] {
+        return xrLocateViews(m_session, &locate_info, &view_state,
+                             kOpenXREyeCount, &view_count, frame.views.data());
+    });
+    if (!Check(locate_result, "xrLocateViews")) {
         return false;
     }
     if (view_count != kOpenXREyeCount) {
@@ -799,7 +817,10 @@ bool OpenXRRuntime::EndFrame(
     end_info.layerCount = layer_count;
     end_info.layers = layers;
     const diagnostics::Stopwatch end_timer;
-    const XrResult result = xrEndFrame(m_session, &end_info);
+    const XrResult result = [&] {
+        const auto queue_guard = LockGraphicsQueue();
+        return xrEndFrame(m_session, &end_info);
+    }();
     diagnostics::OnEndFrame(end_timer);
     m_frame_phase = FramePhase::Idle;
     m_active_frame_serial = 0;

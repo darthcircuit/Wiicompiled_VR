@@ -549,6 +549,13 @@ void GXCopyTex(void* dest, GXBool clear) {
             .clearAlpha = true,
             .clearDepth = false,
         }),
+        .stereoPipeline = aurora::stereo_frame_provider_active() ? aurora::gfx::pipeline_ref(aurora::gfx::clear::PipelineConfig{
+            .msaaSamples = aurora::gfx::get_sample_count(),
+            .clearColor = false,
+            .clearAlpha = true,
+            .clearDepth = false,
+            .stereoStencil = true,
+        }) : 0,
         .color = wgpu::Color{0.f, 0.f, 0.f, g_gxState.dstAlpha / 255.f},
     });
   }

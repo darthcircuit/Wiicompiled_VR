@@ -23,6 +23,12 @@
 // the settings overlay and the headless tests can use it in any build.
 namespace mkw::vr::diagnostics {
 
+// Pacing-thread wall time, including scheduling delays. Stages may nest.
+enum class Stage : uint8_t {
+    PollEvents, BeginCall, LocateViews, InputSync, SyncActions, Publish,
+    Withdraw, SubmissionWait, Cancel, SetTargets, Count
+};
+
 enum class EmptyFrameReason : uint8_t {
     NoRetainedLayer,
     ShouldRenderOff,
@@ -105,7 +111,8 @@ public:
     void OnInterpolationSkip();
     void OnPacketPublished(int64_t now_ns);
     // consumed_ns is when Aurora took the packet, or 0 if it never did.
-    void OnPacketCanceled(int64_t consumed_ns);
+    void OnPacketCanceled(int64_t now_ns, int64_t consumed_ns);
+    void OnStage(Stage stage, int64_t ns, int64_t now_ns);
     void OnKeepaliveRepeat();
     void OnSubmission(int64_t now_ns, int64_t consumed_ns, bool success);
 
@@ -168,6 +175,18 @@ private:
     uint32_t events_ = 0;
     uint32_t suppressed_ = 0;
 
+    struct StageSamples {
+        Samples samples;
+        int64_t worst_ns = -1;
+        int64_t worst_at_ns = 0;
+        uint64_t cycle = 0;
+    };
+    std::array<StageSamples, static_cast<size_t>(Stage::Count)> stages_{};
+    int64_t session_start_ns_ = 0;
+    uint64_t cycle_sequence_ = 0;
+    Samples cancel_age_ms_;
+    Samples cancel_pickup_ms_;
+    Samples cancel_after_pickup_ms_;
     Samples wait_frame_ms_;
     Samples open_ms_;
     Samples margin_ms_;
@@ -184,6 +203,7 @@ inline std::atomic_bool g_enabled{false};
 inline std::atomic_int64_t g_packet_consumed_ns{0};
 
 int64_t NowNs() noexcept;
+void OnStage(Stage stage, int64_t ns);
 void OnWaitFrame(int64_t wait_ns, int64_t display_time, int64_t display_period);
 void OnBeginFrame();
 void OnEndFrame(int64_t submit_ns, int64_t call_ns);
@@ -232,6 +252,30 @@ public:
 private:
     int64_t start_ns_;
 };
+
+// Only use on the XR pacing thread. A diagnostic failure must not interrupt
+// frame ownership or change the instrumented call's return value.
+class ScopedStage {
+public:
+    explicit ScopedStage(Stage stage) noexcept : stage_(stage) {}
+    ~ScopedStage() noexcept {
+        const int64_t ns = timer_.ElapsedNs();
+        if (ns >= 0 && Enabled()) {
+            try { detail::OnStage(stage_, ns); } catch (...) {}
+        }
+    }
+    ScopedStage(const ScopedStage&) = delete;
+    ScopedStage& operator=(const ScopedStage&) = delete;
+private:
+    Stage stage_;
+    Stopwatch timer_;
+};
+
+template <typename Call>
+decltype(auto) Measure(Stage stage, Call&& call) {
+    const ScopedStage timer(stage);
+    return call();
+}
 
 inline void OnWaitFrame(const Stopwatch& wait, int64_t display_time, int64_t display_period) {
     if (const int64_t ns = wait.ElapsedNs(); ns >= 0 && Enabled()) detail::OnWaitFrame(ns, display_time, display_period);

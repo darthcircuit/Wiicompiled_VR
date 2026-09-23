@@ -1,6 +1,7 @@
 #pragma once
 
 #include <aurora/event.h>
+#include <memory>
 
 union SDL_Event;
 struct ImDrawData;
@@ -32,4 +33,17 @@ StereoOverlay latch_stereo_overlay() noexcept;
 // uniform for every pass, so a pass whose display size differs from the desktop's must be submitted
 // before the next pass is recorded.
 bool render_draw_data(const wgpu::RenderPassEncoder& pass, ImDrawData* data) noexcept;
+
+// Host-owned ImGui frames. The host starts each frame on its own thread with host_frame_begin() and
+// closes it with host_frame_end(), which renders the frame and copies its draw data out of the shared
+// context. The copy is what the sealed frame replays, so the host may start the next frame while the
+// worker still encodes this one, and aurora stops starting frames itself once the host has begun one.
+struct HostFrame;
+using HostFramePtr = std::shared_ptr<HostFrame>;
+void host_frame_begin(const AuroraWindowSize& size) noexcept;
+HostFramePtr host_frame_end() noexcept;
+bool host_frames_active() noexcept;
+const ImDrawData* host_frame_draw_data(const HostFrame& frame) noexcept;
+// Renders a host frame's copied draw data in place of the shared context's.
+void render(const wgpu::RenderPassEncoder& pass, const ImDrawData* data) noexcept;
 } // namespace aurora::imgui

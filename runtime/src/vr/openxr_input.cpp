@@ -10,6 +10,11 @@
 #endif
 
 #include "vr/openxr_input.h"
+#include "physical_wheel.h"
+#include "runtime_config.h"
+#include "settings_overlay.h"
+#include "vr/mkw_vr_first_person.h"
+#include "vr/openxr_diagnostics.h"
 
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_joystick.h>
@@ -18,9 +23,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <mutex>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -32,6 +39,81 @@
 
 namespace mkw::vr {
 namespace {
+
+// SDL holds its joystick lock for as long as an enumeration takes, and the
+// Bluetooth Wii Remote rescan (F10 > Controller settings > Keep scanning)
+// closes and reopens every HID device twice per scan: 15 ms on a plain desk,
+// over 200 ms on a machine carrying several HID devices, such as a Lighthouse
+// setup's base-station dongles. The pacing thread must never wait on that,
+// because the OpenXR frame it holds open costs the compositor every display
+// slot that passes. So it leaves the gamepad here, and the game thread writes
+// it to SDL where it already polls controllers.
+//
+// m_sdl is the lock the SDL work runs under; the pacing thread only ever takes
+// m_state, and only for the copy. Both are taken in that order.
+class VirtualGamepadRelay {
+public:
+    struct Pad {
+        std::array<int16_t, SDL_GAMEPAD_AXIS_COUNT> axes{};
+        std::array<bool, SDL_GAMEPAD_BUTTON_COUNT> buttons{};
+    };
+
+    void Attach(SDL_Joystick* joystick) {
+        std::scoped_lock lock(m_sdl, m_state);
+        m_joystick = joystick;
+        m_pending = false;
+    }
+
+    void Detach() {
+        std::scoped_lock lock(m_sdl, m_state);
+        m_joystick = nullptr;
+        m_pending = false;
+    }
+
+    // Pacing thread.
+    void Publish(const Pad& pad) {
+        std::lock_guard lock(m_state);
+        m_pad = pad;
+        m_pending = true;
+    }
+
+    // Game thread. Holding m_sdl here is what keeps Detach from closing the
+    // joystick underneath the writes.
+    void Apply() {
+        std::lock_guard sdl(m_sdl);
+        Pad pad;
+        SDL_Joystick* joystick = nullptr;
+        {
+            std::lock_guard lock(m_state);
+            if (!m_pending || m_joystick == nullptr) {
+                return;
+            }
+            pad = m_pad;
+            joystick = m_joystick;
+            m_pending = false;
+        }
+        for (int axis = 0; axis < SDL_GAMEPAD_AXIS_COUNT; ++axis) {
+            SDL_SetJoystickVirtualAxis(joystick, static_cast<SDL_GamepadAxis>(axis),
+                                       pad.axes[static_cast<size_t>(axis)]);
+        }
+        for (int button = 0; button < SDL_GAMEPAD_BUTTON_COUNT; ++button) {
+            SDL_SetJoystickVirtualButton(joystick, static_cast<SDL_GamepadButton>(button),
+                                         pad.buttons[static_cast<size_t>(button)]);
+        }
+    }
+
+private:
+    std::mutex m_sdl;
+    std::mutex m_state;
+    SDL_Joystick* m_joystick = nullptr;
+    Pad m_pad;
+    bool m_pending = false;
+};
+
+VirtualGamepadRelay& Relay() {
+    static VirtualGamepadRelay relay;
+    return relay;
+}
 
 #if defined(__ANDROID__)
 // Debug-only remote button presses for headset experiments driven over adb, so
@@ -402,6 +484,10 @@ XrTime OpenXRInput::InputSampleTime(XrTime predicted_display_time) const {
     return now > 0 ? (std::min)(predicted_display_time, now) : predicted_display_time;
 }
 
+void OpenXRApplyVirtualGamepad() noexcept {
+    Relay().Apply();
+}
+
 bool OpenXRInput::AttachVirtualGamepad() {
     SDL_VirtualJoystickDesc desc;
     SDL_INIT_INTERFACE(&desc);
@@ -433,10 +519,13 @@ bool OpenXRInput::AttachVirtualGamepad() {
     }
     m_joystick_id = id;
     m_joystick = joystick;
+    Relay().Attach(joystick);
     return true;
 }
 
 void OpenXRInput::DetachVirtualGamepad() {
+    // Before the handle goes: the game thread may be writing through it.
+    Relay().Detach();
     if (m_joystick != nullptr) {
         SDL_CloseJoystick(static_cast<SDL_Joystick*>(m_joystick));
         m_joystick = nullptr;
@@ -450,6 +539,7 @@ void OpenXRInput::DetachVirtualGamepad() {
 void OpenXRInput::Destroy() {
     // The game must stop reading a remote whose controllers are going away.
     OpenXRWithdrawWiiRemote();
+    ResetDriving();
     if (m_created) {
         StopRumble();
     }
@@ -492,21 +582,17 @@ void OpenXRInput::Idle() {
     m_last_input_time = 0;
     m_panel_select_held = false;
     OpenXRPublishSettingsPanelPointer(false, 0.0f, 0.0f, false, 0.0f);
+    m_first_person_click.Reset();
+    ResetDriving();
     StopRumble();
     // Nothing stays held on the gamepad either while input is away.
     if (m_joystick != nullptr) {
-        auto* joystick = static_cast<SDL_Joystick*>(m_joystick);
-        for (int axis = 0; axis < SDL_GAMEPAD_AXIS_COUNT; ++axis) {
-            SDL_SetJoystickVirtualAxis(joystick, axis, 0);
-        }
-        for (int button = 0; button < SDL_GAMEPAD_BUTTON_COUNT; ++button) {
-            SDL_SetJoystickVirtualButton(joystick, button, false);
-        }
+        Relay().Publish({});
     }
 }
 
 void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen& screen,
-                       const OpenXRPointerScreen& settings_panel) {
+                       const OpenXRPointerScreen& settings_panel, const driving::SeatFrame& seat) {
     if (!m_created || m_runtime == nullptr) {
         return;
     }
@@ -518,7 +604,9 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
     sync.countActiveActionSets = 1;
     sync.activeActionSets = &active;
-    const XrResult result = xrSyncActions(m_runtime->Session(), &sync);
+    const XrResult result = diagnostics::Measure(diagnostics::Stage::SyncActions, [&] {
+        return xrSyncActions(m_runtime->Session(), &sync);
+    });
     m_runtime->ObserveResult(result);
     if (XR_FAILED(result)) {
         if (!m_logged_sync_failure) {
@@ -615,6 +703,21 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
         OpenXRSetSettingsPanelOpen(open);
     }
 
+    // A clean right-thumbstick click toggles the first-person camera. It fires
+    // on release, so the two-thumbstick panel chord never toggles it, and
+    // never while the panel has the controllers.
+    if (m_first_person_click.Update(hands[1].thumbstick_click, hands[0].thumbstick_click,
+                                    panel.open || panel.withheld) &&
+        RuntimeConfigFile::VrFirstPersonToggleClick()) {
+        settings_overlay::RequestFirstPersonToggle();
+        constexpr XrDuration kToggleTickNs = 20'000'000;
+        ApplyHaptic(1, 0.35f, kToggleTickNs);
+    }
+
+    // The cockpit's wheel before the game reads the controllers: a held wheel
+    // steers through the left stick and keeps its grips from the game.
+    UpdateDriving(predicted_display_time, seat, hands, panel.withheld);
+
     // While the panel has the controllers, the game sees them idle.
     static const std::array<wii_remote::HandInputs, kHands> kIdleHands{};
     const auto& game_hands = panel.withheld ? kIdleHands : hands;
@@ -623,24 +726,25 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     const auto injected = [&panel](const char* button) { return !panel.withheld && Injected(button); };
 
     if (m_joystick != nullptr) {
-        auto* joystick = static_cast<SDL_Joystick*>(m_joystick);
+        VirtualGamepadRelay::Pad pad;
         // OpenXR thumbsticks report +Y up; SDL gamepads report +Y down.
-        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTX, ToAxis(left.stick_x));
-        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTY, ToAxis(-left.stick_y));
-        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTX, ToAxis(right.stick_x));
-        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTY, ToAxis(-right.stick_y));
-        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, ToTrigger(left.trigger));
-        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, ToTrigger(right.trigger));
+        pad.axes[SDL_GAMEPAD_AXIS_LEFTX] = ToAxis(left.stick_x);
+        pad.axes[SDL_GAMEPAD_AXIS_LEFTY] = ToAxis(-left.stick_y);
+        pad.axes[SDL_GAMEPAD_AXIS_RIGHTX] = ToAxis(right.stick_x);
+        pad.axes[SDL_GAMEPAD_AXIS_RIGHTY] = ToAxis(-right.stick_y);
+        pad.axes[SDL_GAMEPAD_AXIS_LEFT_TRIGGER] = ToTrigger(left.trigger);
+        pad.axes[SDL_GAMEPAD_AXIS_RIGHT_TRIGGER] = ToTrigger(right.trigger);
 
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_SOUTH, right.primary || injected("a"));
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_EAST, right.secondary || injected("b"));
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_WEST, left.primary || injected("x"));
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_NORTH, left.secondary || injected("y"));
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_START, left.menu || injected("start"));
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_LEFT_STICK, left.thumbstick_click);
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_RIGHT_STICK, right.thumbstick_click);
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, left.squeeze > 0.5f);
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, right.squeeze > 0.5f);
+        pad.buttons[SDL_GAMEPAD_BUTTON_SOUTH] = right.primary || injected("a");
+        pad.buttons[SDL_GAMEPAD_BUTTON_EAST] = right.secondary || injected("b");
+        pad.buttons[SDL_GAMEPAD_BUTTON_WEST] = left.primary || injected("x");
+        pad.buttons[SDL_GAMEPAD_BUTTON_NORTH] = left.secondary || injected("y");
+        pad.buttons[SDL_GAMEPAD_BUTTON_START] = left.menu || injected("start");
+        pad.buttons[SDL_GAMEPAD_BUTTON_LEFT_STICK] = left.thumbstick_click;
+        pad.buttons[SDL_GAMEPAD_BUTTON_RIGHT_STICK] = right.thumbstick_click;
+        pad.buttons[SDL_GAMEPAD_BUTTON_LEFT_SHOULDER] = left.squeeze > 0.5f;
+        pad.buttons[SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER] = right.squeeze > 0.5f;
+        Relay().Publish(pad);
     }
 
     PublishWiiRemote(input_time, screen, game_hands, panel.withheld ? 0u : InjectedWiiRemoteButtons(),
@@ -763,6 +867,127 @@ void OpenXRInput::PublishWiiRemote(XrTime input_time, const OpenXRPointerScreen&
         }
     }
     OpenXRPublishWiiRemote(m_joystick_id, sample);
+}
+
+void OpenXRInput::ResetDriving() {
+    m_wheel = {};
+    WheelGeometry unused{};
+    m_wheel_reference.Resolve(unused, false, false, false, false, 0, 0.0f);
+    m_wheel_visual.Reset();
+    m_wheel_held = {};
+    m_wheel_time = 0;
+    m_driving = {};
+    OpenXRPublishDriving(m_driving);
+}
+
+void OpenXRInput::UpdateDriving(XrTime display_time, const driving::SeatFrame& seat,
+                                std::array<wii_remote::HandInputs, kHands>& hands, bool withheld) {
+    const FirstPersonAnchor anchor = MkwVRFirstPersonGetAnchor();
+    if (!seat.valid || !anchor.valid || !anchor.cockpit) {
+        if (m_driving.cockpit_active || m_wheel_time != 0) {
+            ResetDriving();
+        }
+        return;
+    }
+    const WheelTuning tuning = RuntimeConfigFile::VrWheelTuning();
+    const bool hand_steering = RuntimeConfigFile::VrHandSteering();
+    const bool steering_wheel = RuntimeConfigFile::VrSteeringWheel();
+    const bool native_steering_wheel = RuntimeConfigFile::VrNativeSteeringWheel();
+    const float dt = m_wheel_time != 0 && display_time > m_wheel_time
+                         ? static_cast<float>(display_time - m_wheel_time) * 1.0e-9f
+                         : 1.0f / 90.0f;
+    m_wheel_time = display_time;
+
+    DrivingSnapshot snapshot{};
+    snapshot.cockpit_active = true;
+    snapshot.hand_steering = hand_steering;
+    snapshot.bike = anchor.bike;
+    // The vehicle's own control is the one turning (or none is shown at all),
+    // so the overlay adds no separate wheel.
+    snapshot.synthetic_control =
+        steering_wheel && !(native_steering_wheel && anchor.native_mesh_prepared);
+
+    // Which control the hands reach for: the vehicle's own wherever its
+    // geometry is known and no separate wheel is drawn, a handlebar always
+    // (held over a brief gap while gripped), otherwise the VR wheel in front
+    // of the seat.
+    WheelGeometry geometry = anchor.native_wheel;
+    const bool geometry_valid = m_wheel_reference.Resolve(geometry, true, geometry.valid,
+                                                          m_wheel_held[0] || m_wheel_held[1], anchor.bike,
+                                                          anchor.vehicle_identity, dt);
+    if (anchor.bike && !geometry_valid) {
+        geometry = {};
+        geometry.center = {0.0f, SteeringWheel::Height, SteeringWheel::Depth};
+        geometry.right = {1.0f, 0.0f, 0.0f};
+        geometry.up = {0.0f, 0.0f, -1.0f};
+        geometry.normal = {0.0f, 1.0f, 0.0f};
+        geometry.radius = 0.25f;
+        geometry.valid = true;
+    }
+    const bool uses_geometry = anchor.bike || (geometry_valid && !snapshot.synthetic_control);
+    if (uses_geometry != m_wheel_uses_geometry || anchor.bike != m_wheel_bike) {
+        m_wheel = {};
+        m_wheel_uses_geometry = uses_geometry;
+        m_wheel_bike = anchor.bike;
+    }
+    snapshot.control = geometry;
+
+    constexpr XrSpaceLocationFlags kPoseValid =
+        XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    std::array<WheelHand, kHands> wheel_hands{};
+    for (uint32_t hand = 0; hand < kHands; ++hand) {
+        bool tracked = false;
+        std::array<float, 12> seat_from_grip = snapshot.hands[hand].seat_from_grip;
+        if (m_grip_spaces[hand] != XR_NULL_HANDLE) {
+            XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+            if (XR_SUCCEEDED(xrLocateSpace(m_grip_spaces[hand], m_runtime->AppSpace(), display_time, &location)) &&
+                (location.locationFlags & kPoseValid) == kPoseValid) {
+                tracked = true;
+                const auto& pose = location.pose;
+                seat_from_grip = driving::SeatFromApp(seat, {pose.position.x, pose.position.y, pose.position.z},
+                                                      {pose.orientation.x, pose.orientation.y,
+                                                       pose.orientation.z, pose.orientation.w});
+            }
+        }
+        const float squeeze = hands[hand].squeeze;
+        // Hands are shown only while they can steer.
+        snapshot.hands[hand] = {tracked && hand_steering, false, squeeze, seat_from_grip};
+        wheel_hands[hand] = {seat_from_grip[3], seat_from_grip[7], seat_from_grip[11], squeeze, tracked};
+        if (uses_geometry) {
+            wheel_hands[hand] = geometry.ToWheel(wheel_hands[hand]);
+        }
+    }
+    // A USB wheel drives the race through the GameCube pad: it steers, the
+    // cockpit's wheel shows its angle, and the hands cannot take hold.
+    float hardware_steering = 0.0f;
+    const bool hardware_wheel = physical_wheel::SteeringSnapshot(hardware_steering);
+    const bool active = hand_steering && !withheld && !hardware_wheel;
+    const WheelState wheel = m_wheel.Update(wheel_hands, active, dt,
+                                            uses_geometry ? geometry.radius : SteeringWheel::Radius,
+                                            anchor.bike, tuning);
+    for (uint32_t hand = 0; hand < kHands; ++hand) {
+        if (wheel.held[hand] != m_wheel_held[hand] && active && tuning.haptics) {
+            constexpr XrDuration kGrabPulseNs = 25'000'000;
+            constexpr XrDuration kReleasePulseNs = 15'000'000;
+            ApplyHaptic(hand, wheel.held[hand] ? 0.25f : 0.12f, wheel.held[hand] ? kGrabPulseNs : kReleasePulseNs);
+        }
+        snapshot.hands[hand].held = wheel.held[hand];
+    }
+    m_wheel_held = wheel.held;
+    snapshot.held = wheel.held;
+    driving::ApplyHandSteering(hands, wheel);
+    const float max_angle = driving::MaxWheelAngle(anchor.bike, tuning);
+    if (hardware_wheel) {
+        snapshot.steering_input = std::clamp(hardware_steering, -1.0f, 1.0f);
+        // The hardware wheel is already smooth; follow it directly.
+        snapshot.visual_angle = m_wheel_visual.Update(true, snapshot.steering_input * max_angle, 0.0f, max_angle, dt);
+    } else {
+        snapshot.steering_input = withheld ? 0.0f : hands[0].stick_x;
+        snapshot.visual_angle = m_wheel_visual.Update(wheel.held[0] || wheel.held[1], wheel.visualAngle,
+                                                      snapshot.steering_input, max_angle, dt);
+    }
+    m_driving = snapshot;
+    OpenXRPublishDriving(snapshot);
 }
 
 void OpenXRInput::UpdateRumble() {

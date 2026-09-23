@@ -114,18 +114,28 @@ class SettingsPage(
     }
 
     private fun buildVr() {
-        val firstPerson = { c: TomlConfig -> c.bool("vr", "first_person") ?: false }
+        // Flat Screen mode keeps races on the menu screen, which none of the race view rows reach.
+        val immersive = { c: TomlConfig -> !(c.bool("vr", "flat_screen") ?: false) }
+        val firstPerson = { c: TomlConfig -> immersive(c) && (c.bool("vr", "first_person") ?: false) }
+        // The steering wheel and hand steering belong to the cockpit seat.
+        val cockpit = { c: TomlConfig -> firstPerson(c) && stringIndex(c, "vr", "first_person_seat", SEATS) == 0 }
         section(R.string.section_vr_camera) {
+            toggle(
+                R.string.vr_flat_screen, R.string.vr_flat_screen_helper,
+                read = { !immersive(it) },
+                write = { c, value -> c.setBool("vr", "flat_screen", value) },
+            )
             choice(
                 R.string.vr_camera, R.string.vr_camera_helper,
                 listOf(R.string.vr_camera_chase, R.string.vr_camera_first_person),
-                read = { if (firstPerson(it)) 1 else 0 },
+                read = { if (it.bool("vr", "first_person") == true) 1 else 0 },
                 write = { c, index -> c.setBool("vr", "first_person", index == 1) },
+                enabledIf = immersive,
             )
             choice(
                 R.string.vr_rotation, R.string.vr_rotation_helper,
                 listOf(R.string.vr_rotation_yaw, R.string.vr_rotation_yaw_pitch, R.string.vr_rotation_full),
-                read = { stringIndex(it, "vr", "first_person_rotation", ROTATIONS) },
+                read = { stringIndex(it, "vr", "first_person_rotation", ROTATIONS, ROTATION_DEFAULT) },
                 write = { c, index -> c.setString("vr", "first_person_rotation", ROTATIONS[index]) },
                 enabledIf = firstPerson,
             )
@@ -151,11 +161,26 @@ class SettingsPage(
                 },
                 enabledIf = firstPerson,
             )
+            choice(
+                R.string.vr_seat, R.string.vr_seat_helper,
+                listOf(R.string.vr_seat_cockpit, R.string.vr_seat_custom),
+                read = { stringIndex(it, "vr", "first_person_seat", SEATS) },
+                write = { c, index -> c.setString("vr", "first_person_seat", SEATS[index]) },
+                enabledIf = firstPerson,
+            )
+            // heurazy's grab-and-turn wheel: runtime_config.h's kVrHandSteeringDefault is on.
+            toggle(
+                R.string.vr_hand_steering, R.string.vr_hand_steering_helper,
+                read = { it.bool("vr", "hand_steering") ?: true },
+                write = { c, value -> c.setBool("vr", "hand_steering", value) },
+                enabledIf = cockpit,
+            )
             slider(
                 R.string.vr_lean_back, R.string.vr_lean_back_helper, -45.0, 45.0, 1.0,
                 read = { number(it, "vr", "lean_back_degrees", -45.0, 45.0, 0.0) },
                 format = { "%.0f°".format(it) },
                 write = { c, value -> c.setFloat("vr", "lean_back_degrees", value) },
+                enabledIf = immersive,
             )
         }
         section(R.string.section_vr_headset) {
@@ -187,6 +212,7 @@ class SettingsPage(
                 R.string.vr_hud_screen, R.string.vr_hud_screen_helper,
                 read = { it.bool("vr", "hud_virtual_screen") ?: true },
                 write = { c, value -> c.setBool("vr", "hud_virtual_screen", value) },
+                enabledIf = immersive,
             )
             slider(
                 R.string.vr_hud_distance, R.string.vr_hud_distance_helper, 0.5, 5.0, 0.1,
@@ -199,6 +225,11 @@ class SettingsPage(
                 read = { number(it, "vr", "hud_width_meters", 0.25, 20.0, 2.4) },
                 format = { "%.1f m".format(it) },
                 write = { c, value -> c.setFloat("vr", "hud_width_meters", value) },
+            )
+            toggle(
+                R.string.vr_passthrough, R.string.vr_passthrough_helper,
+                read = { it.bool("vr", "passthrough") ?: true },
+                write = { c, value -> c.setBool("vr", "passthrough", value) },
             )
         }
     }
@@ -226,6 +257,11 @@ class SettingsPage(
                 R.string.graphics_skip_unready, R.string.graphics_skip_unready_helper,
                 read = { it.bool("video", "skip_unready_pipelines") ?: true },
                 write = { c, value -> c.setBool("video", "skip_unready_pipelines", value) },
+            )
+            toggle(
+                R.string.graphics_gx_thread, R.string.graphics_gx_thread_helper,
+                read = { it.bool("video", "gx_thread") ?: true },
+                write = { c, value -> c.setBool("video", "gx_thread", value) },
             )
         }
     }
@@ -290,6 +326,7 @@ class SettingsPage(
             action(R.string.about_extract, R.string.about_extract_helper, R.string.home_select_disc, enabled = idle) {
                 selectDiscImage()
             }
+            info(R.string.about_disc_md5, activity.getString(R.string.disc_md5), stacked = true)
             // One row per game this app carries a kit for, so both are visible at once.
             for (profile in GameProfile.available(activity)) {
                 val manifest = GameLibrary.manifest(activity, profile)
@@ -356,6 +393,7 @@ class SettingsPage(
         }
         section(R.string.section_about_credits) {
             info(R.string.about_credit_title_vr, activity.getString(R.string.about_credit_vr), stacked = true)
+            info(R.string.about_credit_title_hand_steering, activity.getString(R.string.about_credit_hand_steering), stacked = true)
             info(R.string.about_credit_title_wiicompiled, activity.getString(R.string.about_credit_wiicompiled), stacked = true)
             info(R.string.about_credit_title_retro_rewind, activity.getString(R.string.about_credit_retro_rewind), stacked = true)
             info(R.string.about_credit_title_wheel_wizard, activity.getString(R.string.about_credit_wheel_wizard), stacked = true)
@@ -676,6 +714,11 @@ class SettingsPage(
 
     private companion object {
         val ROTATIONS = listOf("yaw", "yaw_pitch", "full")
+
+        /** runtime_config.h's kVrFirstPersonRotationDefault. */
+        val ROTATION_DEFAULT = ROTATIONS.indexOf("yaw_pitch")
+        // The runtime's default ("cockpit") first.
+        val SEATS = listOf("cockpit", "custom")
         // The runtime's default ("boost") first: an absent key reads as index 0.
         val PERFORMANCE_LEVELS = listOf("boost", "sustained_high", "sustained_low", "power_savings", "default")
         val CONTROLLER_MODES = listOf("wii_remote", "gamepad")
@@ -697,8 +740,9 @@ class SettingsPage(
             config.number(section, key)?.takeIf { it in min..max } ?: default
 
         /** Unrecognised strings fall back to the first (default) option, as in the runtime. */
-        fun stringIndex(config: TomlConfig, section: String, key: String, values: List<String>): Int =
-            values.indexOf(config.string(section, key)).coerceAtLeast(0)
+        fun stringIndex(config: TomlConfig, section: String, key: String, values: List<String>,
+                        default: Int = 0): Int =
+            values.indexOf(config.string(section, key)).takeIf { it >= 0 } ?: default
 
         fun resolution(config: TomlConfig): Double =
             config.number("video", "resolution_multiplier")?.takeIf { it in SUPPORTED_RESOLUTIONS } ?: 1.0

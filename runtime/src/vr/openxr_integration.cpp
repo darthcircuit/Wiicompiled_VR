@@ -7,6 +7,7 @@
 #include "vr/openxr_integration.h"
 
 #include "runtime_config.h"
+#include "gx_thread.h"
 #include "runtime_log.h"
 #include "vr/mkw_vr_first_person.h"
 #include "vr/mkw_vr_policy.h"
@@ -30,14 +31,16 @@
 
 #if defined(MKW_ENABLE_OPENXR)
 #include "vr/openxr_backend.h"
+#include "vr/openxr_hand_mesh.h"
 #include "vr/openxr_input.h"
 #include "vr/openxr_runtime.h"
 #if defined(_WIN32)
-#include "vr/openxr_d3d12.h"
+#include "vr/openxr_windows.h"
 #define MKW_OPENXR_GRAPHICS_BACKEND 1
 #elif defined(__ANDROID__)
 #include "vr/openxr_android.h"
 #include "vr/openxr_vulkan.h"
+#include <sys/system_properties.h>
 #include <time.h>
 #include <unistd.h>
 #define XR_USE_TIMESPEC
@@ -64,7 +67,7 @@ void ConfigurePolicy(bool enabled) noexcept {
     MkwVRPolicyReset();
     MkwVRPolicyConfig config{};
     config.enabled = enabled;
-    config.immersive_races = true;
+    config.immersive_races = !RuntimeConfigFile::VrFlatScreen();
     config.world_units_per_meter = RuntimeConfigFile::VrWorldUnitsPerMeter(500.0f);
     config.hud_distance_meters = RuntimeConfigFile::VrHudDistanceMeters(2.0f);
     config.hud_width_meters = RuntimeConfigFile::VrHudWidthMeters(2.4f);
@@ -77,8 +80,8 @@ void ConfigurePolicy(bool enabled) noexcept {
 #if MKW_OPENXR_GRAPHICS_BACKEND
 
 #if defined(_WIN32)
-using GraphicsBackend = OpenXRD3D12Backend;
-inline constexpr const char* kGraphicsBackendName = "D3D12";
+using GraphicsBackend = OpenXRWindowsBackend;
+
 #else
 using GraphicsBackend = OpenXRVulkanBackend;
 inline constexpr const char* kGraphicsBackendName = "Vulkan";
@@ -177,6 +180,16 @@ XrPosef ScreenPoseAhead(const OpenXRFrame& frame, float distance) noexcept {
     pose.position = {center[0] - std::sin(yaw) * distance, center[1],
                      center[2] - std::cos(yaw) * distance};
     return pose;
+}
+
+// Hand steering draws the player's hands, in the runtime's own hand mesh where
+// it offers one (XR_FB_hand_tracking_mesh). Only asked for when hand steering
+// is on at launch; turning it on later uses the procedural gloves.
+void AddHandMeshExtensions(OpenXRConfig& config) {
+    if (RuntimeConfigFile::VrHandSteering()) {
+        config.optional_extensions.push_back("XR_EXT_hand_tracking");
+        config.optional_extensions.push_back("XR_FB_hand_tracking_mesh");
+    }
 }
 
 void IdentityEye(AuroraStereoEye& eye) noexcept {
@@ -359,7 +372,11 @@ public:
         }
 #endif
         runtime_ = std::make_unique<OpenXRRuntime>(logger_);
+#if defined(_WIN32)
+        backend_ = std::make_unique<GraphicsBackend>(logger_, kRequiredAuroraBackend == BACKEND_VULKAN);
+#else
         backend_ = std::make_unique<GraphicsBackend>(logger_);
+#endif
 
         OpenXRConfig config{};
         config.application_name = aurora_config.appName != nullptr ? aurora_config.appName
@@ -367,17 +384,22 @@ public:
         config.engine_name = "Aurora";
         config.resolution_scale = RuntimeConfigFile::VrRenderScale();
 #if defined(_WIN32)
-        config.required_extensions = {"XR_KHR_D3D12_enable"};
+        config.required_extensions = {kRequiredAuroraBackend == BACKEND_VULKAN ? "XR_KHR_vulkan_enable2" : "XR_KHR_D3D12_enable"};
         config.optional_extensions = {"XR_KHR_win32_convert_performance_counter_time",
                                       "XR_FB_display_refresh_rate", "XR_EXT_performance_settings"};
+        AddHandMeshExtensions(config);
 #else
         // Either Vulkan binding extension is acceptable; the backend picks
         // whichever the runtime enabled, preferring enable2.
         config.required_extensions = {"XR_KHR_android_create_instance"};
+        // XR_FB_passthrough: the room around the virtual screen (OpenXRPassthrough), asked for
+        // whatever [vr] passthrough says, since the setting is live.
         config.optional_extensions = {"XR_KHR_vulkan_enable2", "XR_KHR_vulkan_enable",
                                       "XR_KHR_convert_timespec_time",
                                       "XR_KHR_android_thread_settings",
-                                      "XR_FB_display_refresh_rate", "XR_EXT_performance_settings"};
+                                      "XR_FB_display_refresh_rate", "XR_EXT_performance_settings",
+                                      "XR_FB_passthrough"};
+        AddHandMeshExtensions(config);
         config.instance_create_next = OpenXRAndroidInstanceCreateNext();
 #endif
         if (!runtime_->Initialize(config)) {
@@ -473,6 +495,9 @@ public:
 
     void Shutdown() noexcept {
         teardown_requested_.store(false, std::memory_order_release);
+        // Called on the game thread: aurora's producer (the GX thread) must be
+        // idle before the frame worker is quiesced.
+        GxThread::Drain();
         // Stop idle replays before draining; no new worker job may race provider removal.
         {
             std::lock_guard lock(interpolation_mutex_);
@@ -539,6 +564,10 @@ public:
         return interpolation_available_.load(std::memory_order_acquire);
     }
 
+    void SetPassthrough(bool enabled) noexcept {
+        passthrough_.store(enabled, std::memory_order_relaxed);
+    }
+
     void SetLeanBackDegrees(float degrees) noexcept {
         lean_back_degrees_.store(
             std::clamp(degrees, -RuntimeConfigFile::kVrLeanBackDegreesLimit,
@@ -563,7 +592,8 @@ private:
     };
 
 #if defined(_WIN32)
-    static constexpr AuroraBackend kRequiredAuroraBackend = BACKEND_D3D12;
+    AuroraBackend kRequiredAuroraBackend = BACKEND_D3D12;
+    const char* kGraphicsBackendName = "D3D12";
 #else
     static constexpr AuroraBackend kRequiredAuroraBackend = BACKEND_VULKAN;
 #endif
@@ -572,6 +602,10 @@ private:
     static constexpr uint32_t kMaxConsecutiveSkips = 300;
 
     bool BackendMatchesConfiguredGraphicsApi(const AuroraConfig& aurora_config) {
+#if defined(_WIN32)
+        kRequiredAuroraBackend = aurora_config.desiredBackend == BACKEND_VULKAN ? BACKEND_VULKAN : BACKEND_D3D12;
+        kGraphicsBackendName = kRequiredAuroraBackend == BACKEND_VULKAN ? "Vulkan" : "D3D12";
+#endif
         if (aurora_config.desiredBackend == BACKEND_AUTO ||
             aurora_config.desiredBackend == kRequiredAuroraBackend) {
             return true;
@@ -585,6 +619,7 @@ private:
         aurora_config.desiredBackend = kRequiredAuroraBackend;
         aurora_config.xrInterop = true;
 #if defined(_WIN32)
+        if (kRequiredAuroraBackend != BACKEND_D3D12) return;
         const auto& requirements = backend_->GraphicsRequirements();
         aurora_config.hasD3D12AdapterLuid = true;
         aurora_config.d3d12AdapterLuidLow = requirements.adapter_luid_low;
@@ -634,6 +669,16 @@ private:
         }
         const bool hinted = OpenXRAndroidRegisterThreadId(*runtime_, OpenXRAndroidThreadType::RendererMain, thread_id);
         RT_LOG(RT_TAG_RUNTIME) << "OpenXR: Android thread hint for Aurora's frame worker "
+                               << (hinted ? "set" : "refused") << std::endl;
+        return true;
+    }
+    bool RegisterGxThread() {
+        const uint32_t thread_id = GxThread::NativeThreadId();
+        if (thread_id == 0 || runtime_ == nullptr) {
+            return false;
+        }
+        const bool hinted = OpenXRAndroidRegisterThreadId(*runtime_, OpenXRAndroidThreadType::RendererWorker, thread_id);
+        RT_LOG(RT_TAG_RUNTIME) << "OpenXR: Android thread hint for the GX thread "
                                << (hinted ? "set" : "refused") << std::endl;
         return true;
     }
@@ -689,6 +734,7 @@ private:
         // frame worker, which submits the GPU work, are the ones that matter; this thread only
         // paces.
         bool worker_registered = false;
+        bool gx_registered = false;
         if (runtime_ != nullptr) {
             const bool pacing_hinted =
                 OpenXRAndroidRegisterThread(*runtime_, OpenXRAndroidThreadType::RendererWorker);
@@ -700,24 +746,31 @@ private:
             RT_LOG(RT_TAG_RUNTIME) << "OpenXR: Android thread hints: game " << (game_hinted ? "set" : "refused")
                                    << ", pacing " << (pacing_hinted ? "set" : "refused") << std::endl;
             worker_registered = RegisterAuroraFrameWorkerThread();
+            gx_registered = RegisterGxThread();
         }
 #endif
         ApplyPerformanceLevel();
         bool fatal = false;
         uint32_t consecutive_skips = 0;
         bool store_gate_set = false;
-        bool store_gate_immersive = false;
+        bool store_gate_racing = false;
         bool presentation_logged = false;
         VRPresentationMode logged_presentation = VRPresentationMode::Desktop;
         uint32_t presentation_log_count = 0;
         bool immersive_submission_logged = false;
+        int last_pacing_mode = -1;
         while (!stop_.load(std::memory_order_acquire) && !fatal) {
 #if defined(__ANDROID__)
             if (!worker_registered) {
                 worker_registered = RegisterAuroraFrameWorkerThread();
             }
+            if (!gx_registered) {
+                gx_registered = RegisterGxThread();
+            }
 #endif
-            const OpenXREventStatus events = runtime_->PollEvents();
+            const OpenXREventStatus events = diagnostics::Measure(diagnostics::Stage::PollEvents, [&] {
+                return runtime_->PollEvents();
+            });
             const bool session_active = runtime_->IsSessionRunning();
             MkwVRPolicySetSessionActive(session_active);
             const uint64_t session_run_serial = runtime_->SessionRunSerial();
@@ -783,15 +836,31 @@ private:
                                            : OpenXRFrameMode::VirtualScreen;
             presentation.quad_distance_meters = policy.config.hud_distance_meters;
             presentation.quad_width_meters = policy.config.hud_width_meters;
+            if (float picture_aspect = 0.0f, snapshot_aspect = 0.0f;
+                aurora_get_stereo_screen_aspects(&picture_aspect, &snapshot_aspect)) {
+                presentation.quad_content_aspect = snapshot_aspect;
+            }
+            // The room around the menu screen and every other virtual screen, a
+            // Flat Screen race included; an immersive race is fully virtual, and the
+            // cameras are paused for it.
+            presentation.passthrough = !immersive && passthrough_.load(std::memory_order_relaxed);
+            // The settings panel gets a compositor layer of its own while it is
+            // open, and Aurora leaves it out of the eyes. A backend that could
+            // not make that layer has the panel drawn into the eyes instead.
+            const bool panel_layer = backend_->PanelLayerAvailable() && !PanelLayerForcedOff();
+            aurora_set_stereo_panel_layer(panel_layer);
+            presentation.panel.requested = panel_layer && OpenXRSettingsPanelOpen();
 
             // Pipeline caches are stored where their stall is invisible: once when a race ends,
             // and by the compiler itself while the headset shows the virtual screen. Never
-            // mid-race.
-            if (!store_gate_set || immersive != store_gate_immersive) {
-                const bool left_race = store_gate_set && store_gate_immersive && !immersive;
+            // mid-race, and a race on the virtual screen (Flat Screen mode) is still a race.
+            const bool racing = immersive || (!policy.config.immersive_races &&
+                                              policy.scene.mode == VRSceneMode::Race);
+            if (!store_gate_set || racing != store_gate_racing) {
+                const bool left_race = store_gate_set && store_gate_racing && !racing;
                 store_gate_set = true;
-                store_gate_immersive = immersive;
-                aurora_set_pipeline_cache_idle_store(!immersive);
+                store_gate_racing = racing;
+                aurora_set_pipeline_cache_idle_store(!racing);
                 if (left_race) {
                     aurora_store_pipeline_caches();
                 }
@@ -802,6 +871,23 @@ private:
             const uint32_t interpolation_target = frame_interpolation_fps_.load(std::memory_order_relaxed);
             SetInterpolationActive(immersive && FrameInterpolationAvailable() && interpolation_target != 0);
 
+            // With interpolation off, the eyes are rendered before
+            // the compositor frame that shows them is begun, so that frame never waits for a
+            // game frame. Interpolation keeps the frame-first order below: it renders for the
+            // frame's own predicted display time.
+            const bool render_first = !aurora_get_stereo_frame_interpolation();
+            if (last_pacing_mode != static_cast<int>(render_first)) {
+                last_pacing_mode = static_cast<int>(render_first);
+                RT_LOG(RT_TAG_RUNTIME) << "OpenXR " << kGraphicsBackendName << " pacing: "
+                    << (render_first ? "render-first" : "frame-first (VR interpolation)") << std::endl;
+            }
+            if (render_first) {
+                if (!RenderFirstCycle(presentation, policy, immersive, consecutive_skips,
+                                      immersive_submission_logged)) {
+                    fatal = true;
+                }
+                continue;
+            }
             OpenXRBackendFrame frame{};
             const OpenXRBeginStatus begin = backend_->BeginFrame(presentation, frame);
             if (begin == OpenXRBeginStatus::SessionNotRunning) {
@@ -826,11 +912,14 @@ private:
             // before FinishFrame submits a layer built from it.
             ServiceRecenterRequest();
             UpdateVirtualScreenPose(frame);
+            const OpenXRPointerScreen panel_screen = SettingsPanelScreen(frame, policy, immersive);
+            PlacePanelLayer(frame, panel_screen);
             if (input_ != nullptr) {
+                const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
                 // After the screen is placed, so the pointer aims at this
                 // frame's screen rather than the previous one's.
                 input_->Sync(frame.xr_frame.predicted_display_time, PointerScreen(frame, policy, immersive),
-                             SettingsPanelScreen(frame, policy, immersive));
+                             panel_screen, InputSeatFrame(immersive));
             }
 
             if (!frame.expects_gpu_submission) {
@@ -844,7 +933,9 @@ private:
             if (aurora_get_stereo_frame_interpolation() &&
                 !interpolation_pacing_.ShouldRender(frame.xr_frame.predicted_display_time, interpolation_target)) {
                 diagnostics::OnInterpolationSkip();
-                if (!backend_->TryCancelPendingFrame(frame) || !backend_->FinishFrame(frame, false)) {
+                if (!diagnostics::Measure(diagnostics::Stage::Cancel, [&] {
+                    return backend_->TryCancelPendingFrame(frame);
+                }) || !backend_->FinishFrame(frame, false)) {
                     SetError(backend_->LastError());
                     fatal = true;
                 }
@@ -852,6 +943,7 @@ private:
             }
 
             {
+                const diagnostics::ScopedStage publish_timer(diagnostics::Stage::Publish);
                 std::lock_guard lock(published_mutex_);
                 // First person renders at life-size scale, third person at the
                 // configured diorama scale. Head translation and IPD are the
@@ -872,14 +964,18 @@ private:
                    submission == OpenXRSubmissionStatus::Timeout) {
                 // Fresh rendering wakes us immediately. A 50 ms keep-alive
                 // protects stalls without issuing eager repeats during GPU work.
-                submission = backend_->WaitForSubmission(frame, 50);
+                submission = diagnostics::Measure(diagnostics::Stage::SubmissionWait, [&] {
+                    return backend_->WaitForSubmission(frame, 50);
+                });
                 if (submission == OpenXRSubmissionStatus::Timeout) {
                     // A pause, minimized window, or guest stall may leave no GX
                     // frame to consume this packet. Withdraw it, then cancel the
                     // matching bridge target only if Encode has not taken ownership.
                     if (std::chrono::steady_clock::now() >= cancel_after) {
-                        WithdrawPublishedFrame();
-                        canceled_before_encode = backend_->TryCancelPendingFrame(frame);
+                        diagnostics::Measure(diagnostics::Stage::Withdraw, [&] { WithdrawPublishedFrame(); });
+                        canceled_before_encode = diagnostics::Measure(diagnostics::Stage::Cancel, [&] {
+                            return backend_->TryCancelPendingFrame(frame);
+                        });
                         if (canceled_before_encode) {
                             diagnostics::OnPacketCanceled();
                             break;
@@ -893,7 +989,7 @@ private:
                     }
                 }
             }
-            WithdrawPublishedFrame();
+            diagnostics::Measure(diagnostics::Stage::Withdraw, [&] { WithdrawPublishedFrame(); });
             if (stop_.load(std::memory_order_acquire)) {
                 // Aurora has been drained by Shutdown(); backend shutdown below
                 // cancels its pending target, then either safely releases the
@@ -948,6 +1044,7 @@ private:
 
         SetInterpolationActive(false);
         aurora_set_pipeline_cache_idle_store(false);
+        aurora_set_stereo_panel_layer(false);
         running_.store(false, std::memory_order_release);
         MkwVRPolicySetSessionActive(false);
         if (!stop_.load(std::memory_order_acquire)) {
@@ -959,6 +1056,175 @@ private:
             stop_cv_.wait(lock, [this] { return stop_.load(std::memory_order_acquire); });
         }
         ShutdownOrRetainGraphicsObjects();
+    }
+
+    // One compositor cycle on the retained layer, with no frame left active. False on a fatal
+    // backend or runtime failure (the error is recorded).
+    bool KeepAlive() {
+        const OpenXRBeginStatus status = backend_->KeepAliveCycle();
+        if (status == OpenXRBeginStatus::SessionNotRunning) {
+            MkwVRPolicySetSessionActive(false);
+            return true;
+        }
+        if (status == OpenXRBeginStatus::ExitRequested) {
+            SetError("OpenXR runtime requested session exit; continuing on the mirror output");
+            return false;
+        }
+        if (status == OpenXRBeginStatus::Error) {
+            SetError(backend_->LastError());
+            return false;
+        }
+        return true;
+    }
+
+    // Render-first pacing (see each backend's PreparePacket). Returns false on a fatal
+    // failure; a cycle that ends without a layer returns true and the loop tries again.
+    bool RenderFirstCycle(OpenXRPresentation presentation, const MkwVRPolicySnapshot& policy, bool immersive,
+                          uint32_t& consecutive_skips, bool& immersive_submission_logged) {
+        OpenXRBackendFrame packet{};
+        const OpenXRBeginStatus prepared = backend_->PreparePacket(presentation, packet);
+        if (prepared == OpenXRBeginStatus::SessionNotRunning) {
+            MkwVRPolicySetSessionActive(false);
+            return true;
+        }
+        if (prepared == OpenXRBeginStatus::ExitRequested) {
+            SetError("OpenXR runtime requested session exit; continuing on the mirror output");
+            return false;
+        }
+        if (prepared == OpenXRBeginStatus::Error) {
+            SetError(backend_->LastError());
+            return false;
+        }
+        // The head pose this packet was located with places the screens and aims the pointer.
+        ServiceRecenterRequest();
+        UpdateVirtualScreenPose(packet);
+        const OpenXRPointerScreen panel_screen = SettingsPanelScreen(packet, policy, immersive);
+        PlacePanelLayer(packet, panel_screen);
+        if (input_ != nullptr) {
+            const diagnostics::ScopedStage input_timer(diagnostics::Stage::InputSync);
+            input_->Sync(packet.xr_frame.predicted_display_time, PointerScreen(packet, policy, immersive),
+                         panel_screen, InputSeatFrame(immersive));
+        }
+        if (!packet.expects_gpu_submission) {
+            // Nothing to render (no rendering requested or no tracking): keep the compositor fed.
+            return KeepAlive();
+        }
+        {
+            const diagnostics::ScopedStage publish_timer(diagnostics::Stage::Publish);
+            std::lock_guard lock(published_mutex_);
+            BuildPublishedFrame(packet, immersive, policy.EffectiveUnitsPerMeter(), policy.content_tag);
+            diagnostics::OnPacketPublished();
+            published_.store(&published_frame_, std::memory_order_release);
+        }
+        aurora_notify_stereo_frame();
+
+        // Aurora renders the eyes at its next seal. Meanwhile the compositor keeps showing the
+        // retained layer; a 50 ms stall repeats it explicitly and withdraws the packet.
+        OpenXRSubmissionStatus submission = OpenXRSubmissionStatus::Timeout;
+        bool canceled_before_encode = false;
+        const auto cancel_after = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+        while (!stop_.load(std::memory_order_acquire) && submission == OpenXRSubmissionStatus::Timeout) {
+            submission = diagnostics::Measure(diagnostics::Stage::SubmissionWait, [&] {
+                return backend_->WaitForSubmission(packet, 50);
+            });
+            if (submission == OpenXRSubmissionStatus::Timeout) {
+                if (std::chrono::steady_clock::now() >= cancel_after) {
+                    diagnostics::Measure(diagnostics::Stage::Withdraw, [&] { WithdrawPublishedFrame(); });
+                    canceled_before_encode = diagnostics::Measure(diagnostics::Stage::Cancel, [&] {
+                        return backend_->TryCancelPendingPacket(packet);
+                    });
+                    if (canceled_before_encode) {
+                        diagnostics::OnPacketCanceled();
+                        break;
+                    }
+                }
+                diagnostics::OnKeepaliveRepeat();
+                if (!KeepAlive()) {
+                    return false;
+                }
+            }
+        }
+        diagnostics::Measure(diagnostics::Stage::Withdraw, [&] { WithdrawPublishedFrame(); });
+        if (stop_.load(std::memory_order_acquire) ||
+            submission == OpenXRSubmissionStatus::ShuttingDown) {
+            return true;
+        }
+        if (canceled_before_encode) {
+            // Refresh display timing after a canceled packet as well, so the
+            // next estimate cannot remain stuck in the past during a game stall.
+            return KeepAlive();
+        }
+        if (submission != OpenXRSubmissionStatus::Success) {
+            // Nothing reached the shared buffers (Skipped) or Aurora failed after queuing GPU
+            // work (Failed): same accounting as the frame-first path, on a keep-alive cycle.
+            diagnostics::OnSubmission(false);
+            if (submission == OpenXRSubmissionStatus::Failed) {
+                SetError(std::string("Aurora's ") + kGraphicsBackendName +
+                         " stereo copy failed; continuing on the mirror output");
+                return false;
+            }
+            ++consecutive_skips;
+            if (consecutive_skips == 1 || consecutive_skips % 60 == 0) {
+                RT_LOG(RT_TAG_RUNTIME) << "OpenXR: eye copy skipped (" << consecutive_skips
+                                       << " in a row): " << backend_->LastError() << std::endl;
+            }
+            if (consecutive_skips >= kMaxConsecutiveSkips) {
+                SetError(std::string("Aurora's ") + kGraphicsBackendName +
+                         " stereo copy keeps failing; continuing on the mirror output");
+                return false;
+            }
+            return KeepAlive();
+        }
+
+        // The eyes are rendered: begin the compositor frame, complete the backend copy, end.
+        OpenXRBackendFrame frame{};
+        const OpenXRBeginStatus begin = backend_->BeginFrameForPacket(packet, frame);
+        if (begin == OpenXRBeginStatus::SessionNotRunning) {
+            MkwVRPolicySetSessionActive(false);
+            return true;
+        }
+        if (begin == OpenXRBeginStatus::ExitRequested) {
+            SetError("OpenXR runtime requested session exit; continuing on the mirror output");
+            return false;
+        }
+        if (begin == OpenXRBeginStatus::Error) {
+            SetError(backend_->LastError());
+            return false;
+        }
+        UpdateFrameTiming(frame.xr_frame);
+        if (diagnostics::Enabled()) {
+            NoteFrameDiagnostics(frame, immersive);
+        }
+        const OpenXRSubmissionStatus copy =
+            frame.expects_gpu_submission ? backend_->CopyRenderedEyes(frame) : OpenXRSubmissionStatus::Skipped;
+        const bool submit = copy == OpenXRSubmissionStatus::Success;
+        diagnostics::OnSubmission(submit);
+        if (!backend_->FinishFrame(frame, submit)) {
+            SetError(backend_->LastError());
+            return false;
+        }
+        if (copy == OpenXRSubmissionStatus::Failed) {
+            SetError(std::string("Aurora's ") + kGraphicsBackendName +
+                     " stereo copy failed; continuing on the mirror output");
+            return false;
+        }
+        if (!submit) {
+            ++consecutive_skips;
+            if (consecutive_skips == 1 || consecutive_skips % 60 == 0) {
+                RT_LOG(RT_TAG_RUNTIME) << "OpenXR: eye copy skipped (" << consecutive_skips
+                                       << " in a row): " << backend_->LastError() << std::endl;
+            }
+            return consecutive_skips < kMaxConsecutiveSkips;
+        }
+        consecutive_skips = 0;
+        ++timing_submissions_;
+        if (immersive && !immersive_submission_logged) {
+            immersive_submission_logged = true;
+            RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] first immersive packet consumed and submitted as "
+                                      "an OpenXR projection layer"
+                                   << std::endl;
+        }
+        return true;
     }
 
     void BuildPublishedFrame(const OpenXRBackendFrame& source, bool immersive,
@@ -1004,6 +1270,61 @@ private:
                          position_valid && base_position_valid_, units_per_meter,
                          lean_back_radians, destination.eyes[eye].viewFromCenter);
         }
+        BuildCockpit(source, position_valid, units_per_meter, lean_back_radians, destination.cockpit);
+    }
+
+    // The first-person cockpit's hands and separate wheel, in the seated frame
+    // the eye transforms place at base + lean * seat (metres). Always carries
+    // the packet's world scale, which Aurora rescales to the sealed frame's.
+    void BuildCockpit(const OpenXRBackendFrame& source, bool position_valid, float units_per_meter,
+                      float lean_back_radians, AuroraCockpit& cockpit) noexcept {
+        cockpit.unitsPerMeter = units_per_meter;
+        const DrivingSnapshot driving = input_ != nullptr ? input_->Driving() : DrivingSnapshot{};
+        if (driving.hand_steering && !hand_meshes_loaded_ && runtime_ != nullptr) {
+            hand_meshes_loaded_ = true;
+            const bool loaded = LoadRuntimeHandMeshes(*runtime_);
+            RT_LOG(RT_TAG_RUNTIME) << "[mkw-vr] cockpit hands: "
+                                   << (loaded ? "the runtime's hand mesh" : "procedural gloves (no runtime hand mesh)")
+                                   << std::endl;
+        }
+        cockpit.active = driving.cockpit_active && position_valid && base_position_valid_ &&
+                         (driving.synthetic_control || driving.hand_steering);
+        if (!cockpit.active) {
+            return;
+        }
+        cockpit.wheelAngle = driving.visual_angle;
+        cockpit.nativeWheel = !driving.synthetic_control;
+        cockpit.bike = driving.bike;
+        cockpit.handlebarRadius = driving.control.radius;
+        for (int row = 0; row < 3; ++row) {
+            cockpit.seatFromHandlebar[row * 4 + 0] = driving.control.right[row];
+            cockpit.seatFromHandlebar[row * 4 + 1] = driving.control.up[row];
+            cockpit.seatFromHandlebar[row * 4 + 2] = driving.control.normal[row];
+            cockpit.seatFromHandlebar[row * 4 + 3] = driving.control.center[row];
+        }
+        for (uint32_t eye = 0; eye < kOpenXREyeCount; ++eye) {
+            ViewFromBase(source.xr_frame.views[eye].pose, base_position_, true, 1.0f, lean_back_radians,
+                         cockpit.eyeFromSeat[eye]);
+        }
+        for (size_t hand = 0; hand < 2; ++hand) {
+            auto& target = cockpit.hands[hand];
+            const auto& from = driving.hands[hand];
+            target.tracked = from.tracked;
+            target.held = from.held;
+            target.squeeze = from.squeeze;
+            std::copy(from.seat_from_grip.begin(), from.seat_from_grip.end(), target.seatFromGrip);
+        }
+    }
+
+    // The seated frame the controllers are located in for hand steering: the
+    // immersive base the eye transforms use, from the previous frame (this
+    // frame's is latched after input).
+    driving::SeatFrame InputSeatFrame(bool immersive) const noexcept {
+        driving::SeatFrame seat;
+        seat.valid = immersive && base_position_valid_ && last_immersive_;
+        seat.base = base_position_;
+        seat.lean_back_radians = lean_back_degrees_.load(std::memory_order_relaxed) * kDegreesToRadians;
+        return seat;
     }
 
     // Runs once per located frame, before the virtual screen is placed and
@@ -1099,6 +1420,42 @@ private:
         screen.half_height_meters = extents[1];
         screen.valid = true;
         return screen;
+    }
+
+    // Android: `adb shell setprop debug.wiicompiled.panel_layer 0` draws the settings panel into
+    // the eyes again, to compare the two ways or to rule out a runtime's quad layers. Read about
+    // once a second.
+    bool PanelLayerForcedOff() noexcept {
+#if defined(__ANDROID__)
+        if (panel_layer_poll_ == 0) {
+            panel_layer_poll_ = 72;
+            char value[PROP_VALUE_MAX] = {};
+            const bool off =
+                __system_property_get("debug.wiicompiled.panel_layer", value) > 0 && value[0] == '0';
+            if (off != panel_layer_forced_off_) {
+                panel_layer_forced_off_ = off;
+                RT_LOG(RT_TAG_RUNTIME) << "OpenXR: settings panel "
+                                       << (off ? "drawn into the eyes" : "on its own layer")
+                                       << " (debug.wiicompiled.panel_layer)" << std::endl;
+            }
+        }
+        --panel_layer_poll_;
+        return panel_layer_forced_off_;
+#else
+        return false;
+#endif
+    }
+
+    // The settings panel's layer hangs exactly where its pointer hits are
+    // tested, the rectangle it used to cover in the eyes.
+    static void PlacePanelLayer(OpenXRBackendFrame& frame, const OpenXRPointerScreen& screen) noexcept {
+        OpenXRPanelLayer& panel = frame.presentation.panel;
+        panel.placed = panel.requested && screen.valid;
+        if (panel.placed) {
+            panel.pose = screen.pose;
+            panel.width_meters = 2.0f * screen.half_width_meters;
+            panel.height_meters = 2.0f * screen.half_height_meters;
+        }
     }
 
     // Centre of the race's 2D screen. ViewFromBase maps a point p of the
@@ -1309,6 +1666,10 @@ private:
     OpenXRLogCallback logger_;
     std::unique_ptr<OpenXRRuntime> runtime_;
     std::unique_ptr<GraphicsBackend> backend_;
+#if defined(__ANDROID__)
+    uint32_t panel_layer_poll_ = 0;
+    bool panel_layer_forced_off_ = false;
+#endif
     std::unique_ptr<OpenXRInput> input_;
     std::thread pacing_thread_;
     std::atomic_bool stop_{false};
@@ -1316,6 +1677,7 @@ private:
     std::atomic_bool teardown_requested_{false};
     std::atomic_bool recenter_requested_{false};
     std::atomic<float> lean_back_degrees_{RuntimeConfigFile::VrLeanBackDegrees()};
+    std::atomic_bool passthrough_{RuntimeConfigFile::VrPassthrough()};
     std::atomic_uint32_t frame_interpolation_fps_{RuntimeConfigFile::VrFrameInterpolationFps()};
     std::atomic_bool interpolation_available_{false};
     std::mutex interpolation_mutex_;
@@ -1345,6 +1707,7 @@ private:
     XrPosef virtual_screen_pose_{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
     bool virtual_screen_pose_valid_ = false;
     bool last_immersive_ = false;
+    bool hand_meshes_loaded_ = false;
     uint64_t applied_session_run_serial_ = 0;
     bool session_was_active_ = false;
     bool requested_ = false;
@@ -1408,6 +1771,12 @@ bool OpenXRIsRunning() noexcept {
 #endif
 }
 
+void OpenXRApplyControllerState() noexcept {
+#if MKW_OPENXR_GRAPHICS_BACKEND
+    OpenXRApplyVirtualGamepad();
+#endif
+}
+
 void OpenXRRequestRecenter() noexcept {
 #if MKW_OPENXR_GRAPHICS_BACKEND
     OpenXRIntegration::Get().RequestRecenter();
@@ -1419,6 +1788,14 @@ void OpenXRSetLeanBackDegrees(float degrees) noexcept {
     OpenXRIntegration::Get().SetLeanBackDegrees(degrees);
 #else
     (void)degrees;
+#endif
+}
+
+void OpenXRSetPassthrough(bool enabled) noexcept {
+#if MKW_OPENXR_GRAPHICS_BACKEND
+    OpenXRIntegration::Get().SetPassthrough(enabled);
+#else
+    (void)enabled;
 #endif
 }
 

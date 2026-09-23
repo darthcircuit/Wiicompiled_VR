@@ -8,6 +8,7 @@
     <!-- Launcher shell -->
     <string name="launcher_section_general">General</string>
     <string name="launcher_nav_home">Home</string>
+    <string name="launcher_nav_patches">Patches</string>
     <string name="launcher_nav_settings">Settings</string>
     <string name="launcher_version">v%1$s</string>
 
@@ -97,6 +98,38 @@
     <string name="about_reset_helper">Removes the game files, and if you tick them the built games and the Retro Rewind pack, so they can be set up again. Saves and settings stay.</string>
     <string name="game_storage_failed">The game folder could not be prepared: %1$s</string>
 
+    <!-- Patches: WheelWizard's mods page, its wording from the PC launcher's en.yml -->
+    <string name="patches_import">Import</string>
+    <string name="patches_importing">Importing…</string>
+    <string name="patches_empty_title">No mods found</string>
+    <string name="patches_empty_message">Mods can alter how the game works. Start importing your first mod by clicking the button below.\n\nAs on the computer, mods change Retro Rewind. Import the mod\'s files, or the .zip it came in.</string>
+    <string name="patches_mods">Mods</string>
+    <string name="patches_enable_all">Enable all</string>
+    <string name="patches_note">Each time Retro Rewind starts, the enabled mods are copied into its Patches folder. When two mods replace the same file, the one higher in the list wins.</string>
+    <string name="patches_move_up">Move up</string>
+    <string name="patches_move_down">Move down</string>
+    <string name="patches_more">More</string>
+    <string name="patches_rename">Rename</string>
+    <string name="patches_delete">Delete</string>
+    <string name="patches_keep">Keep</string>
+    <string name="patches_name_title">Mod name:</string>
+    <string name="patches_name_hint">Enter mod name…</string>
+    <string name="patches_rename_title">Enter new name</string>
+    <string name="patches_rename_message">Changing name from: %1$s</string>
+    <string name="patches_name_empty">Mod name cannot be empty.</string>
+    <string name="patches_name_exists">Mod name already exists.</string>
+    <string name="patches_name_illegal">Mod name contains illegal characters.</string>
+    <string name="patches_installed">Mod \'%1$s\' installed successfully.</string>
+    <string name="patches_import_failed">The mod could not be imported</string>
+    <string name="patches_change_failed">The mod could not be changed: %1$s</string>
+    <string name="patches_delete_title">Are you sure you want to delete %1$s?</string>
+    <string name="patches_delete_message">Deleting is permanent and cannot be undone.</string>
+    <string name="patches_no_picker">This headset has no file picker to choose mod files with.</string>
+    <string name="patches_clear_title">Mods found</string>
+    <string name="patches_clear_message">You are about to launch the game without mods. Do you want to clear your Patches folder? If you keep it, the game starts with the patches it holds still active.</string>
+    <string name="home_installing_patches">Installing mods…</string>
+    <string name="home_patches_failed">The mods could not be installed</string>
+
     <!-- Settings shell -->
     <string name="settings_tab_vr">VR</string>
     <string name="settings_tab_graphics">Graphics</string>
@@ -110,6 +143,7 @@
     <string name="about_app_name">WiiCompiled OpenXR VR</string>
     <string name="about_app_summary">Mario Kart Wii recompiled to native code, with an OpenXR renderer, running on this headset. No game code and no game data come with it: each game is built from the disc you own.</string>
     <string name="about_credit_vr">Meta Quest port and the OpenXR VR renderer by iChris4.</string>
+    <string name="about_credit_hand_steering">The cockpit\'s turning steering wheel and hand steering by heurazy, from mario-kart-wii-VR-port (GPL v3).</string>
     <string name="about_credit_wiicompiled">WiiCompiled, the static recompilation this is built on, by patchzyy and the static recompilation community.</string>
     <string name="about_credit_retro_rewind">Retro Rewind by ZPL and team, the mod distribution this app can download and play.</string>
     <string name="about_credit_wheel_wizard">Wheel Wizard by Patchzy and WantToBeeMe, the PC launcher this panel is modelled on.</string>
@@ -122,6 +156,7 @@
     <string name="about_licence_text">GNU General Public License v3. Not affiliated with, endorsed by, or associated with Nintendo. Mario Kart Wii is a trademark of Nintendo.</string>
     <string name="about_kit">Game kit</string>
     <string name="about_credit_title_vr">Meta Quest and VR</string>
+    <string name="about_credit_title_hand_steering">Steering wheel and hand steering</string>
     <string name="about_credit_title_wiicompiled">WiiCompiled</string>
     <string name="about_credit_title_retro_rewind">Retro Rewind</string>
     <string name="about_credit_title_wheel_wizard">Wheel Wizard</string>
@@ -139,6 +174,8 @@
 
     <!-- VR tab -->
     <string name="section_vr_camera">Camera</string>
+    <string name="vr_flat_screen">Flat Screen mode</string>
+    <string name="vr_flat_screen_helper">Plays races on the same flat screen as the menus instead of all around you. The camera settings below do not apply while it is on.</string>
     <string name="vr_camera">Camera</string>
     <string name="vr_camera_helper">Ride behind the kart like the game, or sit in the driver\'s seat.</string>
     <string name="vr_camera_chase">Chase camera</string>
@@ -153,6 +190,12 @@
     <string name="vr_hide_nothing">Nothing</string>
     <string name="vr_hide_driver">Driver</string>
     <string name="vr_hide_driver_and_kart">Driver and kart</string>
+    <string name="vr_seat">Seat</string>
+    <string name="vr_seat_helper">The cockpit puts you at the driver\'s eyes, life-size, with the steering wheel or handlebar turning within reach. Custom uses the head offsets from the in-headset settings.</string>
+    <string name="vr_seat_cockpit">Cockpit</string>
+    <string name="vr_seat_custom">Custom</string>
+    <string name="vr_hand_steering">Hand steering</string>
+    <string name="vr_hand_steering_helper">In the cockpit, squeeze a grip near the steering wheel or handlebar to grab it, and turn it to steer. Releasing both grips gives steering back to the stick. Hand steering by heurazy.</string>
     <string name="vr_lean_back">Lean back angle</string>
     <string name="vr_lean_back_helper">Tilts the race view back for playing reclined. 0 applies no tilt.</string>
 
@@ -178,6 +221,8 @@
     <string name="vr_hud_distance_helper">How far the menu screen and race HUD sit in front of you.</string>
     <string name="vr_hud_width">Screen width</string>
     <string name="vr_hud_width_helper">How wide the menu screen and race HUD are.</string>
+    <string name="vr_passthrough">Passthrough around the menu screen</string>
+    <string name="vr_passthrough_helper">Shows your room through the headset\'s cameras around the menus instead of black. Races stay fully virtual, except in Flat Screen mode.</string>
 
     <!-- Graphics tab -->
     <string name="section_graphics">Rendering</string>
@@ -190,6 +235,8 @@
     <string name="graphics_bloom_helper">Bloom\'s bright glow reads poorly in a headset, so it starts off.</string>
     <string name="graphics_skip_unready">Prevent shader stutters</string>
     <string name="graphics_skip_unready_helper">Skips a draw for a moment while its shader compiles instead of pausing the game.</string>
+    <string name="graphics_gx_thread">Graphics thread</string>
+    <string name="graphics_gx_thread_helper">Prepares the drawing on a second CPU core so busy scenes keep their speed. Turn off only to compare against the single-threaded path. Takes effect on the next launch.</string>
 
     <!-- Controls tab -->
     <string name="section_controls">Controllers</string>
@@ -213,7 +260,7 @@
     <string name="controls_map_z">Z</string>
     <string name="controls_map_z_value">Left trigger</string>
     <string name="controls_map_c">C</string>
-    <string name="controls_map_c_value">Left grip</string>
+    <string name="controls_map_c_value">Right B</string>
     <string name="controls_map_pointer">Pointer and motion</string>
     <string name="controls_map_pointer_value">Aim and move the right controller</string>
     <string name="controls_map_panel">Settings panel</string>
@@ -240,6 +287,10 @@
     <string name="about_logs">Logs</string>
     <string name="about_extract">Extract from disc image</string>
     <string name="about_extract_helper">Replaces DATA with the files of your own PAL disc image.</string>
+    <!-- MD5 of the clean PAL (RMCP01) disc as a plain .iso (Redump). -->
+    <string name="disc_md5" translatable="false">E7B1FF1FABB0789482CE2CB0661D986E</string>
+    <string name="disc_md5_note">Your disc image must be the clean PAL game: as a .iso file its MD5 hash is %1$s. Compressed images (WBFS, RVZ…) have a different hash.</string>
+    <string name="about_disc_md5">Clean PAL .iso MD5</string>
     <string name="about_game">Game</string>
     <string name="about_game_ready">Built by %1$s on %2$s</string>
     <string name="about_game_missing">Not installed yet</string>

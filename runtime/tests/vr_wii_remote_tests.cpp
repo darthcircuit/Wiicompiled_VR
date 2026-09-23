@@ -240,7 +240,9 @@ void TestButtons() {
 
     right.primary = true;
     right.trigger = 0.6f;
-    Check(RemoteButtons(left, right) == (kButtonA | kButtonB), "right A and trigger are A and B");
+    right.secondary = true;
+    Check(RemoteButtons(left, right) == (kButtonA | kButtonB | kButtonC),
+          "right A, trigger and B are A, B and C");
 
     right = {};
     right.stick_y = 0.9f;
@@ -260,16 +262,17 @@ void TestButtons() {
     left.menu = true;
     Check(RemoteButtons(left, right) == (kButtonMinus | kButtonPlus), "left X and menu are - and +");
     left = {};
-    left.squeeze = 0.8f;
     left.trigger = 0.7f;
-    Check(RemoteButtons(left, right) == (kButtonC | kButtonZ), "left grip and trigger are C and Z");
-    // Left Y is the settings panel's button, and nothing presses HOME.
+    Check(RemoteButtons(left, right) == kButtonZ, "left trigger is Z");
+    // Left Y is the settings panel's button, the grips take hold of the steering
+    // wheel, and nothing presses HOME.
     left = {};
     left.secondary = true;
-    right.secondary = true;
+    left.squeeze = 0.8f;
+    right.squeeze = 0.8f;
     right.thumbstick_click = true;
     left.thumbstick_click = true;
-    Check(RemoteButtons(left, right) == 0, "left Y, right B and the stick clicks are unbound");
+    Check(RemoteButtons(left, right) == 0, "left Y, the grips and the stick clicks are unbound");
     left = {};
     right = {};
     left.menu = true;

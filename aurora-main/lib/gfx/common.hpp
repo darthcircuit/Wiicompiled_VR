@@ -8,6 +8,7 @@
 #include <cstring>
 #include <array>
 #include <memory>
+#include <string>
 #include <type_traits>
 #include <utility>
 
@@ -290,6 +291,7 @@ struct ReplayTarget {
   wgpu::TextureView copySourceDepthView;
   wgpu::Extent3D size{};
   uint32_t msaaSamples = 1;
+  wgpu::TextureFormat depthFormat = wgpu::TextureFormat::Depth32Float;
 };
 
 struct StereoReplayEye {
@@ -313,6 +315,8 @@ struct StereoReplayEye {
 
 struct StereoReplayFrame {
   std::array<StereoReplayEye, AURORA_STEREO_EYE_COUNT> eyes;
+  // VR hands and synthetic wheel, drawn per eye after the world (gfx/cockpit.hpp).
+  AuroraCockpit cockpit{};
 };
 
 void end_frame(const wgpu::CommandEncoder& cmd);
@@ -358,7 +362,14 @@ bool prepare_late_stereo_replay(SealedFrame& frame, wgpu::CommandEncoder& cmd, c
 
 // Encode a sealed frame. Never touches the producer-visible recording state,
 // so this may run concurrently with the producer's FIFO drains.
-void render(SealedFrame& frame, wgpu::CommandEncoder& cmd, int32_t interpolatedFrame = -1, bool finalize = true);
+// `nativeRenderLastPass` limits the passes that do render work (texture bakes still run for every
+// pass): a headset never shows an immersive frame's native render, so encode_sealed_frame stops it
+// after the last pass whose EFB copy the eye replays sample.
+void render(SealedFrame& frame, wgpu::CommandEncoder& cmd, int32_t interpolatedFrame = -1, bool finalize = true,
+            int32_t nativeRenderLastPass = INT32_MAX);
+// Index of the last recorded pass that resolves an EFB copy other than the display copy, or -1
+// when no pass does: everything after it exists only for the presented image.
+int32_t last_pass_feeding_replay(const SealedFrame& frame) noexcept;
 
 // Replays only main-EFB passes into one Aurora-owned eye target. Native
 // offscreen/EFB-copy passes are consumed from the mono render and are not
@@ -413,6 +424,39 @@ void end_offscreen();
 bool is_offscreen() noexcept;
 uint32_t get_sample_count() noexcept;
 void clear_caches() noexcept;
+
+// Per-pass GPU timing for the frame-rate log. When enabled and the device has TimestampQuery,
+// every render or compute pass asks gpu_timing_pass() for timestamp writes under a category; the
+// frame's queries are resolved into a small ring of readback buffers and the completed frames'
+// durations are summed per category until gpu_timing_report() consumes them. Off by default:
+// aurora.cpp enables it together with the Android frame-rate log.
+enum class GpuTimingCategory : uint8_t {
+  Mono,          // the native (desktop) render of the recorded GX passes
+  EyeLeft,       // stereo replay of the left eye
+  EyeRight,      // stereo replay of the right eye
+  Interpolated,  // interpolated presentation slots
+  VirtualScreen, // the 2D virtual screen built for each eye
+  Panel,         // the in-headset settings panel
+  EfbCopy,       // EFB copy format conversions
+  Palette,       // palette (TLUT) texture conversions
+  DepthPeek,     // the depth snapshot compute pass
+  Snapshot,      // presentation snapshot and its ImGui pass
+  Present,       // the desktop presentation copy
+  Count,
+};
+void gpu_timing_set_enabled(bool enabled) noexcept;
+bool gpu_timing_enabled() noexcept;
+// Opens the current frame's query slot; a frame whose slot is still being read back is skipped.
+void gpu_timing_begin_frame() noexcept;
+// Timestamp writes for one pass of the open frame, or nullptr when timing is off or exhausted.
+const wgpu::PassTimestampWrites* gpu_timing_pass(GpuTimingCategory category) noexcept;
+// Resolves the open frame's queries on `encoder`, which must be the frame's last submission.
+void gpu_timing_end_frame(wgpu::CommandEncoder& encoder) noexcept;
+// After that submission: starts the readback of the resolved queries.
+void gpu_timing_after_submit() noexcept;
+// Per-frame averages of the frames read back since the last call, formatted for the log, or
+// an empty string when nothing was measured.
+std::string gpu_timing_report();
 
 namespace tex_palette_conv {
 struct ConvRequest;

@@ -1,4 +1,5 @@
 #include "tex_palette_conv.hpp"
+#include "common.hpp"
 
 #include "../internal.hpp"
 #include "../webgpu/gpu.hpp"
@@ -249,6 +250,7 @@ void run(const wgpu::CommandEncoder& cmd, const ConvRequest& req) {
       .label = "TexPaletteConv Pass",
       .colorAttachmentCount = colorAttachments.size(),
       .colorAttachments = colorAttachments.data(),
+      .timestampWrites = gpu_timing_pass(GpuTimingCategory::Palette),
   };
   const auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
   pass.SetPipeline(pipeline);

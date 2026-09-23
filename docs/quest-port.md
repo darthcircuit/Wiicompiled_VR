@@ -183,6 +183,12 @@ suggested for `oculus/touch_controller` and `khr/simple_controller`.
   provider is registered on Android, Aurora skips the surface present and the
   desktop mirror copy (`headset_owns_display` in `lib/aurora.cpp`). The game's
   own render size is unaffected: at `resolution_multiplier = 1` it is 640x528.
+  Since 2026-09-19 an immersive race also stops that native render after the
+  last pass whose EFB copy the eye replays sample (`last_pass_feeding_replay`):
+  the main scene and display copy of a 1280x720 image nobody sees were 4 to
+  6 ms of a 12 ms GPU frame on a Quest 3. A pending CPU readback of an EFB
+  copy or a frame capture still renders the whole image, and menus (the
+  virtual screen) keep it because their eyes are built from that snapshot.
 - **JNI only on the real thread stack.** Guest threads run on libco stacks
   inside the SDL thread, and SDL's Android event pump can reach Java (joystick
   polling, HIDAPI). ART binds JNI transitions to the thread's real stack, so
@@ -193,6 +199,23 @@ suggested for `oculus/touch_controller` and `khr/simple_controller`.
   finding, from device crashes.
 - Time conversion for frame interpolation uses `XR_KHR_convert_timespec_time`
   (CLOCK_MONOTONIC, the clock behind `steady_clock` on Bionic).
+- **Passthrough around the menus** (`[vr] passthrough`, default on, live):
+  `runtime/src/vr/openxr_passthrough.cpp` owns one `XR_FB_passthrough`
+  reconstruction layer, the PPSSPP VR design. The Vulkan backend starts it
+  (created on first use) or pauses it as each presentation arrives, and submits
+  it first, under the virtual screen's quad, or alone while there is no image
+  yet (startup, a recenter). An immersive race never submits it and pauses the
+  cameras; a `flat_screen` race is a virtual screen, so it keeps the room.
+  The quad is cropped to the snapshot Aurora letterboxes into the
+  nearly square eye image (`OpenXRVirtualScreenContentRect`), or its black
+  bands would frame the picture against the room. The manifest's `com.oculus.feature.PASSTHROUGH` is what lets Horizon
+  OS composite it; DolphinXR found that without it every call succeeds and the
+  layer stays empty. The log says `OpenXR passthrough started`, `paused` and
+  `resumed`; when it runs, logcat also shows `Starting camera streams for
+  purpose: passthrough` and `is_displaying_passthrough_content` going to true.
+  ClientMgrFocus logs `[App Enabled for PT: 0]` at every launch, flag or not
+  (it is about the launch transition), so it proves nothing. Checked on a
+  Quest 3 on 2026-09-22: the room shows around the title screen.
 
 ### Launcher and game process
 
@@ -200,12 +223,29 @@ The app opens on `LauncherActivity` (`android/app/src/main/java/org/wiicompiled/
 a 2D Horizon OS panel modelled on the PC launcher, WheelWizard VR, and using its
 palette. **Home** has the Play button and reports a missing or incomplete `DATA`
 (the check is the runtime's own `IsDvdDataRoot`: `files/` and `sys/fst.bin`).
-**Settings** edits `Config.toml` in tabs: VR (camera, rotation, driver hiding,
-lean back, render scale, VR interpolation, virtual screen size and distance),
+**Settings** edits `Config.toml` in tabs: VR (Flat Screen mode, camera, rotation, driver hiding,
+seat, hand steering, lean back, render scale, VR interpolation, virtual screen
+size and distance),
 Graphics (resolution, widescreen, bloom, shader stutter), Controls (controller
 mode, vibration, the Wii Remote mapping), Audio, and About (paths, OpenXR
 logging). The launch-time geometry (`render_scale`, `hud_distance_meters`,
 `hud_width_meters`) is only reachable here, not from the in-headset panel.
+
+**Patches**, between the two, is the PC launcher's mods page without its mod
+browser (`PatchesPage`, `ModLibrary`). Import takes one or more picked files,
+asks for a name and makes them one mod under `WiiCompiledOpenXRVR/Mods/<name>/`
+with the PC's `<name>.ini` (Name, Author, ModID, IsEnabled, Priority), so a
+`Mods` folder copied from WheelWizard reads the same. Unlike the PC's Import, a
+picked `.zip` is unpacked, since there is no browser to install downloaded mods;
+`.7z` and `.rar` are refused. Each mod can be switched off, moved up or down,
+renamed or deleted. As on the PC, mods only change Retro Rewind: its Play first
+flattens the enabled mods into `RetroRewind6/Patches` exactly like
+`ModsLaunchService.PrepareModsForLaunch` (the top of the list wins a file both
+carry, `<name>.<tag>.szs` archives take their mod's priority as a prefix, and
+loose files no mod provides are removed). With no mod enabled, a Patches folder
+that still holds files is only cleared if the player says so. The pack's
+Riivolution XML maps that folder onto `/patches` and `/sound`. `ModLibraryTest`
+covers the rules.
 
 The launcher follows the runtime's rules exactly. `TomlConfig` edits one line
 the way `RuntimeConfigFile::WriteSetting` does, and every edit re-reads the file,
@@ -330,6 +370,17 @@ into `Config.toml`, and the pack arrives either way a PC player gets it:
 Home's main button becomes **Download Retro Rewind** whenever that game is selected and its pack is
 missing, and Settings → About shows the installed version with an Update button. Building the mod on
 the headset needs the mod's `Code.pul`, which is part of the pack, so the same rule covers it.
+
+Online play (Retro Rewind WFC) needs the Retro-WFC payload translated into the mod, as on a PC:
+`translate-mod --retro-wfc-payload`, with the payload Setup downloads and verifies from
+`https://rwfc.net/api/wfc/payload?g=RMCPD00`. Without it the mod downloads `WWFC/Payload` while
+connecting and jumps into code that was never translated, and the game stops with a missing
+translated function (seen: `0x81895BF4`, called from `rr_kamek_*` on the `NHTTPi_CommThreadProc`
+thread, with `r3` pointing at `"WWFC/Payload"`). So the headset
+build downloads the payload before translating and checks it with `validate-retro-wfc-payload`, and
+`Invoke-QuestGameBuild` refuses a Retro Rewind translation whose `mod_data_patches.cpp` has no
+`kRetroWfcInitializerAddress`. The payload is fixed at build time: when rwfc.net publishes a new
+one, rebuild the game.
 
 ### Game packages (.wcgame) and Import from computer
 
@@ -503,8 +554,8 @@ powershell -ExecutionPolicy Bypass -File android/Prepare-QuestDependencies.ps1  
 powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Install             # the app, its game kit and toolchain, debug-signed
 powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Headset quest1 -Install  # Quest 1: Kryo CPU and direct-VR library entry
 powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Install         # your game, against that kit, into Import (or WheelWizard VR's Build for Quest)
+powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Product retro_rewind -Mod <RetroRewind6> -Install  # the mod and its pack (needs translate-mod output with --retro-wfc-payload)
 powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Headset quest1 -Install  # game package from the Quest 1 kit
-powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Product retro_rewind -Mod <RetroRewind6> -Install  # the mod and its pack (needs translate-mod output)
 adb push MarioKart.iso /sdcard/Download/                                               # then Select disc image in the launcher
 ```
 
@@ -626,8 +677,15 @@ the app:
 | --- | --- |
 | `debug.wiicompiled.vtxpad 0` | Turns the stride padding off, to re-check a driver update |
 | `debug.wiicompiled.validation 1` | Keeps WebGPU validation and robustness on in release builds |
+| `debug.wiicompiled.panel_layer 0` | Draws the headset settings panel into the eye images instead of on its own quad layer (`OPENXR.md`, Settings in the headset); read about once a second, so it can be switched while the panel is open |
 | `debug.wiicompiled.inject <n>:<button>` | Presses `a`, `b`, `x`, `y`, `start`, `up`, `down`, `left` or `right` for 12 XR frames each time `<n>` changes. As a Wii Remote, `x`/`y`/`start` are 1/2/+, the directions push the Nunchuk stick, and `home`, `c` and `z` also exist. `panel` presses the settings panel's button (left Y, or both thumbsticks as a gamepad), opening or closing it (see `OPENXR.md`) |
-| `debug.wiicompiled.fpslog 1` | Logs the game's rendered frame rate every 5 s, with per-frame averages of the producer's waits for the frame worker's DONE and SEALED phases and of the worker's seal, permit wait, prepare and encode stretches. The compositor's `VrApi` log line gives headset FPS, `GPU%`, `CPU%`, clock levels and app GPU time (`App=`) |
+| `debug.wiicompiled.fpslog 1` | Logs the game's rendered frame rate every 5 s, with per-frame averages of the producer's waits for the frame worker's DONE and SEALED phases and of the worker's seal, permit wait, prepare and encode stretches, and of the draw calls the recorded frame holds and the primitives that merged into them (an overlay that stops draws merging shows up there first). A third line reports the GX thread's command ring (records, waits, busy share). A second line gives the GPU time per frame from timestamp queries on every pass (`mono` native render, `eyeL`/`eyeR` replays, `screen`, `panel`, `efbcopy`, `palette`, `peek`, plus `passes-span` from the first pass begin to the last pass end and `between-passes` for copies and idle gaps). The compositor's `VrApi` log line gives headset FPS, `GPU%`, `CPU%`, clock levels and app GPU time (`App=`) |
+
+A `Config.toml` written with `adb push` (or `sed -i` in `adb shell`) belongs
+to the shell user afterwards, and the app then fails every save with EACCES
+(the launcher logs `GameStorage.prepare ... open failed`). `chmod 664` on the
+pushed file gives the app's group write access back; a file the app created
+itself never has the problem.
 
 The injector makes headset tests possible with nobody wearing the headset.
 Keep the display awake, drive the menus, then take a compositor screenshot:
@@ -693,6 +751,85 @@ regression of this kind shows up in the session log. The remaining gap to 60
 at the start is about 1 ms of game-thread CPU per frame, with the GPU at 85 to
 89%, so the next steps are on both sides: the guest-code share (translator
 output quality) and the eye replay's GPU cost.
+
+The GPU side, measured the same day with per-pass timestamp queries (the second
+`fpslog` line): on SNES Ghost Valley 2 at `render_scale` 0.5 (840x880 eyes) a
+stereo frame cost 13.2 ms, of which the native render was 5.7 ms, the eyes 3.5
+and 3.8, copies and gaps 0.4. That native render is a 1280x720 image nobody
+sees during an immersive race, so it now stops after the last pass whose EFB
+copy the eyes sample: `mono` fell to 0.15 ms and a Luigi Circuit start at 0.5
+renders in 5.5 to 10 ms of GPU per frame. The last limiter was the headset
+pacing: with the display at 72 or 90 Hz, each headset frame stayed open for
+the next 60 Hz game frame plus the whole encode (`open` 16 ms in the pacing
+summary), so cycles spanned one to two display slots and the headset got 40 to
+60 frames per second while the game rendered 60. The Vulkan backend now paces
+render-first (`PreparePacket`, `BeginFrameForPacket`, `CopyRenderedEyes` in
+`openxr_vulkan.cpp`; see `OPENXR.md`): the packet is located and handed to
+Aurora with no compositor frame open, and the frame is begun only once the
+eyes exist, for the copy alone. On the same automated start at 0.75 the
+summary reads `cycles=60 skipped-slots=12 late=0 layers new=60 repeat=0
+open=5.5 end-gap=16.7`, the compositor shows 60 to 61 of 72 with the
+inherent 12 stale slots, app-to-compositor latency fell from 51 to 9 to 13 ms,
+and the frame worker's encode fell from 8 to 2.7 ms because the eye copy and
+its fence wait moved off the worker onto the pacing thread.
+
+Retro Rewind tracks then showed a game-thread limit of their own: on Athens
+Dash (a Mario Kart Tour port) the display-list index scan
+(`WalkDisplayList<DlIndexScanVisitor>`) was 11.5% of the thread while the base
+game's tracks spend 0.3% there. The scan cache in `gx_dl.cpp` refused lists
+above 64 KiB, so that track's large shape lists were scanned again on every
+call; the cap is now 4 MiB. With it the scan is 0.2%, the game rate on Athens
+Dash went from 47 to 51 fps to 50 to 58, and the thread splits into 62% game
+plus mod code, 9% GX HLE, 6% FIFO decode, 4% memory copies, 3.5% dispatch and
+the rest. What remains on such tracks is the game's own code plus the mod's,
+which no host change shrinks; a GX thread could move about 20% of it.
+
+That GX thread exists now (`runtime/include/gx_thread.h`, `[video] gx_thread`,
+on by default on Android and opt-in elsewhere). Every GX HLE override is split
+into a game-thread front, which keeps the guest-visible side effects (GXData
+shadow registers, the getters, display-list recording, the texture meta table),
+and a `_gx` back holding the aurora work and the parser state, posted through
+one ordered 16 MiB command ring; immediate-mode gather-pipe bytes travel as
+8 KiB chunks in call order. The hazard rule follows the hardware: whatever the
+SDK copied into the FIFO at call time (matrices, projection, colours, light
+objects, copy filters, layout quads, texture object registers) is snapshotted
+when posted, and whatever the GP read from memory when it reached the command
+(display lists, vertex arrays, indexed matrices, texture data) is read when the
+GX thread executes it, so `GXDrawDone` drains the ring and the frame's
+schedule, first-person anchor and policy tag are latched into the present
+record on the game thread. The desktop overlay became a game-thread-owned
+ImGui frame whose draw data Aurora copies per sealed frame, which also removed
+the frame-worker join `GXCopyDisp` used to make. With `fpslog` on, a third
+line reports the ring: records and bytes per frame, the game thread's waits
+for ring space and in drains, the GX thread's busy share and any exceptions
+it caught. A texture or matrix that is wrong only with the thread on is a
+hazard-rule violation (a front reading guest memory the game rewrites before
+the GX thread runs, or a back writing guest memory). Measured on the same
+automated Grand Prix start at `render_scale` 0.75, same build, switched by the
+config key: with the thread off the crowded first half minute ran at 52 to
+56 fps before settling at 60; with it on the same stretch ran at 56.5 in the
+window that includes the countdown and 60.0 in every window after, while the
+ring carried 4.5k to 6.2k records (250 to 380 KiB) per frame, the game thread
+waited under 0.1 ms per frame in its two `GXDrawDone` drains and never for
+ring space, and the GX thread was 25 to 40% busy. Retro Rewind's menus were
+unaffected (prewarm 5.2 s, 60 fps).
+
+Two things the first day on it taught. The Retro Rewind menu with the blurred
+background fell to 14 to 18 fps, with the GX thread on or off, and the
+per-record profile that the `fpslog` line now carries (`costliest:`) put it
+all in the FIFO records: the game re-initialises its capture texture objects
+every frame, and the split had kept one aurora object per guest object alive
+across those re-initialisations, so `GXInitTexObjData` kept incrementing
+`texDataVersion`, which is part of aurora's static upload key, and every
+frame converted every such texture again (`convert_texture` 18% of the
+thread). A guest `GXInitTexObj` now rebuilds the aurora object, as it always
+had, so the version restarts and the upload cache hits. Second, that menu
+calls `GXDrawDone` 22 to 24 times per frame (the base main menu 9 times),
+and each drain cost about 1.5 ms while the game thread slept on a condition
+variable: both the drain and the idle consumer now spin for a few hundred
+microseconds before blocking, with a sequentially consistent sleep handshake,
+and the 22 drains cost 2.6 ms per frame in total; that screen runs at 60 with
+the thread on.
 
 Verified on device since: the menus on the virtual screen, controller input
 (the user has driven races), and an immersive Grand Prix start with all 12
