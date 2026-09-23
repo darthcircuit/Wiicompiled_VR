@@ -110,9 +110,10 @@ format-converting paths.
 Quest 1 must be built with the `quest1` flavour (`Build-Quest.ps1 -Headset
 quest1`). It targets the Snapdragon 835's Kryo CPU; the modern flavour targets
 `cortex-a77`, whose instructions can terminate the game with `SIGILL` on Quest
-1. Android builds use a pinned Dawn package which does not enable
-`VK_EXT_debug_utils`: the old Quest firmware advertises that extension but
-rejects it when Dawn creates the Vulkan instance.
+1. Each variant's exported game kit records this CPU target, and the APK build,
+PC game build, on-headset build and package import all verify it. This prevents
+a kit left by another flavour from producing a library that can crash with
+`SIGILL`.
 
 The final Quest 1 firmware also cannot reliably promote this app's 2D setup
 panel into an immersive activity. Its APK therefore exposes two library
@@ -128,13 +129,13 @@ output from flickering black or white frames to a complete menu with character
 and vehicle previews. It does intentionally skip Wii-era RGB5A3 quantization on
 that device.
 
-Pipeline compilation is also scheduled differently on Android. Adreno
+Pipeline compilation is also scheduled differently on Quest 1. Its Adreno
 serializes much of `vkCreateGraphicsPipelines`, so a large equal-priority worker
 pool starved the translated game and OpenXR pacing threads without shortening
-the compile materially. Android uses two nice-level 5 workers and does not
+the compile materially. Quest 1 uses two nice-level 5 workers and does not
 prewarm cached recipes in the background; a cached recipe is promoted and its
-workers are awakened when the game first requests it. Desktop keeps the full
-worker pool and prewarm behavior.
+workers are awakened when the game first requests it. Newer Android headsets
+and desktop retain the normal worker pool and prewarm behavior.
 
 ### Controllers
 
@@ -502,6 +503,7 @@ powershell -ExecutionPolicy Bypass -File android/Prepare-QuestDependencies.ps1  
 powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Install             # the app, its game kit and toolchain, debug-signed
 powershell -ExecutionPolicy Bypass -File android/Build-Quest.ps1 -Headset quest1 -Install  # Quest 1: Kryo CPU and direct-VR library entry
 powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Install         # your game, against that kit, into Import (or WheelWizard VR's Build for Quest)
+powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Headset quest1 -Install  # game package from the Quest 1 kit
 powershell -ExecutionPolicy Bypass -File android/Build-QuestGame.ps1 -Product retro_rewind -Mod <RetroRewind6> -Install  # the mod and its pack (needs translate-mod output)
 adb push MarioKart.iso /sdcard/Download/                                               # then Select disc image in the launcher
 ```

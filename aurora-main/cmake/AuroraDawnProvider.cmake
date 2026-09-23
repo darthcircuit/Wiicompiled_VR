@@ -154,13 +154,6 @@ elseif (_aurora_dawn_provider STREQUAL "package")
     endif ()
     set(AURORA_DAWN_PACKAGE_URL
       "https://github.com/theofficialgman/dawn-build/releases/download/${AURORA_DAWN_VERSION}/dawn-${_dawn_system}-${_dawn_arch}.tar.gz")
-    # Meta's Quest 1 firmware advertises VK_EXT_debug_utils but rejects it at
-    # vkCreateInstance. This pinned Android package disables that extension on
-    # Android; it is also the package validated on modern Quest headsets.
-    if (_dawn_system STREQUAL "android" AND _dawn_arch STREQUAL "aarch64")
-      set(AURORA_DAWN_PACKAGE_URL
-        "https://github.com/encounter/dawn-build/releases/download/${AURORA_DAWN_VERSION}/dawn-android-aarch64.tar.gz")
-    endif ()
 
     # A release asset is mutable: the same tag has already served two different windows-amd64 archives,
     # and a cached extraction is never re-verified. Pin the digest for the combinations we ship.
@@ -188,7 +181,7 @@ elseif (_aurora_dawn_provider STREQUAL "package")
           "SHA256=f97701d26fd1f25bbcc260b4c31736ede134c730c12556029e2470fde967f424")
       elseif (_dawn_system STREQUAL "android" AND _dawn_arch STREQUAL "aarch64")
         set(AURORA_DAWN_PACKAGE_URL_HASH
-          "SHA256=27d910dee1201fd1e5b6ac567f0ba2306ebf2135e9f40b6929976c365d38b09b")
+          "SHA256=0e63e8cbf53551f703f582d1306f4257c0380353f66b53369d96952ce6d9f934")
       endif ()
     endif ()
   endif ()

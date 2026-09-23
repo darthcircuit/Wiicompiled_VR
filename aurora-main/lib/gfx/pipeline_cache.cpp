@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <limits>
@@ -26,6 +27,7 @@
 #if defined(__ANDROID__)
 #include <pthread.h>
 #include <sys/resource.h>
+#include <sys/system_properties.h>
 #endif
 
 namespace aurora::gfx {
@@ -70,26 +72,27 @@ constexpr size_t MaxQueuedPipelineBuilds = 256;
 // First-use compilation works best as a short parallel burst. Leave two logical processors for the
 // render and game threads, and cap large hosts to limit driver submissions and memory use.
 constexpr size_t ReservedLogicalProcessors = 2;
-#if defined(__ANDROID__)
-// Quest reports all eight Kryo cores, but the Adreno Vulkan driver serializes
-// much of vkCreateGraphicsPipelines. Six equal-priority compiler threads crowd
-// out the translated game and XR submission threads without materially
-// shortening first-use compilation. Two background-priority workers keep
-// pipeline discovery asynchronous while preserving frame cadence.
-constexpr size_t MaxPipelineWorkers = 2;
-#else
 constexpr size_t MaxPipelineWorkers = 22;
-#endif
-// Cached clear and GX pipelines are normally prewarmed using the full worker
-// pool. Mobile Adreno drivers serialize much of pipeline creation internally;
-// prewarming hundreds of recipes there starves first-use pipelines for over a
-// minute. Keep cached recipes dormant on Android. A recipe is promoted to the
-// priority queue as soon as the game actually requests it.
+constexpr size_t Quest1MaxPipelineWorkers = 2;
+static bool g_quest1PipelineScheduling = false;
+
+static bool quest1_pipeline_scheduling() noexcept {
 #if defined(__ANDROID__)
-constexpr size_t MaxBackgroundPipelineWorkers = 0;
+  static const bool enabled = [] {
+    char device[PROP_VALUE_MAX]{};
+    return __system_property_get("ro.product.device", device) > 0 && std::strcmp(device, "monterey") == 0;
+  }();
+  return enabled;
 #else
-constexpr size_t MaxBackgroundPipelineWorkers = MaxPipelineWorkers;
+  return false;
 #endif
+}
+
+static size_t max_background_pipeline_workers() noexcept {
+  // Quest 1's Adreno driver serializes pipeline creation. Leave cached recipes
+  // dormant until first use there; all newer headsets retain normal prewarm.
+  return g_quest1PipelineScheduling ? 0 : MaxPipelineWorkers;
+}
 // For synchronous pipeline fallback (OpenGL)
 #ifdef NDEBUG
 constexpr size_t BuildPipelinesPerFrame = 5;
@@ -484,8 +487,8 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
       }
     } else if (g_pendingPipelines.contains(hash)) {
       auto* pending = touch_pending_pipeline(hash, g_pipelineFrameActive);
-      // A cached Android recipe can sit dormant because background prewarm is
-      // disabled. Promoting it to first-use priority must wake a worker before
+      // A cached recipe can sit dormant when background prewarm is disabled.
+      // Promoting it to first-use priority must wake a worker before
       // bind_pipeline waits for completion, or both threads sleep forever.
       if (g_pipelineFrameActive && deferGxPipeline) {
         notifyWorker = true;
@@ -1063,9 +1066,11 @@ static void pipeline_worker() {
 #endif
 #if defined(__ANDROID__)
   pthread_setname_np(pthread_self(), "GXPipeline");
-  // setpriority(PRIO_PROCESS, 0, ...) targets the calling Linux thread.
-  // Pipeline creation may finish later, but must not preempt gameplay or XR.
-  setpriority(PRIO_PROCESS, 0, 5);
+  if (g_quest1PipelineScheduling) {
+    // setpriority(PRIO_PROCESS, 0, ...) targets the calling Linux thread.
+    // Quest 1 pipeline creation must not preempt gameplay or XR.
+    setpriority(PRIO_PROCESS, 0, 5);
+  }
 #endif
 
   while (true) {
@@ -1076,7 +1081,7 @@ static void pipeline_worker() {
       g_pipelineCv.wait(lock, [] {
         return !g_priorityPipelines.empty() ||
                (!g_backgroundPipelines.empty() &&
-                g_activeBackgroundPipelineWorkers < MaxBackgroundPipelineWorkers) ||
+                g_activeBackgroundPipelineWorkers < max_background_pipeline_workers()) ||
                g_pipelineThreadEnd;
       });
       if (g_pipelineThreadEnd) {
@@ -1125,7 +1130,8 @@ static size_t pipeline_worker_count() {
   }
   const size_t availableWorkers =
       logicalProcessors > ReservedLogicalProcessors ? logicalProcessors - ReservedLogicalProcessors : 1;
-  return std::clamp(availableWorkers, size_t{1}, MaxPipelineWorkers);
+  const size_t maximum = g_quest1PipelineScheduling ? Quest1MaxPipelineWorkers : MaxPipelineWorkers;
+  return std::clamp(availableWorkers, size_t{1}, maximum);
 }
 
 template <typename PipelineConfig, typename CreateFn>
@@ -1286,6 +1292,7 @@ void initialize_pipeline_cache() {
   g_pipelineFrameActive = false;
   g_pipelineThreadEnd = false;
   g_activeBackgroundPipelineWorkers = 0;
+  g_quest1PipelineScheduling = quest1_pipeline_scheduling();
 
   if (webgpu::g_backendType == wgpu::BackendType::OpenGL || webgpu::g_backendType == wgpu::BackendType::OpenGLES ||
       webgpu::g_backendType == wgpu::BackendType::WebGPU) {
@@ -1298,7 +1305,7 @@ void initialize_pipeline_cache() {
       g_pipelineThreads.emplace_back(pipeline_worker);
     }
     Log.info("Enabled {} priority pipeline compilation workers ({} background prewarm)",
-             workerCount, MaxBackgroundPipelineWorkers);
+             workerCount, max_background_pipeline_workers());
   }
 
   load_pipeline_cache();

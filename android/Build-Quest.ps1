@@ -75,6 +75,7 @@ if (-not $Dependencies) {
 
 $variant = (Get-Culture).TextInfo.ToTitleCase($Configuration)
 $flavour = if ($Headset -eq 'quest1') { 'Quest1' } else { 'ModernQuest' }
+$expectedCpu = if ($Headset -eq 'quest1') { 'kryo' } else { 'cortex-a77' }
 $task = "app:assemble$flavour$variant"
 $gradleArgs = @(
     '--project-dir', $root,
@@ -98,11 +99,16 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::OpenRead($apk.FullName)
 try {
     $gameLibraries = @($archive.Entries | Where-Object { $_.FullName -match '^lib/[^/]+/libmain[^/]*\.so$' })
-    $hasKit = @($archive.Entries | Where-Object { $_.FullName -eq 'assets/game_kit/kit.json' }).Count -gt 0
+    $kitEntry = @($archive.Entries | Where-Object { $_.FullName -eq 'assets/game_kit/kit.json' }) | Select-Object -First 1
+    $kitCpu = if ($kitEntry) {
+        $reader = New-Object IO.StreamReader($kitEntry.Open())
+        try { ($reader.ReadToEnd() | ConvertFrom-Json).androidCpu } finally { $reader.Dispose() }
+    } else { '' }
     $hasToolchain = @($archive.Entries | Where-Object { $_.FullName -eq 'assets/quest_toolchain/files.zip' }).Count -gt 0
 } finally { $archive.Dispose() }
 if ($gameLibraries.Count -gt 0) { throw "The APK contains a translated game library: $($gameLibraries.FullName -join ', ')" }
-if (-not $hasKit) { throw 'The APK has no game kit (assets/game_kit/kit.json)' }
+if (-not $kitEntry) { throw 'The APK has no game kit (assets/game_kit/kit.json)' }
+if ($kitCpu -ne $expectedCpu) { throw "The $Headset APK contains a game kit for CPU '$kitCpu', expected '$expectedCpu'" }
 if (-not $hasToolchain) { throw 'The APK has no build toolchain (assets/quest_toolchain/files.zip)' }
 
 if ($Install) {
