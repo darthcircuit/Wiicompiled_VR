@@ -79,10 +79,11 @@ inline float MaxWheelAngle(bool bike, const WheelTuning& tuning) noexcept {
     return clamped * 0.01745329252f;
 }
 
-// Grips only grab. While a hand holds the wheel its squeeze is released for the
-// game, where it would press C on the Nunchuk or a shoulder on the gamepad, and
-// the wheel replaces the left stick's X axis, which both controller modes steer
-// with. The stick's Y axis keeps aiming items forwards and backwards.
+// Grips only grab. As a Wii Remote they press nothing at all (C, the game's
+// look-behind, is right B); as a gamepad they are the shoulders, so a holding
+// hand's squeeze is released for the game. The wheel replaces the left stick's
+// X axis, which both controller modes steer with, and the stick's Y axis keeps
+// aiming items forwards and backwards.
 inline void ApplyHandSteering(std::array<wii_remote::HandInputs, 2>& hands, const WheelState& wheel) noexcept {
     for (size_t hand = 0; hand < hands.size(); ++hand) {
         if (wheel.held[hand]) {

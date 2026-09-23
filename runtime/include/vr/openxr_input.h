@@ -63,7 +63,8 @@ struct OpenXRPointerScreen {
 // the seated frame every frame. With hand steering on, a squeezed grip near the
 // steering wheel or handlebar takes hold of it; while held, the wheel replaces
 // the left stick's X axis in both presentations and that grip no longer reaches
-// the game (C on the Nunchuk, a shoulder on the gamepad).
+// the game (a shoulder on the gamepad; as a Wii Remote the grips are unbound,
+// so a hand on the wheel cannot hold down a button).
 //
 // A right-thumbstick click on its own toggles the first-person camera, as its
 // F10 checkbox does (first_person_toggle_click).

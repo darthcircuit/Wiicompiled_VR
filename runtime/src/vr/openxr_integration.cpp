@@ -67,7 +67,7 @@ void ConfigurePolicy(bool enabled) noexcept {
     MkwVRPolicyReset();
     MkwVRPolicyConfig config{};
     config.enabled = enabled;
-    config.immersive_races = true;
+    config.immersive_races = !RuntimeConfigFile::VrFlatScreen();
     config.world_units_per_meter = RuntimeConfigFile::VrWorldUnitsPerMeter(500.0f);
     config.hud_distance_meters = RuntimeConfigFile::VrHudDistanceMeters(2.0f);
     config.hud_width_meters = RuntimeConfigFile::VrHudWidthMeters(2.4f);
@@ -753,7 +753,7 @@ private:
         bool fatal = false;
         uint32_t consecutive_skips = 0;
         bool store_gate_set = false;
-        bool store_gate_immersive = false;
+        bool store_gate_racing = false;
         bool presentation_logged = false;
         VRPresentationMode logged_presentation = VRPresentationMode::Desktop;
         uint32_t presentation_log_count = 0;
@@ -840,8 +840,9 @@ private:
                 aurora_get_stereo_screen_aspects(&picture_aspect, &snapshot_aspect)) {
                 presentation.quad_content_aspect = snapshot_aspect;
             }
-            // The room around the menu screen and every other virtual screen; a race is
-            // fully virtual, and the cameras are paused for it.
+            // The room around the menu screen and every other virtual screen, a
+            // Flat Screen race included; an immersive race is fully virtual, and the
+            // cameras are paused for it.
             presentation.passthrough = !immersive && passthrough_.load(std::memory_order_relaxed);
             // The settings panel gets a compositor layer of its own while it is
             // open, and Aurora leaves it out of the eyes. A backend that could
@@ -852,12 +853,14 @@ private:
 
             // Pipeline caches are stored where their stall is invisible: once when a race ends,
             // and by the compiler itself while the headset shows the virtual screen. Never
-            // mid-race.
-            if (!store_gate_set || immersive != store_gate_immersive) {
-                const bool left_race = store_gate_set && store_gate_immersive && !immersive;
+            // mid-race, and a race on the virtual screen (Flat Screen mode) is still a race.
+            const bool racing = immersive || (!policy.config.immersive_races &&
+                                              policy.scene.mode == VRSceneMode::Race);
+            if (!store_gate_set || racing != store_gate_racing) {
+                const bool left_race = store_gate_set && store_gate_racing && !racing;
                 store_gate_set = true;
-                store_gate_immersive = immersive;
-                aurora_set_pipeline_cache_idle_store(!immersive);
+                store_gate_racing = racing;
+                aurora_set_pipeline_cache_idle_store(!racing);
                 if (left_race) {
                     aurora_store_pipeline_caches();
                 }

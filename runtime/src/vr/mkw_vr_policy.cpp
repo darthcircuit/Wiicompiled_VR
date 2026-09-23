@@ -257,6 +257,11 @@ void MkwVRPolicySetFirstPersonUnitsPerMeter(float units_per_meter) noexcept {
     }
 }
 
+void MkwVRPolicySetImmersiveRaces(bool enabled) noexcept {
+    std::lock_guard<std::mutex> lock(g_policy_mutex);
+    ApplyPolicyMutation([&] { g_policy.config.immersive_races = enabled; });
+}
+
 MkwVRPolicySnapshot MkwVRPolicyGetSnapshot() noexcept {
     std::lock_guard<std::mutex> lock(g_policy_mutex);
     MkwVRPolicySnapshot snapshot;

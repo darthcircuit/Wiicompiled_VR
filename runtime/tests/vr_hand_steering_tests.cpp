@@ -51,7 +51,7 @@ void TestHandOff() {
     CheckNear(hands[0].stick_x, 0.6f, "a held wheel steers through the left stick");
     CheckNear(hands[0].stick_y, 0.8f, "the stick keeps aiming items");
     CheckNear(hands[0].squeeze, 1.0f, "a free hand's grip still reaches the game");
-    CheckNear(hands[1].squeeze, 0.0f, "a holding grip does not press C or a shoulder");
+    CheckNear(hands[1].squeeze, 0.0f, "a holding grip does not press a shoulder");
 
     wheel.held = {true, true};
     wheel.steering = 3.0f;

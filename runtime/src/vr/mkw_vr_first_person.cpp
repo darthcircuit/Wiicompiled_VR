@@ -1213,8 +1213,11 @@ void MkwVRFirstPersonApplyConfiguredSettings() noexcept {
     const FirstPersonRotation rotation = mode == "full" ? FirstPersonRotation::Full
                                          : mode == "yaw_pitch" ? FirstPersonRotation::YawPitch
                                                                : FirstPersonRotation::YawOnly;
-    MkwVRFirstPersonConfigure(RuntimeConfigFile::VrFirstPerson(false), offsets, units_per_meter,
-                              rotation);
+    // Flat Screen mode shows the race on the menu screen through the game's own
+    // camera, where a hidden driver would only be missing from the kart.
+    MkwVRFirstPersonConfigure(RuntimeConfigFile::VrFirstPerson(false) &&
+                                  !RuntimeConfigFile::VrFlatScreen(),
+                              offsets, units_per_meter, rotation);
     MkwVRPolicySetFirstPersonUnitsPerMeter(units_per_meter);
     const bool cockpit = RuntimeConfigFile::VrFirstPersonSeat() != "custom";
     const float cockpit_units = RuntimeConfigFile::VrCockpitUnitsPerMeter();

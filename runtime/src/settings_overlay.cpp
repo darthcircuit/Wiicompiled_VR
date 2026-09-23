@@ -141,6 +141,7 @@ bool g_vrEnabled = RuntimeConfigFile::VrEnabled(true);
 bool g_vrStopAtDisplayCopy = RuntimeConfigFile::VrStopAtDisplayCopy(true);
 bool g_vrSkipCopyClears = RuntimeConfigFile::VrSkipCopyClears(true);
 bool g_vrHudVirtualScreen = RuntimeConfigFile::VrHudVirtualScreen(true);
+bool g_vrFlatScreen = RuntimeConfigFile::VrFlatScreen();
 #if defined(__ANDROID__)
 bool g_vrPassthrough = RuntimeConfigFile::VrPassthrough();
 #endif
@@ -1354,8 +1355,9 @@ void DrawVrSettings() {
         ImGui::SetTooltip(
             "Wii Remote + Nunchuk: the right controller is a Wii Remote, with motion and a pointer "
             "that lands where you aim on the virtual screen; the left one is the Nunchuk.\n"
-            "  Right: A = A, trigger = B, stick up/down = 1/2\n"
-            "  Left: stick = Nunchuk stick, trigger = Z, grip = C, X = -, menu = +, Y = settings panel\n"
+            "  Right: A = A, trigger = B, B = C (look behind), stick up/down = 1/2\n"
+            "  Left: stick = Nunchuk stick, trigger = Z, X = -, menu = +, Y = settings panel\n"
+            "  The grips press nothing; they take hold of the wheel with hand steering.\n"
             "Gamepad: both controllers are one ordinary controller, read as a GameCube pad.\n"
             "Applies immediately; the game sees the controller change as a reconnection.");
     }
@@ -1424,11 +1426,13 @@ void DrawVrSettings() {
     ImGui::PopTextWrapPos();
     ImGui::Separator();
     ImGui::Text("VR 2D layer");
+    ImGui::BeginDisabled(g_vrFlatScreen);
     if (ImGui::Checkbox("2D layer on a virtual screen", &g_vrHudVirtualScreen)) {
         ApplyVrHudVirtualScreen();
         RuntimeConfigFile::SetVrHudVirtualScreen(g_vrHudVirtualScreen);
     }
-    if (ImGui::IsItemHovered()) {
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip(
             "Puts the minimap, race position, item roulette and the rest of the race HUD on a "
             "screen fixed ahead of the kart camera. Turn off to leave them stretched across "
@@ -1467,13 +1471,15 @@ void DrawVrSettings() {
             ImGui::SetTooltip("Click to rebind. Esc cancels, Backspace unbinds.");
         }
     }
+    ImGui::BeginDisabled(g_vrFlatScreen);
     if (ImGui::SliderFloat("Lean back angle (deg)", &g_vrLeanBackDegrees,
                            -RuntimeConfigFile::kVrLeanBackDegreesLimit,
                            RuntimeConfigFile::kVrLeanBackDegreesLimit, "%.1f")) {
         mkw::vr::OpenXRSetLeanBackDegrees(g_vrLeanBackDegrees);
         RuntimeConfigFile::SetVrLeanBackDegrees(g_vrLeanBackDegrees);
     }
-    if (ImGui::IsItemHovered()) {
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip(
             "Tilts the game camera back with you when you play reclined, so set it to "
             "roughly how far back your seat is and the track comes back in front of you "
@@ -1489,12 +1495,26 @@ void DrawVrSettings() {
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
             "Shows your room through the headset's cameras around the menu screen and every "
-            "other screen outside a race, instead of black. Races stay fully virtual. "
+            "other screen outside an immersive race, instead of black. Immersive races stay "
+            "fully virtual; the Flat Screen race has the room around it too. "
             "Applies immediately.");
     }
 #endif
     ImGui::Separator();
     ImGui::Text("VR camera");
+    if (ImGui::Checkbox("Flat Screen mode", &g_vrFlatScreen)) {
+        RuntimeConfigFile::SetVrFlatScreen(g_vrFlatScreen);
+        mkw::vr::MkwVRPolicySetImmersiveRaces(!g_vrFlatScreen);
+        mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Plays races on the same flat screen as the menus, through the game's own camera, "
+            "instead of all around you in stereo. The first-person camera, hand steering and "
+            "the race view settings do not apply while it is on. Applies immediately.");
+    }
+    // Everything below shapes the immersive race view, which Flat Screen mode replaces.
+    ImGui::BeginDisabled(g_vrFlatScreen);
     if (ImGui::Checkbox("First-person camera", &g_vrFirstPerson)) {
         RuntimeConfigFile::SetVrFirstPerson(g_vrFirstPerson);
         mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
@@ -1643,11 +1663,15 @@ void DrawVrSettings() {
         mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();
         ApplyVrHudVirtualScreen();
     }
+    ImGui::EndDisabled();
 }
 
 // The right-thumbstick click: flips the first-person camera exactly as its
-// checkbox does. Game thread.
+// checkbox does, so it does nothing in Flat Screen mode either. Game thread.
 void ToggleFirstPersonCamera() {
+    if (g_vrFlatScreen) {
+        return;
+    }
     g_vrFirstPerson = !g_vrFirstPerson;
     RuntimeConfigFile::SetVrFirstPerson(g_vrFirstPerson);
     mkw::vr::MkwVRFirstPersonApplyConfiguredSettings();

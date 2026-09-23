@@ -73,6 +73,22 @@ int main() {
     check(MkwVRPolicyGetSnapshot().presentation == VRPresentationMode::VirtualScreen, "race entry needs fresh camera");
     MkwVRPolicyPublishRaceCamera(camera);
     check(MkwVRPolicyGetSnapshot().presentation == VRPresentationMode::ImmersiveRace, "race resumes with fresh camera");
+    {
+        const uint64_t immersive_tag = MkwVRPolicyGetSnapshot().content_tag;
+        MkwVRPolicySetFirstPersonEngaged(true);
+        MkwVRPolicySetImmersiveRaces(false);
+        const auto flat = MkwVRPolicyGetSnapshot();
+        check(flat.presentation == VRPresentationMode::VirtualScreen, "Flat Screen mode keeps races on the screen");
+        check(flat.content_tag != immersive_tag, "Flat Screen mode must invalidate immersive packets");
+        check(!flat.first_person_engaged, "Flat Screen mode never engages first person");
+        check(MkwVRPolicyRouteDraw(VRDrawClass::PerspectiveWorld, flat) == VRDrawRoute::VirtualScreen,
+              "Flat Screen mode routes the race world to the screen");
+        MkwVRPolicySetFirstPersonEngaged(false);
+        MkwVRPolicySetImmersiveRaces(true);
+        const auto resumed = MkwVRPolicyGetSnapshot();
+        check(resumed.presentation == VRPresentationMode::ImmersiveRace, "leaving Flat Screen mode resumes the race");
+        check(resumed.content_tag != flat.content_tag, "leaving Flat Screen mode must invalidate screen packets");
+    }
     MkwVRPolicySetSessionActive(false);
     check(MkwVRPolicyGetSnapshot().presentation == VRPresentationMode::Desktop, "inactive session uses desktop");
     return failures == 0 ? 0 : 1;

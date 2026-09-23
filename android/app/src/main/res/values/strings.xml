@@ -172,6 +172,8 @@
 
     <!-- VR tab -->
     <string name="section_vr_camera">Camera</string>
+    <string name="vr_flat_screen">Flat Screen mode</string>
+    <string name="vr_flat_screen_helper">Plays races on the same flat screen as the menus instead of all around you. The camera settings below do not apply while it is on.</string>
     <string name="vr_camera">Camera</string>
     <string name="vr_camera_helper">Ride behind the kart like the game, or sit in the driver\'s seat.</string>
     <string name="vr_camera_chase">Chase camera</string>
@@ -218,7 +220,7 @@
     <string name="vr_hud_width">Screen width</string>
     <string name="vr_hud_width_helper">How wide the menu screen and race HUD are.</string>
     <string name="vr_passthrough">Passthrough around the menu screen</string>
-    <string name="vr_passthrough_helper">Shows your room through the headset\'s cameras around the menus instead of black. Races stay fully virtual.</string>
+    <string name="vr_passthrough_helper">Shows your room through the headset\'s cameras around the menus instead of black. Races stay fully virtual, except in Flat Screen mode.</string>
 
     <!-- Graphics tab -->
     <string name="section_graphics">Rendering</string>
@@ -256,7 +258,7 @@
     <string name="controls_map_z">Z</string>
     <string name="controls_map_z_value">Left trigger</string>
     <string name="controls_map_c">C</string>
-    <string name="controls_map_c_value">Left grip</string>
+    <string name="controls_map_c_value">Right B</string>
     <string name="controls_map_pointer">Pointer and motion</string>
     <string name="controls_map_pointer_value">Aim and move the right controller</string>
     <string name="controls_map_panel">Settings panel</string>

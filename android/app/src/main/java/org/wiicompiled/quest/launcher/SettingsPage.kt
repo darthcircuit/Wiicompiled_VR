@@ -114,15 +114,23 @@ class SettingsPage(
     }
 
     private fun buildVr() {
-        val firstPerson = { c: TomlConfig -> c.bool("vr", "first_person") ?: false }
+        // Flat Screen mode keeps races on the menu screen, which none of the race view rows reach.
+        val immersive = { c: TomlConfig -> !(c.bool("vr", "flat_screen") ?: false) }
+        val firstPerson = { c: TomlConfig -> immersive(c) && (c.bool("vr", "first_person") ?: false) }
         // The steering wheel and hand steering belong to the cockpit seat.
         val cockpit = { c: TomlConfig -> firstPerson(c) && stringIndex(c, "vr", "first_person_seat", SEATS) == 0 }
         section(R.string.section_vr_camera) {
+            toggle(
+                R.string.vr_flat_screen, R.string.vr_flat_screen_helper,
+                read = { !immersive(it) },
+                write = { c, value -> c.setBool("vr", "flat_screen", value) },
+            )
             choice(
                 R.string.vr_camera, R.string.vr_camera_helper,
                 listOf(R.string.vr_camera_chase, R.string.vr_camera_first_person),
-                read = { if (firstPerson(it)) 1 else 0 },
+                read = { if (it.bool("vr", "first_person") == true) 1 else 0 },
                 write = { c, index -> c.setBool("vr", "first_person", index == 1) },
+                enabledIf = immersive,
             )
             choice(
                 R.string.vr_rotation, R.string.vr_rotation_helper,
@@ -172,6 +180,7 @@ class SettingsPage(
                 read = { number(it, "vr", "lean_back_degrees", -45.0, 45.0, 0.0) },
                 format = { "%.0f°".format(it) },
                 write = { c, value -> c.setFloat("vr", "lean_back_degrees", value) },
+                enabledIf = immersive,
             )
         }
         section(R.string.section_vr_headset) {
@@ -203,6 +212,7 @@ class SettingsPage(
                 R.string.vr_hud_screen, R.string.vr_hud_screen_helper,
                 read = { it.bool("vr", "hud_virtual_screen") ?: true },
                 write = { c, value -> c.setBool("vr", "hud_virtual_screen", value) },
+                enabledIf = immersive,
             )
             slider(
                 R.string.vr_hud_distance, R.string.vr_hud_distance_helper, 0.5, 5.0, 0.1,

@@ -45,6 +45,7 @@ world_units_per_meter = 500.0
 hud_distance_meters = 2.0
 hud_width_meters = 2.4
 hud_virtual_screen = true
+flat_screen = false
 stop_at_display_copy = true
 skip_copy_clears = true
 first_person = false
@@ -139,10 +140,19 @@ and 0.8 on the Quest, whose mobile GPU needs the headroom.
 launch and govern both the menu screen and the in-race 2D screen, so 2D content keeps its place
 across the transition. `hud_virtual_screen` decides whether the race's 2D layer uses that screen;
 it is live and can be flipped from the F10 settings bar.
+`flat_screen` (default off) keeps races on that same flat screen, as the menus are, instead of
+immersive stereo: the whole race, 3D world and HUD alike, is the game's own picture on the quad, as
+in DolphinXR's Flat Screen mode. The first-person camera, hand steering, the lean-back angle, VR
+frame interpolation and `hud_virtual_screen` shape only the immersive race view, so none of them
+apply while it is on; the right-thumbstick first-person toggle is ignored rather than changing the saved
+setting. It is live, as **F10 → VR → Flat Screen mode** (the headset panel's VR tab) and the Quest
+launcher's Settings page, and turning it on or off mid-race switches on the next frame through the
+presentation policy's safety generation.
 `passthrough` (Quest only, default on) shows the room through the headset's cameras around the
 menu screen and every other virtual screen, instead of black: an `XR_FB_passthrough`
 reconstruction layer submitted under the screen's quad, as PPSSPP VR does, with the blend mode
-left `OPAQUE`. An immersive race never shows it, and the cameras are paused for the race. It is
+left `OPAQUE`. An immersive race never shows it, and the cameras are paused for the race; a race in
+`flat_screen` is a virtual screen like the menus, so the room shows around it too. It is
 live, from the headset panel's VR tab or the launcher's Settings page. The app declares
 `com.oculus.feature.PASSTHROUGH`, without which Horizon OS composites nothing for that layer.
 So that the room frames the picture rather than black bands, the Quest's menu quad shows only the
@@ -187,19 +197,21 @@ Touch controllers. The port is served through KPAD like a Bluetooth remote
 | --- | --- |
 | Right A | A |
 | Right trigger | B |
+| Right B | C (look behind) |
 | Right stick up / down | 1 / 2 |
 | Left X | − |
 | Left menu | + |
 | Left stick | Nunchuk stick |
 | Left trigger | Z |
-| Left grip | C |
 | Left Y | Settings panel (not a Wii button) |
+| Either grip | Takes hold of the wheel (not a Wii button) |
 | Right stick click | First-person camera on / off (not a Wii button) |
 | Right controller motion and aim | Wii Remote accelerometer and pointer |
 | Left controller motion | Nunchuk accelerometer |
 
-Analog inputs count as pressed past half travel. Right B, right stick left / right and the left
-stick click are unbound, and no controller button presses HOME. The game's Wii Remote rumble vibrates
+Analog inputs count as pressed past half travel. The grips, right stick left / right and the left
+stick click press no Wii button, and nothing presses HOME. C sits on right B rather than a grip
+because hand steering holds a grip down for a whole corner, and C is the game's look-behind. The game's Wii Remote rumble vibrates
 both controllers, subject to the ordinary controller-vibration switch.
 
 **Motion.** Each XR frame the aim and grip poses are located at the measured current time
@@ -234,8 +246,8 @@ Raw IR camera dots in `KPADGetUnifiedWpadStatus` stay invalid; the game reads th
 controllers operate the panel and the game sees them idle.
 
 **Hand steering.** With `hand_steering` on, in the first-person cockpit, a grip squeezed near the
-steering wheel takes hold of it, and while held the wheel steers through the Nunchuk stick's X axis
-and that grip stops pressing C; see [Steering wheel and hand
+steering wheel takes hold of it, and while held the wheel steers through the Nunchuk stick's X axis;
+see [Steering wheel and hand
 steering](#steering-wheel-and-hand-steering). Turning the wheel moves the controllers, and the game's
 own motion detection still reads them, so a sharp enough turn can read as a shake.
 
@@ -377,8 +389,9 @@ sliders exist because the comfortable value is a matter of taste and is best jud
 headset.
 
 The mode engages only in a single-screen race, the same content that already qualifies for
-immersive stereo. Menus, split-screen, and the virtual-screen fallback are unaffected, and so is
-the desktop mirror, which keeps showing the game's ordinary third-person view. If the kart or
+immersive stereo. Menus, split-screen, `flat_screen`, and the virtual-screen fallback are
+unaffected, and so is the desktop mirror, which keeps showing the game's ordinary third-person
+view. If the kart or
 camera cannot be read the camera stays where the game put it rather than guessing.
 
 Your own driver sits exactly where your eyes are, so their head would fill the view.
@@ -453,8 +466,8 @@ and `wheel_haptics` gives a short pulse on grab and release.
 
 While the wheel is held it replaces the left stick's X axis, in both the Wii Remote and the gamepad
 presentation, and the game keeps its own steering curve. The stick's Y axis still aims items, and a
-holding grip no longer reaches the game (it would press C on the Nunchuk or a shoulder on the
-gamepad); the triggers, A and the right stick are unchanged. Releasing both grips gives steering back
+holding grip no longer reaches the game (a shoulder on the gamepad; the Wii Remote presentation
+leaves the grips unbound for this reason); the triggers, A and the right stick are unchanged. Releasing both grips gives steering back
 to the stick. The settings panel withholds the wheel like any other input.
 
 **A USB wheel.** With a USB wheel and pedals set up (see the README), the wheel drives the race as
@@ -498,6 +511,10 @@ The runtime deliberately fails safe instead of guessing which Mario Kart camera 
   confirm exactly one distinct race camera for the current GX frame.
 - Leaving the race or observing zero or multiple cameras immediately returns presentation to the
   virtual screen. Session/runtime loss safely tears down XR and continues on the desktop mirror.
+- `flat_screen` clears the policy's `immersive_races`, so a race stays on the virtual screen
+  however complete the observations are. Changing it advances the safety generation like any
+  other change of presentation, and the pacing thread still treats that race as a race: pipeline
+  caches are not stored mid-race on the virtual screen either.
 
 Aurora records the original GX frame once and replays it for both OpenXR eyes. Perspective GX draws
 receive asymmetric headset projections, while the game's 2D layer goes on a fixed virtual screen

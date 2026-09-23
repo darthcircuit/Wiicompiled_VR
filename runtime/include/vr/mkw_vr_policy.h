@@ -71,6 +71,7 @@ inline constexpr uint32_t kMkwVRRequiredImmersiveBindings =
 
 struct MkwVRPolicyConfig {
     bool enabled = false;
+    // False is Flat Screen mode: races stay on the virtual screen the menus use.
     bool immersive_races = true;
     float world_units_per_meter = 500.0f;
     float hud_distance_meters = 2.0f;
@@ -151,6 +152,9 @@ void MkwVRPolicySetFirstPersonEngaged(bool engaged) noexcept;
 // MkwVRPolicyConfigure so the F10 slider can retune it during a race without
 // republishing (and revalidating) the whole configuration.
 void MkwVRPolicySetFirstPersonUnitsPerMeter(float units_per_meter) noexcept;
+// Flat Screen mode, live from the F10 menu. Unlike the scale above this changes
+// which content is safe to present, so it advances the safety generation.
+void MkwVRPolicySetImmersiveRaces(bool enabled) noexcept;
 MkwVRPolicySnapshot MkwVRPolicyGetSnapshot() noexcept;
 
 // This classifier is deliberately structural rather than heuristic: future
