@@ -326,6 +326,7 @@ class SettingsPage(
             action(R.string.about_extract, R.string.about_extract_helper, R.string.home_select_disc, enabled = idle) {
                 selectDiscImage()
             }
+            info(R.string.about_disc_md5, activity.getString(R.string.disc_md5), stacked = true)
             // One row per game this app carries a kit for, so both are visible at once.
             for (profile in GameProfile.available(activity)) {
                 val manifest = GameLibrary.manifest(activity, profile)

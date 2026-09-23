@@ -285,6 +285,10 @@
     <string name="about_logs">Logs</string>
     <string name="about_extract">Extract from disc image</string>
     <string name="about_extract_helper">Replaces DATA with the files of your own PAL disc image.</string>
+    <!-- MD5 of the clean PAL (RMCP01) disc as a plain .iso (Redump). -->
+    <string name="disc_md5" translatable="false">E7B1FF1FABB0789482CE2CB0661D986E</string>
+    <string name="disc_md5_note">Your disc image must be the clean PAL game: as a .iso file its MD5 hash is %1$s. Compressed images (WBFS, RVZ…) have a different hash.</string>
+    <string name="about_disc_md5">Clean PAL .iso MD5</string>
     <string name="about_game">Game</string>
     <string name="about_game_ready">Built by %1$s on %2$s</string>
     <string name="about_game_missing">Not installed yet</string>

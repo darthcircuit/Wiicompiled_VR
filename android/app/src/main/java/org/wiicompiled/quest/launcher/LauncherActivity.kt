@@ -362,9 +362,10 @@ class LauncherActivity : Activity() {
                 showBanner(getString(R.string.home_mod_needed_message), warning = true)
             gameStatus == GameLibrary.Status.Stale -> showBanner(getString(R.string.home_game_stale), warning = true)
             gameStatus == GameLibrary.Status.Missing && discStatus == GameStorage.DiscStatus.Missing ->
-                showBanner(getString(R.string.home_setup_intro), warning = false)
+                showBanner(getString(R.string.home_setup_intro) + discMd5Note(), warning = false)
             gameStatus == GameLibrary.Status.Missing -> showBanner(getString(R.string.home_game_missing), warning = false)
-            discStatus == GameStorage.DiscStatus.Missing -> showBanner(getString(R.string.home_data_missing, disc), warning = false)
+            discStatus == GameStorage.DiscStatus.Missing ->
+                showBanner(getString(R.string.home_data_missing, disc) + discMd5Note(), warning = false)
             else -> showBanner(null)
         }
 
@@ -526,6 +527,9 @@ class LauncherActivity : Activity() {
             showPage(Page.Home)
         }
     }
+
+    /** The clean disc's .iso hash, for the banners that ask for a disc image. */
+    private fun discMd5Note(): String = "\n\n" + getString(R.string.disc_md5_note, getString(R.string.disc_md5))
 
     private fun showBanner(text: String?, warning: Boolean = false) {
         if (text == null) {
