@@ -211,8 +211,9 @@ Touch controllers. The port is served through KPAD like a Bluetooth remote
 
 Analog inputs count as pressed past half travel. The grips, right stick left / right and the left
 stick click press no Wii button, and nothing presses HOME. C sits on right B rather than a grip
-because hand steering holds a grip down for a whole corner, and C is the game's look-behind. The game's Wii Remote rumble vibrates
-both controllers, subject to the ordinary controller-vibration switch.
+because hand steering holds a grip down for a whole corner, and C is the game's look-behind. The
+game's Wii Remote rumble vibrates both controllers, subject to the ordinary controller-vibration
+switch.
 
 **Motion.** Each XR frame the aim and grip poses are located at the measured current time
 (`XR_KHR_win32_convert_performance_counter_time`, `XR_KHR_convert_timespec_time` on Android), not
