@@ -227,9 +227,6 @@ abstract class ExportQuestGameKit : DefaultTask() {
     @get:Input
     abstract val androidCpu: Property<String>
 
-    @get:Input
-    abstract val cmakeBuildType: Property<String>
-
     @get:Inject
     abstract val execOperations: ExecOperations
 
@@ -241,7 +238,7 @@ abstract class ExportQuestGameKit : DefaultTask() {
     @TaskAction
     fun export() {
         val app = appDir.get().asFile
-        data class Candidate(val probe: File, val binaryDir: File, val cpu: String?, val buildType: String?)
+        data class Candidate(val probe: File, val binaryDir: File, val cpu: String?)
         fun cacheValue(cache: String, name: String): String? =
             Regex("(?m)^${Regex.escape(name)}(?::[^=\\r\\n]*)?=([^\\r\\n]*)$")
                 .find(cache)?.groupValues?.get(1)?.trim()
@@ -253,19 +250,17 @@ abstract class ExportQuestGameKit : DefaultTask() {
                 val binaryDir = File(app, ".cxx/${configuration.parentFile.name}/${configuration.name}/arm64-v8a")
                 val cacheFile = File(binaryDir, "CMakeCache.txt")
                 val cache = cacheFile.takeIf { it.isFile }?.readText().orEmpty()
-                Candidate(probe, binaryDir, cacheValue(cache, "MKW_ANDROID_CPU"), cacheValue(cache, "CMAKE_BUILD_TYPE"))
+                Candidate(probe, binaryDir, cacheValue(cache, "MKW_ANDROID_CPU"))
             }
             .toList()
         val expectedCpu = androidCpu.get()
-        val expectedBuildType = cmakeBuildType.get()
         val matching = candidates.filter {
-            it.cpu == expectedCpu && it.buildType.equals(expectedBuildType, ignoreCase = true) &&
-                File(it.binaryDir, "build.ninja").isFile
+            it.cpu == expectedCpu && File(it.binaryDir, "build.ninja").isFile
         }
         val chosen = matching.maxByOrNull { it.probe.lastModified() }
             ?: throw GradleException(
-                "No $expectedBuildType CMake tree for Android CPU $expectedCpu. Found: " +
-                    candidates.joinToString { "${it.binaryDir} (cpu=${it.cpu}, type=${it.buildType})" }
+                "No CMake tree for Android CPU $expectedCpu. Found: " +
+                    candidates.joinToString { "${it.binaryDir} (cpu=${it.cpu})" }
             )
         val binaryDir = chosen.binaryDir
         val kitDir = File(outputDir.get().asFile, "game_kit")
@@ -324,7 +319,6 @@ androidComponents {
             appDir.set(layout.projectDirectory)
             script.set(rootProject.layout.projectDirectory.file("Export-QuestGameKit.ps1"))
             androidCpu.set(if (variant.name.startsWith("quest1", ignoreCase = true)) "kryo" else "cortex-a77")
-            cmakeBuildType.set(variant.buildType)
             outputDir.set(layout.buildDirectory.dir("generated/assets/questGameKit/${variant.name}"))
             llvmStrip.set(sdkComponents.ndkDirectory.map {
                 it.file("toolchains/llvm/prebuilt/$host/bin/llvm-strip" + if (host.startsWith("windows")) ".exe" else "")

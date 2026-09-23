@@ -274,7 +274,7 @@ function Export-QuestGameKit {
     $ErrorActionPreference = 'Stop'
     $binary = ConvertTo-ForwardPath $CMakeBinaryDir
     $cache = [IO.File]::ReadAllText("$binary/CMakeCache.txt")
-    $configuredCpu = [regex]::Match($cache, '(?m)^MKW_ANDROID_CPU(?::[^=\r\n]*)?=([^\r\n]+)$').Groups[1].Value.Trim()
+    $configuredCpu = [regex]::Match($cache, '(?m)^MKW_ANDROID_CPU(?::[^=\r\n]*)?=([^\r\n]+)\r?$').Groups[1].Value.Trim()
     if ($configuredCpu -ne $AndroidCpu) {
         throw "CMake tree $binary targets Android CPU '$configuredCpu', expected '$AndroidCpu'"
     }
