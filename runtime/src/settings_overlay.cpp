@@ -2407,6 +2407,9 @@ void Draw() noexcept {
     // its "communications interrupted" prompt without polling pads). Same guest
     // thread as PADRead, so no concurrent access to the scanner's state.
     WiiRemoteInput::Poll();
+    // Likewise for the VR controllers' gamepad, so it keeps being written even
+    // while the game is not reading pads.
+    mkw::vr::OpenXRApplyControllerState();
     if (g_firstPersonToggleRequested.exchange(false, std::memory_order_acq_rel)) {
         ToggleFirstPersonCamera();
     }

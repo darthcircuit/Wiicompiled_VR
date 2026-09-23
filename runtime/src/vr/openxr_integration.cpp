@@ -1768,6 +1768,12 @@ bool OpenXRIsRunning() noexcept {
 #endif
 }
 
+void OpenXRApplyControllerState() noexcept {
+#if MKW_OPENXR_GRAPHICS_BACKEND
+    OpenXRApplyVirtualGamepad();
+#endif
+}
+
 void OpenXRRequestRecenter() noexcept {
 #if MKW_OPENXR_GRAPHICS_BACKEND
     OpenXRIntegration::Get().RequestRecenter();

@@ -167,6 +167,17 @@ thread (`runtime/src/vr/openxr_input.cpp`), which feeds a virtual SDL gamepad th
 to a port like any other. `controller_mode` decides what the game finds on that port, and is live
 from **F10 > VR > VR controllers**; the game sees a change as a controller reconnection.
 
+The pacing thread only publishes that gamepad; the game thread writes it to SDL where it already
+polls controllers (`OpenXRApplyControllerState`, called from `PAD__Read_HLE` and the overlay's
+per-frame work). SDL holds its joystick lock for the length of a device enumeration, and the
+Bluetooth Wii Remote rescan (**F10 > Controller settings > Keep scanning**, `wii_continuous_scan`,
+off by default) makes SDL close and reopen every HID device twice per scan. Measured at 15 ms on a
+plain desk and over 200 ms with a Lighthouse setup's dongles on the bus, which is why the pacing
+thread must not wait on it: a frame it holds open that long costs the compositor every display slot
+that passes, and `[xr-diag]` reports it as a stalled, late frame with skipped display slots. That
+rescan still pauses the *game* thread for as long, so leave it off unless a real Wii Remote is in
+use.
+
 `"wii_remote"`, the default, presents them as a Wii Remote with a Nunchuk, the way DolphinXR's
 OpenXR Wii Remote does, with buttons adapted from its default `OpenXR Wii Remote` profile for the
 Touch controllers. The port is served through KPAD like a Bluetooth remote

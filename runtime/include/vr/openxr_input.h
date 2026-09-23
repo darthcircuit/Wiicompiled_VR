@@ -76,8 +76,10 @@ struct OpenXRPointerScreen {
 // Lifetime: Create after the session exists (attaches the action set, which
 // OpenXR permits once per session), Sync once per xrWaitFrame, Idle while the
 // session is not running, Destroy before the session is destroyed. All of them
-// run on the XR pacing thread; SDL's virtual joystick setters and the Wii
-// Remote bridge are internally locked, so the game thread may read concurrently.
+// run on the XR pacing thread. The Wii Remote bridge is internally locked, so
+// the game thread may read it concurrently, and the virtual gamepad is only
+// published here: OpenXRApplyVirtualGamepad() performs the SDL writes on the
+// game thread, keeping SDL's joystick lock off this thread entirely.
 class OpenXRInput final {
 public:
     explicit OpenXRInput(OpenXRLogCallback logger = {});
@@ -184,6 +186,10 @@ private:
     bool m_logged_pointer = false;
     std::string m_last_error;
 };
+
+// Game thread: writes the gamepad the pacing thread last published, if any.
+// Does nothing when no OpenXR controllers are attached.
+void OpenXRApplyVirtualGamepad() noexcept;
 
 } // namespace mkw::vr
 

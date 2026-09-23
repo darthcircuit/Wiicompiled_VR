@@ -34,6 +34,13 @@ void OpenXRShutdownBeforeAurora() noexcept;
 void OpenXRServiceProducerFrameBoundary() noexcept;
 
 bool OpenXRIsRunning() noexcept;
+
+// Writes the controllers the pacing thread last published to the virtual
+// gamepad. Call it from the thread that polls controllers, wherever the game
+// is about to read them: the pacing thread deliberately leaves SDL alone, since
+// SDL's joystick lock is held for the length of a device enumeration and an
+// OpenXR frame may not wait that long. Cheap and safe to call when VR is off.
+void OpenXRApplyControllerState() noexcept;
 std::string OpenXRLastError();
 
 // Recenters on where the player is sitting now: it moves the immersive race

@@ -23,9 +23,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <mutex>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -37,6 +39,81 @@
 
 namespace mkw::vr {
 namespace {
+
+// SDL holds its joystick lock for as long as an enumeration takes, and the
+// Bluetooth Wii Remote rescan (F10 > Controller settings > Keep scanning)
+// closes and reopens every HID device twice per scan: 15 ms on a plain desk,
+// over 200 ms on a machine carrying several HID devices, such as a Lighthouse
+// setup's base-station dongles. The pacing thread must never wait on that,
+// because the OpenXR frame it holds open costs the compositor every display
+// slot that passes. So it leaves the gamepad here, and the game thread writes
+// it to SDL where it already polls controllers.
+//
+// m_sdl is the lock the SDL work runs under; the pacing thread only ever takes
+// m_state, and only for the copy. Both are taken in that order.
+class VirtualGamepadRelay {
+public:
+    struct Pad {
+        std::array<int16_t, SDL_GAMEPAD_AXIS_COUNT> axes{};
+        std::array<bool, SDL_GAMEPAD_BUTTON_COUNT> buttons{};
+    };
+
+    void Attach(SDL_Joystick* joystick) {
+        std::scoped_lock lock(m_sdl, m_state);
+        m_joystick = joystick;
+        m_pending = false;
+    }
+
+    void Detach() {
+        std::scoped_lock lock(m_sdl, m_state);
+        m_joystick = nullptr;
+        m_pending = false;
+    }
+
+    // Pacing thread.
+    void Publish(const Pad& pad) {
+        std::lock_guard lock(m_state);
+        m_pad = pad;
+        m_pending = true;
+    }
+
+    // Game thread. Holding m_sdl here is what keeps Detach from closing the
+    // joystick underneath the writes.
+    void Apply() {
+        std::lock_guard sdl(m_sdl);
+        Pad pad;
+        SDL_Joystick* joystick = nullptr;
+        {
+            std::lock_guard lock(m_state);
+            if (!m_pending || m_joystick == nullptr) {
+                return;
+            }
+            pad = m_pad;
+            joystick = m_joystick;
+            m_pending = false;
+        }
+        for (int axis = 0; axis < SDL_GAMEPAD_AXIS_COUNT; ++axis) {
+            SDL_SetJoystickVirtualAxis(joystick, static_cast<SDL_GamepadAxis>(axis),
+                                       pad.axes[static_cast<size_t>(axis)]);
+        }
+        for (int button = 0; button < SDL_GAMEPAD_BUTTON_COUNT; ++button) {
+            SDL_SetJoystickVirtualButton(joystick, static_cast<SDL_GamepadButton>(button),
+                                         pad.buttons[static_cast<size_t>(button)]);
+        }
+    }
+
+private:
+    std::mutex m_sdl;
+    std::mutex m_state;
+    SDL_Joystick* m_joystick = nullptr;
+    Pad m_pad;
+    bool m_pending = false;
+};
+
+VirtualGamepadRelay& Relay() {
+    static VirtualGamepadRelay relay;
+    return relay;
+}
 
 #if defined(__ANDROID__)
 // Debug-only remote button presses for headset experiments driven over adb, so
@@ -407,6 +484,10 @@ XrTime OpenXRInput::InputSampleTime(XrTime predicted_display_time) const {
     return now > 0 ? (std::min)(predicted_display_time, now) : predicted_display_time;
 }
 
+void OpenXRApplyVirtualGamepad() noexcept {
+    Relay().Apply();
+}
+
 bool OpenXRInput::AttachVirtualGamepad() {
     SDL_VirtualJoystickDesc desc;
     SDL_INIT_INTERFACE(&desc);
@@ -438,10 +519,13 @@ bool OpenXRInput::AttachVirtualGamepad() {
     }
     m_joystick_id = id;
     m_joystick = joystick;
+    Relay().Attach(joystick);
     return true;
 }
 
 void OpenXRInput::DetachVirtualGamepad() {
+    // Before the handle goes: the game thread may be writing through it.
+    Relay().Detach();
     if (m_joystick != nullptr) {
         SDL_CloseJoystick(static_cast<SDL_Joystick*>(m_joystick));
         m_joystick = nullptr;
@@ -503,13 +587,7 @@ void OpenXRInput::Idle() {
     StopRumble();
     // Nothing stays held on the gamepad either while input is away.
     if (m_joystick != nullptr) {
-        auto* joystick = static_cast<SDL_Joystick*>(m_joystick);
-        for (int axis = 0; axis < SDL_GAMEPAD_AXIS_COUNT; ++axis) {
-            SDL_SetJoystickVirtualAxis(joystick, axis, 0);
-        }
-        for (int button = 0; button < SDL_GAMEPAD_BUTTON_COUNT; ++button) {
-            SDL_SetJoystickVirtualButton(joystick, button, false);
-        }
+        Relay().Publish({});
     }
 }
 
@@ -648,24 +726,25 @@ void OpenXRInput::Sync(XrTime predicted_display_time, const OpenXRPointerScreen&
     const auto injected = [&panel](const char* button) { return !panel.withheld && Injected(button); };
 
     if (m_joystick != nullptr) {
-        auto* joystick = static_cast<SDL_Joystick*>(m_joystick);
+        VirtualGamepadRelay::Pad pad;
         // OpenXR thumbsticks report +Y up; SDL gamepads report +Y down.
-        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTX, ToAxis(left.stick_x));
-        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTY, ToAxis(-left.stick_y));
-        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTX, ToAxis(right.stick_x));
-        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHTY, ToAxis(-right.stick_y));
-        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, ToTrigger(left.trigger));
-        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, ToTrigger(right.trigger));
+        pad.axes[SDL_GAMEPAD_AXIS_LEFTX] = ToAxis(left.stick_x);
+        pad.axes[SDL_GAMEPAD_AXIS_LEFTY] = ToAxis(-left.stick_y);
+        pad.axes[SDL_GAMEPAD_AXIS_RIGHTX] = ToAxis(right.stick_x);
+        pad.axes[SDL_GAMEPAD_AXIS_RIGHTY] = ToAxis(-right.stick_y);
+        pad.axes[SDL_GAMEPAD_AXIS_LEFT_TRIGGER] = ToTrigger(left.trigger);
+        pad.axes[SDL_GAMEPAD_AXIS_RIGHT_TRIGGER] = ToTrigger(right.trigger);
 
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_SOUTH, right.primary || injected("a"));
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_EAST, right.secondary || injected("b"));
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_WEST, left.primary || injected("x"));
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_NORTH, left.secondary || injected("y"));
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_START, left.menu || injected("start"));
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_LEFT_STICK, left.thumbstick_click);
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_RIGHT_STICK, right.thumbstick_click);
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, left.squeeze > 0.5f);
-        SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, right.squeeze > 0.5f);
+        pad.buttons[SDL_GAMEPAD_BUTTON_SOUTH] = right.primary || injected("a");
+        pad.buttons[SDL_GAMEPAD_BUTTON_EAST] = right.secondary || injected("b");
+        pad.buttons[SDL_GAMEPAD_BUTTON_WEST] = left.primary || injected("x");
+        pad.buttons[SDL_GAMEPAD_BUTTON_NORTH] = left.secondary || injected("y");
+        pad.buttons[SDL_GAMEPAD_BUTTON_START] = left.menu || injected("start");
+        pad.buttons[SDL_GAMEPAD_BUTTON_LEFT_STICK] = left.thumbstick_click;
+        pad.buttons[SDL_GAMEPAD_BUTTON_RIGHT_STICK] = right.thumbstick_click;
+        pad.buttons[SDL_GAMEPAD_BUTTON_LEFT_SHOULDER] = left.squeeze > 0.5f;
+        pad.buttons[SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER] = right.squeeze > 0.5f;
+        Relay().Publish(pad);
     }
 
     PublishWiiRemote(input_time, screen, game_hands, panel.withheld ? 0u : InjectedWiiRemoteButtons(),

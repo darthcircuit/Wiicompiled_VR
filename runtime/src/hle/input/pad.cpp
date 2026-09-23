@@ -4,6 +4,7 @@
 #include "input_bindings.h"
 #include "physical_wheel.h"
 #include "vr/mkw_vr_policy.h"
+#include "vr/openxr_integration.h"
 #include "wii_remote_input.h"
 
 #include <algorithm>
@@ -118,6 +119,9 @@ extern "C" uint32_t PAD__Read_HLE(uint32_t statusPtr)
     PADStatus statuses[PAD_CHANMAX]{};
     // Keep looking for a Bluetooth Wii Remote that dropped out (or was turned on late).
     WiiRemoteInput::Poll();
+    // The VR controllers the pacing thread published reach SDL here, on the
+    // thread that polls controllers, rather than from the pacing thread itself.
+    mkw::vr::OpenXRApplyControllerState();
     uint32_t rumbleMask = PADRead(statuses);
     // Wii Remotes reach the game through KPAD, not as GameCube pads. This also
     // applies while input is blocked (overlay open) so the port does not flip
