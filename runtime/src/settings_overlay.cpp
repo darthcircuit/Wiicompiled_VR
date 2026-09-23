@@ -207,15 +207,15 @@ int g_vrControllerMode = [] {
     return 0;
 }();
 constexpr std::array<const char*, 3> kVrFirstPersonRotationNames{"yaw", "yaw_pitch", "full"};
-int g_vrFirstPersonRotation = [] {
-    const std::string mode = RuntimeConfigFile::VrFirstPersonRotation();
+int VrFirstPersonRotationIndex(std::string_view mode) {
     for (size_t i = 0; i < kVrFirstPersonRotationNames.size(); ++i) {
         if (mode == kVrFirstPersonRotationNames[i]) {
             return static_cast<int>(i);
         }
     }
     return 0;
-}();
+}
+int g_vrFirstPersonRotation = VrFirstPersonRotationIndex(RuntimeConfigFile::VrFirstPersonRotation());
 // SDL_SCANCODE_UNKNOWN means unbound, which is also what an unrecognised
 // name in the config file resolves to rather than silently picking a key.
 SDL_Scancode g_vrRecenterScancode = [] {
@@ -1618,17 +1618,20 @@ void DrawVrSettings() {
         g_vrCockpitUnitsPerMeter = RuntimeConfigFile::kVrCockpitUnitsPerMeterDefault;
         g_vrSteeringWheel = RuntimeConfigFile::kVrSteeringWheelDefault;
         g_vrNativeSteeringWheel = RuntimeConfigFile::kVrNativeSteeringWheelDefault;
+        g_vrHandSteering = RuntimeConfigFile::kVrHandSteeringDefault;
         RuntimeConfigFile::SetVrFirstPersonSeat(RuntimeConfigFile::kVrFirstPersonSeatDefault);
         RuntimeConfigFile::SetVrCockpitUnitsPerMeter(g_vrCockpitUnitsPerMeter);
         RuntimeConfigFile::SetVrSteeringWheel(g_vrSteeringWheel);
         RuntimeConfigFile::SetVrNativeSteeringWheel(g_vrNativeSteeringWheel);
+        RuntimeConfigFile::SetVrHandSteering(g_vrHandSteering);
         g_vrFirstPersonUnitsPerMeter = RuntimeConfigFile::kVrFirstPersonUnitsPerMeterDefault;
         g_vrFirstPersonHeadUp = RuntimeConfigFile::kVrFirstPersonHeadUpDefault;
         g_vrFirstPersonHeadForward = RuntimeConfigFile::kVrFirstPersonHeadForwardDefault;
         g_vrFirstPersonHeadRight = RuntimeConfigFile::kVrFirstPersonHeadRightDefault;
         g_vrFirstPersonHideDriver = RuntimeConfigFile::kVrFirstPersonHideDriverDefault;
         g_vrFirstPersonHiddenModel = RuntimeConfigFile::kVrFirstPersonHiddenModelDefault;
-        g_vrFirstPersonRotation = 0;
+        g_vrFirstPersonRotation =
+            VrFirstPersonRotationIndex(RuntimeConfigFile::kVrFirstPersonRotationDefault);
         RuntimeConfigFile::SetVrFirstPersonRotation(
             RuntimeConfigFile::kVrFirstPersonRotationDefault);
         RuntimeConfigFile::SetVrFirstPersonUnitsPerMeter(g_vrFirstPersonUnitsPerMeter);

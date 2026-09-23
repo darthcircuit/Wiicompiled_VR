@@ -55,8 +55,8 @@ build, without CPU readback. Menus and
 unsupported scenes appear as a head-locked virtual screen; a validated single-camera race switches
 to immersive stereo rendering. VR is opt-in and falls back to the normal desktop renderer if the
 runtime or headset is unavailable. In first person you sit in the cockpit, where the steering wheel
-or handlebar turns with your steering, and optional hand steering by heurazy lets you grab it with
-the tracked controllers and turn it. See [`OPENXR.md`](OPENXR.md) for setup, configuration, and the
+or handlebar turns with your steering, and hand steering by heurazy lets you grab it with the
+tracked controllers and turn it. See [`OPENXR.md`](OPENXR.md) for setup, configuration, and the
 current limitations.
 
 **Music ducking.** 

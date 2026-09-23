@@ -57,10 +57,10 @@ first_person_head_forward_meters = 0.0
 first_person_head_right_meters = 0.0
 first_person_hide_driver = true
 first_person_hidden_model = 0
-first_person_rotation = "yaw"
+first_person_rotation = "yaw_pitch"
 steering_wheel = true
 native_steering_wheel = true
-hand_steering = false
+hand_steering = true
 performance_level = "boost"
 ```
 
@@ -349,15 +349,18 @@ own per-eye delta. The kart's *physics* pose is used deliberately, not the anima
 animated frame would bob and lurch the camera.
 
 `first_person_rotation` decides where the view's orientation comes from, mirroring DolphinXR's
-camera-anchor modes. `"yaw"`, the default, keeps the horizon level through a chase-camera tilt or a
-banked corner. `"yaw_pitch"` adds the kart's climb, so a slope or a wheelie tips the view while a
-banked corner still never rolls it. `"full"` takes the kart's whole orientation, banking included.
+camera-anchor modes. `"yaw"` keeps the horizon level through a chase-camera tilt or a banked corner.
+`"yaw_pitch"`, the default, adds the kart's climb, so a slope or a wheelie tips the view while a
+banked corner still never rolls it: sitting in the cockpit, the vehicle's own climb reads as the
+ground rising rather than as the view tipping. `"full"` takes the kart's whole orientation, banking included.
 All three are the same construction from a forward and an up axis, differing only in which pair
 they take: pairing a forward with world up is what removes roll. The headset always adds free look
 on top of whichever is chosen, and only the translation onto the head is common to all three.
 
 In the cockpit, `"yaw"` takes the kart's own driving direction rather than the chase camera's
-lagging heading, from the level seat frame. With the custom seat, the head's place in the kart is
+lagging heading, from the level seat frame, which also damps a damage spin. `"yaw_pitch"`, the
+default, and `"full"` take the kart's live orientation about that same seat, keeping only its
+stabilised position, so a wheelie, a slope or a spin moves the view with the vehicle. With the custom seat, the head's place in the kart is
 `first_person_head_up_meters` and its two companions, measured in the kart's own frame; the F10
 sliders exist because the comfortable value is a matter of taste and is best judged from inside the
 headset.
@@ -424,9 +427,10 @@ copied array, those that bound one outside the window it was set for, the matche
 closest position matrix was from the expected one; the first such line with a bound draw also prints
 both matrices.
 
-**Hand steering.** `hand_steering = true` (off by default; also in WheelWizard's OpenXR VR settings
-and the Quest launcher's Settings > VR, beside the seat)
-lets you take hold of the wheel or handlebar with the tracked controllers. Squeeze a grip near it:
+**Hand steering.** `hand_steering` (on by default, and in WheelWizard's OpenXR VR settings and the
+Quest launcher's Settings > VR, beside the seat)
+lets you take hold of the wheel or handlebar with the tracked controllers. It costs nothing until a
+grip actually takes hold: until then the stick steers as it always has. Squeeze a grip near it:
 past 55 % squeeze, within `wheel_grab_distance` metres of its plane (default 0.35) and near the rim,
 or near a bar end, scaled by `wheel_grab_assist`. Once taken, only letting go of the grip releases
 it. One hand steers by its angle around the hub; two hands steer by the line between them, so leaning

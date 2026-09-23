@@ -201,8 +201,10 @@ inline constexpr float kVrFirstPersonHeadRightDefault = 0.0f;
 inline constexpr bool kVrFirstPersonHideDriverDefault = true;
 inline constexpr int32_t kVrFirstPersonHiddenModelDefault = 0;
 inline constexpr float kVrFirstPersonHeadOffsetLimit = 10.0f;
-// "yaw", "yaw_pitch" or "full", matching FirstPersonRotation.
-inline constexpr const char* kVrFirstPersonRotationDefault = "yaw";
+// "yaw", "yaw_pitch" or "full", matching FirstPersonRotation. The cockpit seat
+// is the first-person default, and sitting in the vehicle reads better with its
+// climb than with a level horizon, so "yaw_pitch" is the default anchor.
+inline constexpr const char* kVrFirstPersonRotationDefault = "yaw_pitch";
 
 inline bool IsSupportedVrFirstPersonRotation(std::string_view value) {
     return value == "yaw" || value == "yaw_pitch" || value == "full";
@@ -221,11 +223,12 @@ inline constexpr float kVrCockpitUnitsPerMeterMax = 400.0f;
 // The vehicle's steering wheel or handlebar turns with the steering; the
 // vehicle's own model is animated unless native_steering_wheel is off, which
 // draws a separate VR wheel instead. Hand steering (grabbing that wheel with
-// the tracked controllers, by heurazy) is opt-in. The WheelWizard VR launcher
-// registers hand_steering with this same default.
+// the tracked controllers, by heurazy) comes with it: the stick still steers
+// until a grip actually takes hold of the wheel. Both launchers register
+// hand_steering with this same default.
 inline constexpr bool kVrSteeringWheelDefault = true;
 inline constexpr bool kVrNativeSteeringWheelDefault = true;
-inline constexpr bool kVrHandSteeringDefault = false;
+inline constexpr bool kVrHandSteeringDefault = true;
 // Hand steering tuning ranges; the defaults are mkw::vr::WheelTuning's.
 inline constexpr float kVrWheelDegreesMin = 20.0f, kVrWheelDegreesMax = 180.0f;
 inline constexpr float kVrWheelGrabDistanceMin = 0.15f, kVrWheelGrabDistanceMax = 0.8f;
@@ -531,7 +534,7 @@ inline void EnsureConfigFile() {
               "# Where the view's orientation comes from: \"yaw\" levels the\n"
               "# horizon, \"yaw_pitch\" adds the kart's climb but no roll, and\n"
               "# \"full\" takes the kart's whole orientation so the view banks.\n"
-              "first_person_rotation = \"yaw\"\n"
+              "first_person_rotation = \"yaw_pitch\"\n"
               "# In the cockpit the vehicle's steering wheel or handlebar turns\n"
               "# with the steering. native_steering_wheel animates the vehicle's\n"
               "# own model; false draws a separate VR wheel instead.\n"
@@ -545,7 +548,7 @@ inline void EnsureConfigFile() {
               "# the wheel, how quickly the wheel follows the hands, how long\n"
               "# (seconds) a hand that loses tracking keeps hold, and a short\n"
               "# pulse on grab and release. All changeable live from the F10 menu.\n"
-              "hand_steering = false\n"
+              "hand_steering = true\n"
               "wheel_kart_degrees = 90.0\n"
               "wheel_bike_degrees = 45.0\n"
               "wheel_grab_distance = 0.35\n"

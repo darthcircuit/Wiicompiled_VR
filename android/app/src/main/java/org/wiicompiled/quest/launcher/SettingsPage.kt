@@ -127,7 +127,7 @@ class SettingsPage(
             choice(
                 R.string.vr_rotation, R.string.vr_rotation_helper,
                 listOf(R.string.vr_rotation_yaw, R.string.vr_rotation_yaw_pitch, R.string.vr_rotation_full),
-                read = { stringIndex(it, "vr", "first_person_rotation", ROTATIONS) },
+                read = { stringIndex(it, "vr", "first_person_rotation", ROTATIONS, ROTATION_DEFAULT) },
                 write = { c, index -> c.setString("vr", "first_person_rotation", ROTATIONS[index]) },
                 enabledIf = firstPerson,
             )
@@ -160,10 +160,10 @@ class SettingsPage(
                 write = { c, index -> c.setString("vr", "first_person_seat", SEATS[index]) },
                 enabledIf = firstPerson,
             )
-            // heurazy's grab-and-turn wheel: runtime_config.h's kVrHandSteeringDefault is off.
+            // heurazy's grab-and-turn wheel: runtime_config.h's kVrHandSteeringDefault is on.
             toggle(
                 R.string.vr_hand_steering, R.string.vr_hand_steering_helper,
-                read = { it.bool("vr", "hand_steering") ?: false },
+                read = { it.bool("vr", "hand_steering") ?: true },
                 write = { c, value -> c.setBool("vr", "hand_steering", value) },
                 enabledIf = cockpit,
             )
@@ -703,6 +703,9 @@ class SettingsPage(
 
     private companion object {
         val ROTATIONS = listOf("yaw", "yaw_pitch", "full")
+
+        /** runtime_config.h's kVrFirstPersonRotationDefault. */
+        val ROTATION_DEFAULT = ROTATIONS.indexOf("yaw_pitch")
         // The runtime's default ("cockpit") first.
         val SEATS = listOf("cockpit", "custom")
         // The runtime's default ("boost") first: an absent key reads as index 0.
@@ -726,8 +729,9 @@ class SettingsPage(
             config.number(section, key)?.takeIf { it in min..max } ?: default
 
         /** Unrecognised strings fall back to the first (default) option, as in the runtime. */
-        fun stringIndex(config: TomlConfig, section: String, key: String, values: List<String>): Int =
-            values.indexOf(config.string(section, key)).coerceAtLeast(0)
+        fun stringIndex(config: TomlConfig, section: String, key: String, values: List<String>,
+                        default: Int = 0): Int =
+            values.indexOf(config.string(section, key)).takeIf { it >= 0 } ?: default
 
         fun resolution(config: TomlConfig): Double =
             config.number("video", "resolution_multiplier")?.takeIf { it in SUPPORTED_RESOLUTIONS } ?: 1.0
