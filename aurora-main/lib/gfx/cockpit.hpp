@@ -210,7 +210,7 @@ struct SceneDepth {
 };
 inline uint32_t pipelineSamples=0;
 inline bool pipelineReversedDepth=false;
-inline wgpu::TextureFormat pipelineFormat{};
+inline wgpu::TextureFormat pipelineFormat{}, pipelineDepthFormat{};
 inline std::array<wgpu::Buffer,2> vertexBuffers;
 inline std::array<uint64_t,2> vertexCapacity{};
 inline void shutdown() { pipeline=nullptr;pipelineSamples=0;vertexBuffers={};vertexCapacity={};cachedMeshRevision=0;frameVertices.clear(); }
@@ -223,7 +223,7 @@ inline void render(wgpu::CommandEncoder& cmd,const StereoReplayFrame& frame,uint
   // The guest can reverse its viewport depth independently of Aurora's
   // global reversed-Z convention. The final 1/d coefficient is authoritative.
   const bool reversedDepth=sceneDepth.constant>0;
-  if(!pipeline||pipelineSamples!=target.msaaSamples||pipelineFormat!=format||pipelineReversedDepth!=reversedDepth) {
+  if(!pipeline||pipelineSamples!=target.msaaSamples||pipelineFormat!=format||pipelineReversedDepth!=reversedDepth||pipelineDepthFormat!=target.depthFormat) {
     wgpu::ShaderSourceWGSL source{};
     source.code=R"(
       struct Out { @builtin(position) position: vec4f, @location(0) color: vec3f };
@@ -239,14 +239,18 @@ inline void render(wgpu::CommandEncoder& cmd,const StereoReplayFrame& frame,uint
     const wgpu::VertexBufferLayout layout{.arrayStride=28,.attributeCount=2,.attributes=attrs};
     const wgpu::ColorTargetState color{.format=format};
     const wgpu::FragmentState fragment{.module=shader,.entryPoint="fs",.targetCount=1,.targets=&color};
-    const wgpu::DepthStencilState depth{.format=g_graphicsConfig.depthFormat,.depthWriteEnabled=true,
-      .depthCompare=reversedDepth?wgpu::CompareFunction::GreaterEqual:wgpu::CompareFunction::LessEqual};
+    const bool stencil=target.depthFormat==wgpu::TextureFormat::Depth24PlusStencil8;
+    const wgpu::StencilFaceState mark{.compare=wgpu::CompareFunction::Always,
+      .passOp=stencil?wgpu::StencilOperation::Replace:wgpu::StencilOperation::Keep};
+    const wgpu::DepthStencilState depth{.format=target.depthFormat,.depthWriteEnabled=true,
+      .depthCompare=reversedDepth?wgpu::CompareFunction::GreaterEqual:wgpu::CompareFunction::LessEqual,
+      .stencilFront=mark,.stencilBack=mark,.stencilReadMask=1,.stencilWriteMask=stencil?1u:0u};
     wgpu::RenderPipelineDescriptor desc{};desc.label="VR cockpit";
     desc.vertex={.module=shader,.entryPoint="vs",.bufferCount=1,.buffers=&layout};
     desc.fragment=&fragment;desc.depthStencil=&depth;desc.multisample.count=target.msaaSamples;
     desc.primitive.topology=wgpu::PrimitiveTopology::TriangleList;
     pipeline=g_device.CreateRenderPipeline(&desc);pipelineSamples=target.msaaSamples;pipelineFormat=format;
-    pipelineReversedDepth=reversedDepth;
+    pipelineReversedDepth=reversedDepth;pipelineDepthFormat=target.depthFormat;
   }
   const auto revision=meshRevision.load();
   if(cachedMeshRevision!=revision || std::memcmp(&cachedCockpit,&frame.cockpit,sizeof(AuroraCockpit))!=0) {
@@ -279,12 +283,17 @@ inline void render(wgpu::CommandEncoder& cmd,const StereoReplayFrame& frame,uint
   const wgpu::RenderPassColorAttachment attachment{.view=target.colorView,.resolveTarget=target.resolveView,
     .loadOp=wgpu::LoadOp::Load,.storeOp=wgpu::StoreOp::Store};
   const wgpu::RenderPassDepthStencilAttachment depth{.view=target.depthView,.depthLoadOp=wgpu::LoadOp::Load,
-    .depthStoreOp=wgpu::StoreOp::Store,.depthClearValue=1.0f};
+    .depthStoreOp=wgpu::StoreOp::Store,.depthClearValue=1.0f,
+    .stencilLoadOp=target.depthFormat==wgpu::TextureFormat::Depth24PlusStencil8?wgpu::LoadOp::Load:wgpu::LoadOp::Undefined,
+    .stencilStoreOp=target.depthFormat==wgpu::TextureFormat::Depth24PlusStencil8?wgpu::StoreOp::Store:wgpu::StoreOp::Undefined};
   const wgpu::RenderPassDescriptor pd{.label="VR cockpit overlay",.colorAttachmentCount=1,.colorAttachments=&attachment,.depthStencilAttachment=&depth};
   auto pass=existingPass?*existingPass:cmd.BeginRenderPass(&pd);
   pass.SetViewport(0,0,float(target.size.width),float(target.size.height),0,1);
   pass.SetScissorRect(0,0,target.size.width,target.size.height);
+  // Mark only depth-visible samples; later virtual-screen draws test for zero.
+  pass.SetStencilReference(1);
   pass.SetPipeline(pipeline);pass.SetVertexBuffer(0,buffer);pass.Draw(clip.size());
+  pass.SetStencilReference(0);
   if(!existingPass) pass.End();
 }
 } // namespace aurora::gfx::cockpit

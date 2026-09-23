@@ -633,7 +633,7 @@ void ensure_stereo_eye_target(uint32_t eyeIndex, uint32_t width, uint32_t height
   const uint32_t samples = webgpu::g_graphicsConfig.msaaSamples;
   if (target.color.texture && target.requestedWidth == width && target.requestedHeight == height &&
       target.samples == samples && target.colorFormat == webgpu::g_graphicsConfig.surfaceConfiguration.format &&
-      target.depthFormat == webgpu::g_graphicsConfig.depthFormat) {
+      target.depthFormat == wgpu::TextureFormat::Depth24PlusStencil8) {
     return;
   }
 
@@ -643,19 +643,21 @@ void ensure_stereo_eye_target(uint32_t eyeIndex, uint32_t width, uint32_t height
     target.resolvedColor = webgpu::create_render_texture(target.color.size.width, target.color.size.height, false);
   }
 
+  // The cockpit uses one stencil bit to survive later depth-disabled HUD draws.
+  // Keep this attachment eye-only; native EFB depth sampling is unchanged.
   const wgpu::TextureDescriptor depthDescriptor{
       .label = eyeIndex == 0 ? "Stereo left eye depth" : "Stereo right eye depth",
       .usage = wgpu::TextureUsage::RenderAttachment,
       .dimension = wgpu::TextureDimension::e2D,
       .size = target.color.size,
-      .format = webgpu::g_graphicsConfig.depthFormat,
+      .format = wgpu::TextureFormat::Depth24PlusStencil8,
       .mipLevelCount = 1,
       .sampleCount = samples,
   };
   target.depth.texture = g_device.CreateTexture(&depthDescriptor);
   target.depth.view = target.depth.texture.CreateView();
   target.depth.size = target.color.size;
-  target.depth.format = webgpu::g_graphicsConfig.depthFormat;
+  target.depth.format = wgpu::TextureFormat::Depth24PlusStencil8;
   target.requestedWidth = width;
   target.requestedHeight = height;
   target.samples = samples;
@@ -768,6 +770,7 @@ gfx::StereoReplayFrame make_stereo_replay_frame(const AuroraStereoFrame& input, 
         .copySourceDepthView = owned.depth.view,
         .size = owned.color.size,
         .msaaSamples = webgpu::g_graphicsConfig.msaaSamples,
+        .depthFormat = owned.depth.format,
     };
     std::memcpy(&view.projection, input.eyes[eye].projection, sizeof(view.projection));
     std::memcpy(&view.viewFromCenter, input.eyes[eye].viewFromCenter, sizeof(view.viewFromCenter));

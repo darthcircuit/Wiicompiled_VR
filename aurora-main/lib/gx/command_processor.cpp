@@ -2206,6 +2206,10 @@ static ArrayRef<u16> offset_index_template(const CachedIndexTemplate& indexTempl
 
 struct CachedPipelineState {
   gfx::PipelineRef ref = 0;
+  const PipelineConfig* config = nullptr;
+  mutable gfx::PipelineRef stereoRef = 0;
+  mutable gfx::PipelineRef screenRef = 0;
+  mutable gfx::PipelineRef stereoScreenRef = 0;
   HashType configHash = 0;
   // Carried here so the draw can be recorded without keeping the PipelineConfig that produced it alive; it is the only
   // field of the config the draw itself still needs.
@@ -2231,6 +2235,7 @@ static const CachedPipelineState& cached_pipeline_state(const PipelineConfig& co
   entry.config = config;
   entry.state = {
       .ref = gfx::pipeline_ref(config),
+      .config = &entry.config,
       .configHash = hash,
       .dstAlpha = config.dstAlpha,
       .shaderInfo = build_shader_info(config.shaderConfig),
@@ -2273,37 +2278,20 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
   return state;
 }
 
-// Exact Screen Depth changes shader outputs but no GX pipeline state. Resolve a
-// sibling pipeline only for orthographic draws that can actually reach the VR
-// screen, and memoize it with the same state epoch as the ordinary pipeline.
-static gfx::PipelineRef resolve_exact_screen_depth_pipeline(GXPrimitive prim, GXVtxFmt fmt) {
-  struct Memo {
-    gfx::PipelineRef ref = 0;
-    u32 generation = 0;
-    u32 sampleCount = 0;
-    GXPrimitive prim = static_cast<GXPrimitive>(0);
-    GXVtxFmt fmt = static_cast<GXVtxFmt>(0);
-  };
-  static Memo memo{};
-
-  const u32 sampleCount = gfx::get_sample_count();
-  const u32 generation = g_gxState.pipelineStateGeneration;
-  if (memo.ref != 0 && memo.generation == generation && memo.sampleCount == sampleCount && memo.prim == prim &&
-      memo.fmt == fmt)
-    LIKELY { return memo.ref; }
-
-  PipelineConfig config{};
-  populate_pipeline_config(config, prim, fmt);
-  config.shaderConfig.exactScreenDepth = 1;
-  const gfx::PipelineRef ref = gfx::pipeline_ref(config);
-  memo = Memo{
-      .ref = ref,
-      .generation = generation,
-      .sampleCount = sampleCount,
-      .prim = prim,
-      .fmt = fmt,
-  };
-  return ref;
+// Lazily cache eye-format siblings alongside the ordinary pipeline. Steady-state
+// draws only read the refs: no extra config population/hashing on the Quest CPU.
+// Shader modules are shared by the depth-format variants.
+static void resolve_replay_pipelines(const CachedPipelineState& state, bool screen) {
+  if (state.stereoRef && (!screen || state.stereoScreenRef)) return;
+  PipelineConfig config = *state.config;
+  config.stereoStencil = 1;
+  if (!state.stereoRef) state.stereoRef = gfx::pipeline_ref(config);
+  if (screen && !state.stereoScreenRef) {
+    config.shaderConfig.exactScreenDepth = 1;
+    state.stereoScreenRef = gfx::pipeline_ref(config);
+    config.stereoStencil = 0;
+    state.screenRef = gfx::pipeline_ref(config);
+  }
 }
 
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount, uint32_t vertexBytes) {
@@ -2508,10 +2496,9 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
   const bool perspective = g_gxState.projType == GX_PERSPECTIVE;
   const auto uniformRanges = build_uniform(info, vertRange.offset, ranges, drawIdentity, perspective, usedPnMtxMask);
   const auto& replayLayout = uniformRanges.replayLayout;
-  const gfx::PipelineRef exactScreenDepthPipeline =
-      aurora::stereo_frame_provider_active() && !replayLayout.perspective && !replayLayout.nativeEfbEffect
-          ? resolve_exact_screen_depth_pipeline(prim, fmt)
-          : 0;
+  const bool stereo = aurora::stereo_frame_provider_active();
+  const bool screen = !replayLayout.perspective && !replayLayout.nativeEfbEffect;
+  if (stereo) resolve_replay_pipelines(pipelineState, screen);
   s_lastDrawRecordedInterpolation = interpolationIdentityActive;
 
   uint32_t instanceCount = 1;
@@ -2524,7 +2511,9 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
   }
   gfx::push_draw_command(DrawData{
       .pipeline = pipeline,
-      .exactScreenDepthPipeline = exactScreenDepthPipeline,
+      .exactScreenDepthPipeline = stereo && screen ? pipelineState.screenRef : 0,
+      .stereoPipeline = stereo ? pipelineState.stereoRef : 0,
+      .stereoScreenPipeline = stereo && screen ? pipelineState.stereoScreenRef : 0,
       .vertRange = vertRange,
       .idxRange = idxRange,
       .uniformRange = uniformRanges.current,

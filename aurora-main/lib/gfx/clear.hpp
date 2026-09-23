@@ -7,6 +7,7 @@
 namespace aurora::gfx::clear {
 struct DrawData {
   PipelineRef pipeline;
+  PipelineRef stereoPipeline = 0;
   Range uniformRange;
   wgpu::Color color;
   float depth = 0.f;
@@ -18,14 +19,14 @@ struct DrawData {
   ClipRect scissor{};
 };
 
-constexpr uint32_t ClearPipelineConfigVersion = 3;
+constexpr uint32_t ClearPipelineConfigVersion = 4;
 struct PipelineConfig {
   uint32_t version = ClearPipelineConfigVersion;
   uint32_t msaaSamples = 1;
   bool clearColor = true;
   bool clearAlpha = true;
   bool clearDepth = true;
-  uint8_t _pad = 0;
+  bool stereoStencil = false;
 };
 static_assert(std::has_unique_object_representations_v<PipelineConfig>);
 

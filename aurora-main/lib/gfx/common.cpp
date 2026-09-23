@@ -737,6 +737,13 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
             .clearAlpha = clearAlpha,
             .clearDepth = clearDepth,
         }),
+        .stereoPipeline = aurora::stereo_frame_provider_active() ? pipeline_ref(clear::PipelineConfig{
+            .msaaSamples = msaaSamples,
+            .clearColor = clearColor,
+            .clearAlpha = clearAlpha,
+            .clearDepth = clearDepth,
+            .stereoStencil = true,
+        }) : 0,
         .color =
             wgpu::Color{
                 .r = clearColorValue.x(),
@@ -1769,6 +1776,9 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
   ZoneScoped;
   // Palette conversions, MSAA resolves and EFB copies depend on sealed frame state, not on the
   // interpolation weight, so encode them on the native render and let replay slots sample them.
+  // Eye textures are reused; discard the previous frame's mask, then retain it
+  // across guest passes even if the HUD clears or replaces guest depth.
+  bool stencilInitialized = false;
   for (u32 i = 0; i < renderPasses.size(); ++i) {
     const auto& passInfo = renderPasses[i];
     if (invocation.replayLastPass >= 0 && i > static_cast<u32>(invocation.replayLastPass)) {
@@ -1821,11 +1831,16 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
                 },
         },
     };
+    const bool stereoStencil = overrideTarget &&
+        invocation.target->depthFormat == wgpu::TextureFormat::Depth24PlusStencil8;
     const wgpu::RenderPassDepthStencilAttachment depthStencilAttachment{
         .view = depthView,
         .depthLoadOp = passInfo.clearDepth && !dropCopyClear ? wgpu::LoadOp::Clear : wgpu::LoadOp::Load,
         .depthStoreOp = wgpu::StoreOp::Store,
         .depthClearValue = passInfo.clearDepthValue,
+        .stencilLoadOp = stereoStencil ? (stencilInitialized ? wgpu::LoadOp::Load : wgpu::LoadOp::Clear) : wgpu::LoadOp::Undefined,
+        .stencilStoreOp = stereoStencil ? wgpu::StoreOp::Store : wgpu::StoreOp::Undefined,
+        .stencilClearValue = 0,
     };
     const GpuTimingCategory timingCategory = invocation.stereoEye == 0     ? GpuTimingCategory::EyeLeft
                                              : invocation.stereoEye == 1   ? GpuTimingCategory::EyeRight
@@ -1839,6 +1854,7 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
         .timestampWrites = gpu_timing_pass(timingCategory),
     };
 
+    if (stereoStencil) stencilInitialized = true;
     auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
     render_pass_impl(pass, renderPasses, i, invocation);
     pass.End();
@@ -2500,8 +2516,8 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
                    draw.gx.interpolatedUniformRanges[invocation.interpolatedFrame].size != 0) {
           uniformOverride = &draw.gx.interpolatedUniformRanges[invocation.interpolatedFrame];
         }
-        // Draw the VR cockpit against the world's depth before the first HUD
-        // draw can write a screen-plane depth over it, inside this open pass.
+        // Draw against world depth and mark visible cockpit samples before HUD
+        // depth replaces it. The screen pipelines reject those stencil samples.
         if (invocation.cockpitFrame != nullptr && overrideTarget) {
           if (draw.gx.uniformReplayLayout.perspective) {
             *invocation.sceneDrawn = true;
@@ -2535,10 +2551,15 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
           apply_viewport(fullEyeDraw);
         }
         gx::render(draw.gx, pass, encodeState, renderPasses[idx].requireReadyPipelines, uniformOverride,
-                   virtualScreenDraw ? draw.gx.exactScreenDepthPipeline : 0);
+                   overrideTarget && invocation.target->depthFormat == wgpu::TextureFormat::Depth24PlusStencil8
+                       ? (virtualScreenDraw ? draw.gx.stereoScreenPipeline : draw.gx.stereoPipeline)
+                       : (virtualScreenDraw ? draw.gx.exactScreenDepthPipeline : 0));
       } break;
       case ShaderType::Clear: {
         auto clearDraw = draw.clear;
+        if (overrideTarget && invocation.target->depthFormat == wgpu::TextureFormat::Depth24PlusStencil8) {
+          clearDraw.pipeline = clearDraw.stereoPipeline;
+        }
         if (multiplayer) {
           const auto& sc = clearDraw.scissor;
           if (clearDraw.copyClear ||

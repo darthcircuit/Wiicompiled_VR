@@ -291,6 +291,7 @@ struct ReplayTarget {
   wgpu::TextureView copySourceDepthView;
   wgpu::Extent3D size{};
   uint32_t msaaSamples = 1;
+  wgpu::TextureFormat depthFormat = wgpu::TextureFormat::Depth32Float;
 };
 
 struct StereoReplayEye {

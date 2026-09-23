@@ -1609,10 +1609,18 @@ static inline wgpu::PrimitiveState to_primitive_state(GXCullMode gx_cullMode) {
 wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
                                     wgpu::ShaderModule shader, const char* label) noexcept {
   ZoneScoped;
+  const bool maskCockpit = config.stereoStencil && config.shaderConfig.exactScreenDepth;
+  const wgpu::StencilFaceState stencil{
+      .compare = maskCockpit ? wgpu::CompareFunction::Equal : wgpu::CompareFunction::Always,
+  };
   const wgpu::DepthStencilState depthStencil{
-      .format = g_graphicsConfig.depthFormat,
+      .format = config.stereoStencil ? wgpu::TextureFormat::Depth24PlusStencil8 : g_graphicsConfig.depthFormat,
       .depthWriteEnabled = config.depthUpdate,
       .depthCompare = config.depthCompare ? to_compare_function(config.depthFunc) : wgpu::CompareFunction::Always,
+      .stencilFront = stencil,
+      .stencilBack = stencil,
+      .stencilReadMask = 1,
+      .stencilWriteMask = 0,
   };
   const auto blendState = to_blend_state(config.blendMode, config.blendFacSrc, config.blendFacDst, config.blendOp,
                                          config.pixelFmt, config.dstAlpha);

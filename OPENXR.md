@@ -471,8 +471,13 @@ offers that mesh without the app declaring hand tracking, and the log says which
 joint's own X, on both hands. They and the
 separate VR wheel or handlebar travel with the stereo packet in metres in the seated frame, and each
 eye draws them inside the scene's pass just before the first 2D-layer draw, depth-tested with the
-world's own depth mapping, so the kart and the track hide them and the HUD cannot
-(`aurora-main/lib/gfx/cockpit.hpp`). The anchor also carries the frame's exact world scale
+world's own depth mapping, so the kart and the track hide them. Visible cockpit samples
+also mark one stencil bit; virtual-screen draws test that bit for zero, so even depth-disabled
+HUD elements and black screen effects cannot paint over the hands. Only stereo eye targets
+use `Depth24PlusStencil8`; desktop/EFB depth stays unchanged. The mask is cleared once per
+eye replay and retained across its passes. This adds no draw, full-screen copy, or render pass;
+eye-format pipeline siblings share shader modules and are cached when recording the game
+frame (`aurora-main/lib/gfx/cockpit.hpp`). The anchor also carries the frame's exact world scale
 (`aurora_set_stereo_scene_anchor_scaled`), and Aurora rescales each eye's head translation to it, so
 a scale change between the XR packet and the frame cannot misplace the hands.
 

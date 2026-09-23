@@ -11,6 +11,9 @@ struct DrawData {
   // Same GX state with exact fragment-depth export enabled. Bound only when
   // this draw is actually reprojected onto the VR virtual screen.
   gfx::PipelineRef exactScreenDepthPipeline;
+  // Eye depth/stencil format siblings. Shader modules are shared with mono.
+  gfx::PipelineRef stereoPipeline = 0;
+  gfx::PipelineRef stereoScreenPipeline = 0;
   gfx::Range vertRange;
   gfx::Range idxRange;
   gfx::Range uniformRange;
@@ -29,7 +32,7 @@ struct DrawData {
   std::optional<gfx::stereo_replay::SubviewRect> screenRect;
 };
 
-constexpr uint32_t GXPipelineConfigVersion = 20;
+constexpr uint32_t GXPipelineConfigVersion = 21;
 
 constexpr GXFogType effective_pipeline_fog_type(GXFogType fogType, GXZTexOp zTextureOp, bool zCompLocBeforeTex,
                                                 GXBlendMode blendMode, GXLogicOp logicOp) noexcept {
@@ -41,6 +44,7 @@ constexpr GXFogType effective_pipeline_fog_type(GXFogType fogType, GXZTexOp zTex
 struct PipelineConfig {
   uint32_t version = GXPipelineConfigVersion;
   uint32_t msaaSamples = 1;
+  uint32_t stereoStencil = 0;
   ShaderConfig shaderConfig;
   GXCompare depthFunc;
   GXCullMode cullMode;
@@ -61,7 +65,7 @@ inline bool valid_pipeline_config(const PipelineConfig& config) noexcept {
   };
   const bool validSamples =
       config.msaaSamples == 1 || config.msaaSamples == 2 || config.msaaSamples == 4 || config.msaaSamples == 8;
-  return config.version == GXPipelineConfigVersion && validSamples && in_range(config.depthFunc, GX_ALWAYS) &&
+  return config.version == GXPipelineConfigVersion && validSamples && config.stereoStencil <= 1 && in_range(config.depthFunc, GX_ALWAYS) &&
          in_range(config.cullMode, GX_CULL_ALL) && in_range(config.blendMode, GX_BM_SUBTRACT) &&
          in_range(config.blendFacSrc, GX_BL_INVDSTALPHA) && in_range(config.blendFacDst, GX_BL_INVDSTALPHA) &&
          in_range(config.blendOp, GX_LO_SET) && in_range(config.pixelFmt, GX_PF_YUV420);
