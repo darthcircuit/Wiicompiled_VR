@@ -454,7 +454,7 @@ inline void EnsureConfigFile() {
               "graphics_api = \"auto\"\n"
               "skip_unready_pipelines = true\n"
               "disable_copy_filter = true\n"
-              "show_fps = true\n"
+              "show_fps = false\n"
               "# Run the host side of the GX pipeline (state tracking, FIFO parsing,\n"
               "# texture uploads) on its own thread. On by default on the Quest, where\n"
               "# the game thread is the bottleneck; opt-in elsewhere.\n"
@@ -1472,7 +1472,8 @@ inline bool DisableCopyFilter(bool fallback = true) {
     return Get().disableCopyFilter.value_or(fallback);
 }
 
-inline bool ShowFps(bool fallback = true) {
+// The counter is a diagnostic, so it starts off and the F10 bar turns it on.
+inline bool ShowFps(bool fallback = false) {
     return Get().showFps.value_or(fallback);
 }
 

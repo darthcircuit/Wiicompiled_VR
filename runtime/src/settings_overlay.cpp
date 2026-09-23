@@ -134,7 +134,7 @@ int g_displayMode = [] {
 }();
 bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
 bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
-bool g_showFps = RuntimeConfigFile::ShowFps(true);
+bool g_showFps = RuntimeConfigFile::ShowFps();
 // The same default the VR path itself takes (kVrEnabledDefault), so the F10 switch
 // shows what an unconfigured installation actually starts in.
 bool g_vrEnabled = RuntimeConfigFile::VrEnabled(true);
